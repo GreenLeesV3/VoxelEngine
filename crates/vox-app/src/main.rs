@@ -7,10 +7,6 @@ use vox_render::{Gpu, RenderError};
 use winit::keyboard::KeyCode;
 use winit::window::Window;
 
-/// Fixed physics timestep in seconds (60 Hz). Moves to vox-core in Task 3;
-/// vox-platform takes it as a parameter by design.
-const FIXED_DT: f32 = 1.0 / 60.0;
-
 /// Sky-blue clear color (linear-space RGBA).
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.45,
@@ -103,6 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    run_app(FIXED_DT, |window| Ok(Box::new(VoxApp::new(window)?)))?;
+    run_app(vox_core::consts::PHYSICS_DT, |window| {
+        Ok(Box::new(VoxApp::new(window)?))
+    })?;
     Ok(())
 }
