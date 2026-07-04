@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
-use vox_platform::{App, FrameTiming, InputState, run_app};
+use vox_platform::{App, FrameControl, FrameTiming, InputState, run_app};
 use vox_render::{Gpu, RenderError};
+use winit::keyboard::KeyCode;
 use winit::window::Window;
 
 /// Fixed physics timestep in seconds (60 Hz). Moves to vox-core in Task 3;
@@ -32,14 +33,22 @@ impl VoxApp {
 }
 
 impl App for VoxApp {
-    fn frame(&mut self, _input: &mut InputState, _timing: FrameTiming) {
+    fn frame(&mut self, input: &mut InputState, _timing: FrameTiming) -> FrameControl {
+        if input.key_pressed(KeyCode::Escape) {
+            return FrameControl::Exit;
+        }
+
         let frame = match self.gpu.begin_frame() {
             Ok(frame) => frame,
-            Err(err) => {
+            Err(err) if err.is_transient() => {
                 // Lost/Outdated surfaces were already reconfigured inside
                 // begin_frame; just skip this frame.
-                tracing::warn!(error = %err, "skipping frame");
-                return;
+                tracing::warn!(error = %err, "transient surface error; skipping frame");
+                return FrameControl::Continue;
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "fatal render error; shutting down");
+                return FrameControl::Exit;
             }
         };
 
@@ -74,6 +83,7 @@ impl App for VoxApp {
         }
         self.gpu.queue().submit([encoder.finish()]);
         frame.present();
+        FrameControl::Continue
     }
 
     fn resize(&mut self, width: u32, height: u32) {

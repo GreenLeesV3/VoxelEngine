@@ -33,3 +33,23 @@ pub enum RenderError {
     #[error("failed to acquire frame from surface: {0}")]
     AcquireFrame(#[from] wgpu::SurfaceError),
 }
+
+impl RenderError {
+    /// True if the error is expected to clear on a following frame, so the
+    /// caller should skip this frame and keep running.
+    ///
+    /// Transient: frame acquisition hiccups — `Lost`/`Outdated` (surface was
+    /// reconfigured internally) and `Timeout` (compositor stall; retrying is
+    /// the standard response). Everything else — initialization failures and
+    /// `OutOfMemory` — is fatal and the caller should shut down.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::AcquireFrame(
+                wgpu::SurfaceError::Lost
+                    | wgpu::SurfaceError::Outdated
+                    | wgpu::SurfaceError::Timeout
+            )
+        )
+    }
+}

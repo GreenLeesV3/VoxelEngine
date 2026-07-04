@@ -68,6 +68,11 @@ impl Gpu {
             .find(|format| format.is_srgb())
             .or_else(|| caps.formats.first().copied())
             .ok_or(RenderError::NoSurfaceFormat)?;
+        tracing::info!(
+            format = ?format,
+            srgb = format.is_srgb(),
+            "surface format selected"
+        );
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -97,9 +102,13 @@ impl Gpu {
     }
 
     /// Resize the surface and depth buffer to the new inner size in physical
-    /// pixels. Zero-sized dimensions (minimized window) are ignored.
+    /// pixels. Zero-sized dimensions (minimized window) and no-op size
+    /// changes are ignored.
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
+            return;
+        }
+        if width == self.config.width && height == self.config.height {
             return;
         }
         self.config.width = width;
@@ -122,7 +131,9 @@ impl Gpu {
                 Ok(Frame { texture, view })
             }
             Err(err @ (wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated)) => {
-                tracing::warn!(error = %err, "surface lost/outdated; reconfigured, skipping frame");
+                // debug, not warn: this fires per-frame during transient
+                // storms (resize bursts); the caller decides what to surface.
+                tracing::debug!(error = %err, "surface lost/outdated; reconfigured, skipping frame");
                 self.surface.configure(&self.device, &self.config);
                 Err(RenderError::AcquireFrame(err))
             }

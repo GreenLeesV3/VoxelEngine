@@ -5,6 +5,11 @@
 //! from the window (builder pattern, because GPU setup needs the window
 //! before the loop starts). The fixed timestep is injected by the caller so
 //! this crate stays independent of vox-core.
+//!
+//! The platform never interprets gameplay input: all keys (including
+//! Escape) flow through [`App::window_event`] and [`InputState`]; the app
+//! requests shutdown by returning [`FrameControl::Exit`] from
+//! [`App::frame`].
 
 pub mod input;
 pub mod time;
@@ -15,24 +20,39 @@ pub use time::{FrameClock, FrameTiming};
 use std::sync::Arc;
 
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, Event, KeyEvent, WindowEvent};
+use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowBuilder};
 
 /// Environment variable for mechanized smoke testing: when set to a frame
-/// count `N`, the loop exits cleanly after presenting `N` frames.
+/// count `N >= 1`, the loop exits cleanly after presenting `N` frames.
+/// Zero or non-numeric values are rejected with a warning and disable the
+/// hook.
 pub const SMOKE_FRAMES_ENV: &str = "VOX_SMOKE_FRAMES";
 
 /// Initial window inner size in logical pixels.
 const WINDOW_SIZE: (f64, f64) = (1600.0, 900.0);
 
+/// Returned by [`App::frame`] to tell the platform loop whether to keep
+/// running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum FrameControl {
+    /// Keep running.
+    Continue,
+    /// Exit the event loop cleanly.
+    Exit,
+}
+
 /// Application callbacks driven by the platform loop.
 pub trait App {
     /// Called once per rendered frame after input has been gathered.
-    fn frame(&mut self, input: &mut InputState, timing: FrameTiming);
+    /// Return [`FrameControl::Exit`] to shut the loop down cleanly.
+    fn frame(&mut self, input: &mut InputState, timing: FrameTiming) -> FrameControl;
 
     /// Called when the window's inner size changes (physical pixels).
+    /// Never called with a zero-sized area (minimization is handled by the
+    /// platform loop).
     fn resize(&mut self, width: u32, height: u32);
 
     /// Raw window event hook, called before the platform input state sees
@@ -52,7 +72,7 @@ pub enum PlatformError {
     Window(#[from] winit::error::OsError),
     /// The application builder passed to [`run_app`] failed.
     #[error("failed to build app: {0}")]
-    AppBuild(Box<dyn std::error::Error>),
+    AppBuild(Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Create the window, build the app, and run the event loop until exit.
@@ -62,12 +82,16 @@ pub enum PlatformError {
 /// * `build` — constructs the [`App`] from the shared window handle before
 ///   the loop starts (e.g. to create the GPU surface).
 ///
-/// The loop exits on window close, the Escape key, or — when the
-/// [`SMOKE_FRAMES_ENV`] variable is set — after the requested number of
-/// frames.
+/// The loop exits on window close, when the app returns
+/// [`FrameControl::Exit`], or — when the [`SMOKE_FRAMES_ENV`] variable is
+/// set — after the requested number of frames.
+///
+/// While the window is minimized (zero-sized), no frames run and the loop
+/// waits on OS events instead of polling: presenting to a zero-sized
+/// surface is impossible, and attempting it busy-spins on surface errors.
 pub fn run_app(
     fixed_dt: f32,
-    build: impl FnOnce(Arc<Window>) -> Result<Box<dyn App>, Box<dyn std::error::Error>>,
+    build: impl FnOnce(Arc<Window>) -> Result<Box<dyn App>, Box<dyn std::error::Error + Send + Sync>>,
 ) -> Result<(), PlatformError> {
     let event_loop = EventLoop::new()?;
     let window = Arc::new(
@@ -83,28 +107,36 @@ pub fn run_app(
 
     let smoke_frames = read_smoke_frames();
     let mut frames_presented: u64 = 0;
+    let mut minimized = false;
 
     event_loop.run(move |event, elwt| {
-        // Game loop: render continuously instead of waiting for OS events.
-        elwt.set_control_flow(ControlFlow::Poll);
+        // Game loop: render continuously — except while minimized, where
+        // there is nothing to present and we park until the next OS event.
+        elwt.set_control_flow(if minimized {
+            ControlFlow::Wait
+        } else {
+            ControlFlow::Poll
+        });
 
         match event {
             Event::WindowEvent { window_id, event } if window_id == window.id() => match event {
                 WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::KeyboardInput {
-                    event:
-                        KeyEvent {
-                            physical_key: PhysicalKey::Code(KeyCode::Escape),
-                            state: ElementState::Pressed,
-                            ..
-                        },
-                    ..
-                } => elwt.exit(),
-                WindowEvent::Resized(size) => app.resize(size.width, size.height),
+                WindowEvent::Resized(size) => {
+                    minimized = size.width == 0 || size.height == 0;
+                    if !minimized {
+                        app.resize(size.width, size.height);
+                    }
+                }
                 WindowEvent::RedrawRequested => {
+                    if minimized {
+                        return;
+                    }
                     let timing = clock.tick();
-                    app.frame(&mut input, timing);
+                    let control = app.frame(&mut input, timing);
                     input.end_frame();
+                    if control == FrameControl::Exit {
+                        elwt.exit();
+                    }
 
                     frames_presented += 1;
                     if smoke_frames.is_some_and(|n| frames_presented >= n) {
@@ -122,7 +154,11 @@ pub fn run_app(
                 }
             },
             Event::DeviceEvent { event, .. } => input.handle_device_event(&event),
-            Event::AboutToWait => window.request_redraw(),
+            Event::AboutToWait => {
+                if !minimized {
+                    window.request_redraw();
+                }
+            }
             _ => {}
         }
     })?;
@@ -130,11 +166,15 @@ pub fn run_app(
     Ok(())
 }
 
-/// Read [`SMOKE_FRAMES_ENV`] once at startup. Unset or invalid values
-/// disable the smoke-exit hook.
+/// Read [`SMOKE_FRAMES_ENV`] once at startup. Unset, zero, or invalid
+/// values disable the smoke-exit hook.
 fn read_smoke_frames() -> Option<u64> {
     let raw = std::env::var(SMOKE_FRAMES_ENV).ok()?;
     match raw.trim().parse::<u64>() {
+        Ok(0) => {
+            tracing::warn!("{SMOKE_FRAMES_ENV}=0 is invalid (must be >= 1); ignoring");
+            None
+        }
         Ok(frames) => {
             tracing::info!(frames, "smoke-test mode: will exit after N frames");
             Some(frames)

@@ -211,6 +211,24 @@ mod tests {
     }
 
     #[test]
+    fn nan_dt_is_dropped_and_does_not_poison_the_accumulator() {
+        let mut clock = clock();
+        clock.advance(0.75 * DT); // seed a fractional accumulator
+        let timing = clock.advance(f32::NAN);
+        assert_eq!(timing.dt_frame, 0.0);
+        assert_eq!(timing.physics_steps, 0);
+        assert!(
+            (timing.alpha - 0.75).abs() < TOL,
+            "alpha must be unchanged, was {}",
+            timing.alpha
+        );
+        // Accumulator still works normally afterwards.
+        let next = clock.advance(0.75 * DT);
+        assert_eq!(next.physics_steps, 1);
+        assert!((next.alpha - 0.5).abs() < TOL, "alpha was {}", next.alpha);
+    }
+
+    #[test]
     fn alpha_stays_in_unit_range_over_many_odd_frames() {
         let mut clock = clock();
         let dts = [
