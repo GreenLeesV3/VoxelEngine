@@ -1,0 +1,11 @@
+[package]
+name = "vox-platform"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+winit = { workspace = true }
+glam = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

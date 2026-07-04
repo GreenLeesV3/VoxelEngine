@@ -1,0 +1,21 @@
+[package]
+name = "vox-app"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+vox-core = { workspace = true }
+vox-world = { workspace = true }
+vox-gen = { workspace = true }
+vox-mesh = { workspace = true }
+vox-physics = { workspace = true }
+vox-render = { workspace = true }
+vox-platform = { workspace = true }
+vox-debug = { workspace = true }
+glam = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+pollster = { workspace = true }
+winit = { workspace = true }
+wgpu = { workspace = true }
