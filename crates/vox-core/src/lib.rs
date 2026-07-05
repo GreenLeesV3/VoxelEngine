@@ -9,7 +9,9 @@ pub mod config;
 pub mod consts;
 pub mod coords;
 pub mod error;
+pub mod material;
 
 pub use config::WorldConfig;
 pub use coords::{CHUNK, chunk_of, chunk_origin, local_of, voxel_at, voxel_center_m};
 pub use error::CoreError;
+pub use material::{MaterialDef, MaterialId, MaterialRegistry};

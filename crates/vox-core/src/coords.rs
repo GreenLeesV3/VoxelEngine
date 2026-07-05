@@ -23,6 +23,12 @@ pub fn chunk_origin(c: IVec3) -> IVec3 {
 }
 
 /// Voxel containing a world-space point (meters).
+///
+/// Results are exact for voxel indices up to ~2^24 (the f32 mantissa), but a
+/// point mathematically ON a voxel boundary may classify to either neighbor
+/// when `voxel_size_m` is not exactly representable in f32 (e.g. `0.1`).
+/// Callers must not rely on exact boundary ownership across different
+/// arithmetic paths.
 pub fn voxel_at(p_m: Vec3, voxel_size_m: f32) -> IVec3 {
     (p_m / voxel_size_m).floor().as_ivec3()
 }
