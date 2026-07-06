@@ -1,4 +1,8 @@
-//! Voxel engine application entry point: world, meshing, camera, frame loop.
+//! Voxel engine application: world, player, tools, threaded remeshing, render.
+
+mod player;
+mod remesh;
+mod tools;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -6,6 +10,10 @@ use std::time::Instant;
 
 use glam::{IVec3, Vec3};
 use rayon::prelude::*;
+
+use player::Player;
+use remesh::RemeshQueue;
+use tools::{Tool, Tools};
 
 use vox_core::consts::CHUNK_SIZE;
 use vox_core::{MaterialRegistry, WorldConfig, chunk_origin, voxel_at};
@@ -26,10 +34,6 @@ const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-/// Fly-camera speed in m/s (`Ctrl` multiplies by 5).
-const FLY_SPEED: f32 = 12.0;
-/// Mouse look sensitivity in radians per pixel of raw mouse delta.
-const LOOK_SENSITIVITY: f32 = 0.0025;
 /// Fog end distance in meters.
 const FOG_END_M: f32 = 220.0;
 
@@ -43,7 +47,7 @@ fn assets_dir() -> PathBuf {
     PathBuf::from("assets")
 }
 
-/// Build the world: noise terrain from the world config.
+/// Build the world: noise terrain + forest from the world config.
 fn build_terrain_world(
     registry: &MaterialRegistry,
 ) -> Result<World, Box<dyn std::error::Error + Send + Sync>> {
@@ -69,9 +73,12 @@ struct VoxApp {
     gpu: Gpu,
     pipeline: VoxelPipeline,
     world: World,
+    registry: MaterialRegistry,
+    player: Player,
     camera: Camera,
+    tools: Tools,
+    remesh: RemeshQueue,
     grabbed: bool,
-    // FPS/stat reporting.
     frames: u32,
     last_report: Instant,
 }
@@ -93,33 +100,36 @@ impl VoxApp {
         let size = window.inner_size();
         let gpu = Gpu::new(window.clone(), size.width, size.height)?;
         let pipeline = VoxelPipeline::new(&gpu, &shader, &registry, world.cfg.voxel_size_m);
+        let tools = Tools::new(&registry);
 
         let mut app = Self {
             window,
             gpu,
             pipeline,
             world,
+            registry,
+            player: Player::new(Vec3::ZERO),
             camera: Camera::new(Vec3::ZERO),
+            tools,
+            remesh: RemeshQueue::new(),
             grabbed: false,
             frames: 0,
             last_report: Instant::now(),
         };
-        app.mesh_dirty_chunks();
+        app.initial_mesh();
 
-        // Spawn the camera above the terrain surface at the world center.
+        // Spawn on the terrain surface at the world center.
         let center = Vec3::from(app.world.cfg.extent_m) * 0.5;
         let surface = TerrainGen::surface_height_m(&app.world, center.x, center.z)
             .unwrap_or(app.world.cfg.extent_m[1] * 0.5);
-        app.camera.pos = Vec3::new(center.x, surface + 4.0, center.z);
+        app.player = Player::new(Vec3::new(center.x, surface + 0.2, center.z));
         Ok(app)
     }
 
-    /// Mesh and upload every dirty chunk (parallel mesh, sequential upload).
-    fn mesh_dirty_chunks(&mut self) {
+    /// Synchronous parallel meshing of the freshly generated world.
+    fn initial_mesh(&mut self) {
         let keys = self.world.drain_dirty();
-        if keys.is_empty() {
-            return;
-        }
+        let _ = self.world.drain_dirty_regions();
         let start = Instant::now();
         let world = &self.world;
         let meshes: Vec<(IVec3, vox_mesh::MeshData)> = keys
@@ -141,7 +151,7 @@ impl VoxApp {
             chunks = meshed,
             quads,
             elapsed_ms = start.elapsed().as_millis() as u64,
-            "meshed dirty chunks"
+            "initial world mesh"
         );
     }
 
@@ -167,40 +177,25 @@ impl VoxApp {
         }
     }
 
-    fn update_camera(&mut self, input: &InputState, dt: f32) {
-        if self.grabbed {
-            let d = input.mouse_delta;
-            self.camera
-                .look(-d.x * LOOK_SENSITIVITY, -d.y * LOOK_SENSITIVITY);
+    /// Tool input: LMB uses the active tool (break/blast), RMB places.
+    fn apply_tools(&mut self, input: &InputState) {
+        let eye = self.player.eye(1.0);
+        let look = self.player.look_dir();
+        if input.mouse_clicked(MouseButton::Left) {
+            match self.tools.tool {
+                Tool::Blast => {
+                    tracing::info!("blast tool arrives with the destruction milestone (M5)");
+                }
+                _ => self.tools.break_voxel(&mut self.world, eye, look),
+            }
         }
-        let mut wish = Vec3::ZERO;
-        let forward = self.camera.forward();
-        let right = self.camera.right();
-        if input.key_down(KeyCode::KeyW) {
-            wish += forward;
+        if input.mouse_clicked(MouseButton::Right) {
+            self.tools
+                .place_voxel(&mut self.world, eye, look, self.player.ctrl.aabb());
         }
-        if input.key_down(KeyCode::KeyS) {
-            wish -= forward;
-        }
-        if input.key_down(KeyCode::KeyD) {
-            wish += right;
-        }
-        if input.key_down(KeyCode::KeyA) {
-            wish -= right;
-        }
-        if input.key_down(KeyCode::Space) {
-            wish += Vec3::Y;
-        }
-        if input.key_down(KeyCode::ShiftLeft) {
-            wish -= Vec3::Y;
-        }
-        if wish != Vec3::ZERO {
-            let boost = if input.key_down(KeyCode::ControlLeft) {
-                5.0
-            } else {
-                1.0
-            };
-            self.camera.pos += wish.normalize() * FLY_SPEED * boost * dt;
+        if input.wheel_delta.abs() >= 1.0 {
+            let steps = input.wheel_delta as i32;
+            self.tools.cycle_material(steps, &self.registry);
         }
     }
 
@@ -211,7 +206,10 @@ impl VoxApp {
                 fps = self.frames,
                 drawn = stats.drawn,
                 culled = stats.culled,
-                cam = ?voxel_at(self.camera.pos, self.world.cfg.voxel_size_m),
+                queue = self.remesh.pending_len(),
+                in_flight = self.remesh.in_flight,
+                pos = ?voxel_at(self.player.ctrl.pos, self.world.cfg.voxel_size_m),
+                grounded = self.player.ctrl.grounded,
                 "frame stats"
             );
             self.frames = 0;
@@ -229,11 +227,46 @@ impl App for VoxApp {
                 return FrameControl::Exit;
             }
         }
+        let mut grabbed_this_frame = false;
         if input.mouse_clicked(MouseButton::Left) && !self.grabbed {
             self.set_grab(true);
+            grabbed_this_frame = true;
         }
-        self.update_camera(input, timing.dt_frame);
+        if input.key_pressed(KeyCode::KeyF) {
+            self.player.toggle_fly();
+        }
+        for (key, tool) in [
+            (KeyCode::Digit1, Tool::Place),
+            (KeyCode::Digit2, Tool::Break),
+            (KeyCode::Digit3, Tool::Blast),
+        ] {
+            if input.key_pressed(key) {
+                self.tools.tool = tool;
+                tracing::info!(tool = ?tool, "tool selected");
+            }
+        }
 
+        if self.grabbed {
+            self.player.look(input.mouse_delta);
+            if !grabbed_this_frame {
+                self.apply_tools(input);
+            }
+        }
+        self.player
+            .fixed_steps(&self.world, input, timing.physics_steps);
+
+        // Remeshing: absorb edits, dispatch to workers, upload results.
+        // Physics wake-up consumption arrives with the rigidbody milestone.
+        let _ = self.world.drain_dirty_regions();
+        self.remesh.absorb_dirty(&mut self.world);
+        let eye = self.player.eye(timing.alpha);
+        self.remesh.dispatch(&self.world, eye);
+        self.remesh.collect(&self.gpu, &mut self.pipeline);
+
+        // Camera from the interpolated player eye.
+        self.camera.pos = eye;
+        self.camera.yaw = self.player.yaw;
+        self.camera.pitch = self.player.pitch;
         let (w, h) = self.gpu.surface_size();
         let aspect = w as f32 / h.max(1) as f32;
         let view_proj = self.camera.view_proj(aspect);
