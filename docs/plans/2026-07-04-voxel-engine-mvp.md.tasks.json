@@ -100,7 +100,7 @@
     {
       "id": 13,
       "subject": "Task 13: vox-physics kinematic character controller",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [
         6
       ]
@@ -108,7 +108,7 @@
     {
       "id": 14,
       "subject": "Task 14: threaded remeshing + place/break tools + walker",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [
         9,
         12,
@@ -193,5 +193,5 @@
       ]
     }
   ],
-  "lastUpdated": "2026-07-06T15:20:00Z"
+  "lastUpdated": "2026-07-06T16:00:00Z"
 }
