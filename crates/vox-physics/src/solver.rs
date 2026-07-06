@@ -15,7 +15,29 @@ use vox_core::consts::{
 use vox_world::World;
 
 use crate::body::{Body, BodyId};
-use crate::contact::{Contact, ContactKey, world_contacts};
+use crate::broadphase::candidate_pairs;
+use crate::contact::{Contact, ContactKey, pair_contacts, world_contacts};
+
+/// Relative contact speed above which a sleeping body is woken by an impact.
+const WAKE_SPEED: f32 = 2.0 * SLEEP_LIN;
+
+/// Two distinct mutable borrows out of the slot array.
+fn two_mut(slots: &mut [Option<Body>], a: usize, b: usize) -> (&mut Body, &mut Body) {
+    debug_assert_ne!(a, b);
+    if a < b {
+        let (lo, hi) = slots.split_at_mut(b);
+        (
+            lo[a].as_mut().expect("body a alive"),
+            hi[0].as_mut().expect("body b alive"),
+        )
+    } else {
+        let (lo, hi) = slots.split_at_mut(a);
+        (
+            hi[0].as_mut().expect("body a alive"),
+            lo[b].as_mut().expect("body b alive"),
+        )
+    }
+}
 
 /// Hard velocity ceiling (m/s): a diverging body is clamped, not propagated.
 const MAX_SPEED: f32 = 120.0;
@@ -150,22 +172,86 @@ impl PhysicsWorld {
             self.substep(world, h);
         }
 
-        // Sleep bookkeeping at full-step rate.
+        // Update per-body quiet counters.
         for body in self.slots.iter_mut().flatten() {
             if body.sleep.asleep {
                 continue;
             }
             let quiet = body.vel.length() < SLEEP_LIN && body.omega.length() < SLEEP_ANG;
             body.sleep.quiet_steps = if quiet { body.sleep.quiet_steps + 1 } else { 0 };
-            if body.sleep.quiet_steps > SLEEP_FRAMES {
-                body.sleep.asleep = true;
-                body.vel = Vec3::ZERO;
-                body.omega = Vec3::ZERO;
-                // Snap the interpolation source so sleepers render exactly.
-                body.prev_pos = body.pos;
-                body.prev_rot = body.rot;
+        }
+
+        // Island-consensus sleep: bodies touching each other must cross the
+        // quiet threshold together and transition atomically. A pair briefly
+        // holding mixed sleep state (one asleep, one awake) flips which body
+        // is "sampler" vs "target" in pair_contacts, which changes the
+        // warm-start contact key and re-injects a small impulse discontinuity
+        // — exactly the kind of disturbance that kept resetting quiet
+        // counters stack-wide before this fix.
+        let islands = Self::islands(&self.slots);
+        for island in islands {
+            if island.len() < 2 {
+                // Isolated body: the simple per-body rule already works (it
+                // only ever contacts the static world, which has no sleep
+                // state to desynchronize against).
+                if let Some(body) = self.slots[island[0]].as_mut()
+                    && !body.sleep.asleep
+                    && body.sleep.quiet_steps > SLEEP_FRAMES
+                {
+                    body.sleep.asleep = true;
+                    body.vel = Vec3::ZERO;
+                    body.omega = Vec3::ZERO;
+                    body.prev_pos = body.pos;
+                    body.prev_rot = body.rot;
+                }
+                continue;
+            }
+            let ready = island.iter().all(|&slot| {
+                self.slots[slot]
+                    .as_ref()
+                    .is_some_and(|b| b.sleep.asleep || b.sleep.quiet_steps > SLEEP_FRAMES)
+            });
+            if !ready {
+                continue;
+            }
+            for &slot in &island {
+                if let Some(body) = self.slots[slot].as_mut()
+                    && !body.sleep.asleep
+                {
+                    body.sleep.asleep = true;
+                    body.vel = Vec3::ZERO;
+                    body.omega = Vec3::ZERO;
+                    body.prev_pos = body.pos;
+                    body.prev_rot = body.rot;
+                }
             }
         }
+    }
+
+    /// Group bodies into connected components via broadphase contact.
+    /// Every live slot appears in exactly one island (singletons included).
+    fn islands(slots: &[Option<Body>]) -> Vec<Vec<usize>> {
+        let mut parent: Vec<usize> = (0..slots.len()).collect();
+        fn find(parent: &mut [usize], x: usize) -> usize {
+            if parent[x] != x {
+                parent[x] = find(parent, parent[x]);
+            }
+            parent[x]
+        }
+        for (a, b) in candidate_pairs(slots) {
+            let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+            if ra != rb {
+                parent[ra] = rb;
+            }
+        }
+        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (slot, entry) in slots.iter().enumerate() {
+            if entry.is_some() {
+                let root = find(&mut parent, slot);
+                groups.entry(root).or_default().push(slot);
+            }
+        }
+        groups.into_values().collect()
     }
 
     fn substep(&mut self, world: &World, h: f32) {
@@ -184,17 +270,63 @@ impl PhysicsWorld {
             world_contacts(body, slot, world, &mut contacts);
         }
 
+        // Body-body narrowphase over broadphase candidates.
+        for (a, b) in candidate_pairs(&self.slots) {
+            let (asleep_a, asleep_b) = {
+                let ba = self.slots[a].as_ref().expect("pair body alive");
+                let bb = self.slots[b].as_ref().expect("pair body alive");
+                (ba.sleep.asleep, bb.sleep.asleep)
+            };
+            // Sampler = fewer surface points; a sleeping target is treated as
+            // static unless the impact is fast enough to wake it. If the
+            // sampler would be the sleeping one, swap roles so the moving
+            // body does the sampling (its points carry the velocity).
+            let (mut sampler, mut target) = {
+                let ba = self.slots[a].as_ref().expect("alive");
+                let bb = self.slots[b].as_ref().expect("alive");
+                if ba.surface.len() <= bb.surface.len() {
+                    (a, b)
+                } else {
+                    (b, a)
+                }
+            };
+            let mut target_asleep = if target == a { asleep_a } else { asleep_b };
+            let sampler_asleep = if sampler == a { asleep_a } else { asleep_b };
+            if sampler_asleep && !target_asleep {
+                std::mem::swap(&mut sampler, &mut target);
+                target_asleep = true;
+            }
+
+            let mut staged: Vec<Contact> = Vec::new();
+            let result = {
+                let sb = self.slots[sampler].as_ref().expect("alive");
+                let tb = self.slots[target].as_ref().expect("alive");
+                pair_contacts(sb, sampler, tb, target, target_asleep, &mut staged)
+            };
+            if result.contact_count == 0 {
+                continue;
+            }
+            if target_asleep && result.max_rel_speed > WAKE_SPEED {
+                // Impact wakes the sleeper: regenerate as a dynamic pair.
+                let tb = self.slots[target].as_mut().expect("alive");
+                tb.sleep.asleep = false;
+                tb.sleep.quiet_steps = 0;
+                staged.clear();
+                let sb_ref = self.slots[sampler].as_ref().expect("alive");
+                let tb_ref = self.slots[target].as_ref().expect("alive");
+                pair_contacts(sb_ref, sampler, tb_ref, target, false, &mut staged);
+            }
+            contacts.append(&mut staged);
+        }
+
         // Warm start from the previous substep's accumulated impulses.
         for c in &mut contacts {
             if let Some(&(n0, t10, t20)) = self.warm.get(&c.key) {
                 c.acc_n = n0;
                 c.acc_t1 = t10;
                 c.acc_t2 = t20;
-                let body = self.slots[c.body].as_mut().expect("contact body alive");
                 let p = c.normal * n0 + c.t1 * t10 + c.t2 * t20;
-                let inv_iw = body.inv_inertia_world();
-                body.vel += p * body.inv_mass;
-                body.omega += inv_iw * c.r_arm.cross(p);
+                Self::apply_contact_impulse(&mut self.slots, c, p);
             }
         }
 
@@ -202,29 +334,24 @@ impl PhysicsWorld {
         // friction clamped to the Coulomb cone.
         for _ in 0..SOLVER_ITERS {
             for c in &mut contacts {
-                let body = self.slots[c.body].as_mut().expect("contact body alive");
-                let inv_iw = body.inv_inertia_world();
-
-                let vn = (body.vel + body.omega.cross(c.r_arm)).dot(c.normal);
+                let vn = Self::relative_velocity(&self.slots, c).dot(c.normal);
                 let bias = (CONTACT_BETA / h) * (c.depth - CONTACT_SLOP).max(0.0);
                 let lambda = (bias - vn) / c.kn;
                 let new_acc = (c.acc_n + lambda).max(0.0);
                 let applied = new_acc - c.acc_n;
                 c.acc_n = new_acc;
-                let p = c.normal * applied;
-                body.vel += p * body.inv_mass;
-                body.omega += inv_iw * c.r_arm.cross(p);
+                Self::apply_contact_impulse(&mut self.slots, c, c.normal * applied);
 
                 let max_f = FRICTION * c.acc_n;
-                for (t, kt, acc) in [(c.t1, c.kt1, &mut c.acc_t1), (c.t2, c.kt2, &mut c.acc_t2)] {
-                    let vt = (body.vel + body.omega.cross(c.r_arm)).dot(t);
+                for i in 0..2 {
+                    let (t, kt) = if i == 0 { (c.t1, c.kt1) } else { (c.t2, c.kt2) };
+                    let vt = Self::relative_velocity(&self.slots, c).dot(t);
                     let lt = -vt / kt;
+                    let acc = if i == 0 { &mut c.acc_t1 } else { &mut c.acc_t2 };
                     let new_t = (*acc + lt).clamp(-max_f, max_f);
                     let applied_t = new_t - *acc;
                     *acc = new_t;
-                    let pt = t * applied_t;
-                    body.vel += pt * body.inv_mass;
-                    body.omega += inv_iw * c.r_arm.cross(pt);
+                    Self::apply_contact_impulse(&mut self.slots, c, t * applied_t);
                 }
             }
         }
@@ -251,6 +378,39 @@ impl PhysicsWorld {
         self.warm.clear();
         for c in &contacts {
             self.warm.insert(c.key, (c.acc_n, c.acc_t1, c.acc_t2));
+        }
+    }
+
+    /// Apply impulse `p` (already signed for `body`) to a contact's body,
+    /// and the equal-and-opposite reaction to `body_b` if present.
+    fn apply_contact_impulse(slots: &mut [Option<Body>], c: &Contact, p: Vec3) {
+        if let Some(b) = c.body_b {
+            let (ba, bb) = two_mut(slots, c.body, b);
+            let inv_iw_a = ba.inv_inertia_world();
+            ba.vel += p * ba.inv_mass;
+            ba.omega += inv_iw_a * c.r_arm.cross(p);
+            let inv_iw_b = bb.inv_inertia_world();
+            bb.vel -= p * bb.inv_mass;
+            bb.omega -= inv_iw_b * c.r_arm_b.cross(p);
+        } else {
+            let body = slots[c.body].as_mut().expect("contact body alive");
+            let inv_iw = body.inv_inertia_world();
+            body.vel += p * body.inv_mass;
+            body.omega += inv_iw * c.r_arm.cross(p);
+        }
+    }
+
+    /// Velocity of `body`'s contact point minus `body_b`'s (zero velocity
+    /// for the static world or a sleeping target).
+    fn relative_velocity(slots: &[Option<Body>], c: &Contact) -> Vec3 {
+        let body = slots[c.body].as_ref().expect("contact body alive");
+        let va = body.vel + body.omega.cross(c.r_arm);
+        if let Some(b) = c.body_b {
+            let bb = slots[b].as_ref().expect("contact body_b alive");
+            let vb = bb.vel + bb.omega.cross(c.r_arm_b);
+            va - vb
+        } else {
+            va
         }
     }
 
@@ -381,7 +541,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires body-body contacts (Task 17); un-ignored there"]
     fn stack_of_five_stays_and_sleeps() {
         let reg = registry();
         let world = floored_world();

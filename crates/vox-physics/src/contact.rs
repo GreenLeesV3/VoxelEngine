@@ -1,37 +1,45 @@
-//! Contact generation: body surface points versus the world voxel grid.
+//! Contact generation: body surface points versus the world grid and versus
+//! other bodies' grids.
 //!
 //! Every surface sample point behaves as a small sphere of radius
 //! `half_voxel`. Points inside solid voxels push out through their nearest
 //! empty face; points within the radius of a neighboring solid face contact
-//! before penetrating. Normals are always voxel-face-aligned, which keeps the
-//! math simple and debris "feeling" voxel-accurate.
+//! before penetrating. Normals are voxel-face-aligned in the *owning grid's
+//! frame* — world contacts get world-axis normals, body-body contacts get the
+//! target body's rotated face normals. This is the voxel-native narrowphase:
+//! no convex hulls, just grids sampling grids.
 
-use glam::{IVec3, Mat3, Vec3};
+use glam::{IVec3, Mat3, Quat, Vec3};
 use vox_core::voxel_at;
 use vox_world::World;
 
 use crate::body::Body;
 
-/// Stable identity of a contact across steps (warm starting).
-pub type ContactKey = (u32, IVec3, u8);
+/// Stable identity of a contact across steps: (body a, body b or MAX for the
+/// static world, cell in the target grid, face id).
+pub type ContactKey = (u32, u32, IVec3, u8);
 
-/// One contact between a body and the static world.
+/// Slot value in keys standing for the static world.
+pub const WORLD_SLOT: u32 = u32::MAX;
+
+/// One contact. `body` receives `+impulse`, `body_b` (if any) receives the
+/// opposite; the normal points from the target toward `body`.
 pub struct Contact {
-    /// Arena slot of the body.
     pub body: usize,
+    /// The other dynamic body, or `None` when contacting the static world or
+    /// a sleeping body treated as static.
+    pub body_b: Option<usize>,
     pub normal: Vec3,
     pub depth: f32,
-    /// Contact point relative to the body's COM (world orientation).
+    /// Contact point relative to each COM (world orientation).
     pub r_arm: Vec3,
+    pub r_arm_b: Vec3,
     pub key: ContactKey,
-    // Tangent basis (axis-aligned; normals are face-aligned).
     pub t1: Vec3,
     pub t2: Vec3,
-    // Effective masses, precomputed at generation.
     pub kn: f32,
     pub kt1: f32,
     pub kt2: f32,
-    // Accumulated impulses (warm-started).
     pub acc_n: f32,
     pub acc_t1: f32,
     pub acc_t2: f32,
@@ -47,24 +55,19 @@ pub const FACE_DIRS: [(u8, IVec3); 6] = [
     (5, IVec3::NEG_Z),
 ];
 
-/// Axis-aligned tangent basis for a face normal.
+/// Any orthonormal tangent basis for a unit normal.
 #[inline]
 fn tangent_basis(n: Vec3) -> (Vec3, Vec3) {
-    if n.x.abs() > 0.5 {
-        (Vec3::Y, Vec3::Z)
-    } else if n.y.abs() > 0.5 {
-        (Vec3::X, Vec3::Z)
-    } else {
-        (Vec3::X, Vec3::Y)
-    }
+    let helper = if n.x.abs() > 0.9 { Vec3::Y } else { Vec3::X };
+    let t1 = n.cross(helper).normalize();
+    let t2 = n.cross(t1);
+    (t1, t2)
 }
 
-/// Signed distance from point `p` to the face plane of voxel `v` in
-/// direction `dir` (positive = inside the voxel, toward the far side).
+/// Signed distance from point `p` to the face plane of cell `v` in direction
+/// `dir`, in a grid whose cells have edge `s` and origin at 0.
 #[inline]
 fn face_dist(p: Vec3, v: IVec3, dir: IVec3, s: f32) -> f32 {
-    // For +axis: plane at (v[a]+1)*s, distance = plane - p[a].
-    // For -axis: plane at v[a]*s, distance = p[a] - plane.
     if dir.x == 1 {
         (v.x + 1) as f32 * s - p.x
     } else if dir.x == -1 {
@@ -80,11 +83,22 @@ fn face_dist(p: Vec3, v: IVec3, dir: IVec3, s: f32) -> f32 {
     }
 }
 
-/// Effective-mass helper: `k = 1/m + n · ((I⁻¹ (r × n)) × r)`.
+/// `k = 1/m + n · ((I⁻¹ (r × n)) × r)` summed over both bodies of a contact.
 #[inline]
-fn effective_mass(inv_mass: f32, inv_inertia_w: &Mat3, r: Vec3, n: Vec3) -> f32 {
-    let rn = r.cross(n);
-    inv_mass + n.dot((*inv_inertia_w * rn).cross(r))
+fn effective_mass(
+    n: Vec3,
+    inv_mass_a: f32,
+    inv_iw_a: &Mat3,
+    r_a: Vec3,
+    b_terms: Option<(f32, &Mat3, Vec3)>,
+) -> f32 {
+    let ra_n = r_a.cross(n);
+    let mut k = inv_mass_a + n.dot((*inv_iw_a * ra_n).cross(r_a));
+    if let Some((inv_mass_b, inv_iw_b, r_b)) = b_terms {
+        let rb_n = r_b.cross(n);
+        k += inv_mass_b + n.dot((*inv_iw_b * rb_n).cross(r_b));
+    }
+    k
 }
 
 /// Generate world contacts for one awake body into `out`.
@@ -99,7 +113,6 @@ pub fn world_contacts(body: &Body, slot: usize, world: &World, out: &mut Vec<Con
         let v = voxel_at(p_w, s);
 
         if world.solid(v) {
-            // Inside a solid voxel: push out through the nearest empty face.
             let mut best: Option<(Vec3, f32, u8)> = None;
             for (face_id, dir) in FACE_DIRS {
                 if world.solid(v + dir) {
@@ -111,7 +124,7 @@ pub fn world_contacts(body: &Body, slot: usize, world: &World, out: &mut Vec<Con
                 }
             }
             let (n, dist, face_id) = best.unwrap_or((Vec3::Y, s * 0.5, 2));
-            push_contact(
+            push_world_contact(
                 out,
                 body,
                 slot,
@@ -120,19 +133,17 @@ pub fn world_contacts(body: &Body, slot: usize, world: &World, out: &mut Vec<Con
                 r_point + dist,
                 v,
                 face_id,
-                inv_iw,
+                &inv_iw,
             );
         } else {
-            // Near-face pre-contact: any adjacent solid within the radius.
             for (face_id, dir) in FACE_DIRS {
                 if !world.solid(v + dir) {
                     continue;
                 }
                 let d = face_dist(p_w, v, dir, s);
                 if d < r_point {
-                    // Push away from the solid neighbor.
                     let n = -dir.as_vec3();
-                    push_contact(out, body, slot, r_arm, n, r_point - d, v, face_id, inv_iw);
+                    push_world_contact(out, body, slot, r_arm, n, r_point - d, v, face_id, &inv_iw);
                 }
             }
         }
@@ -140,7 +151,7 @@ pub fn world_contacts(body: &Body, slot: usize, world: &World, out: &mut Vec<Con
 }
 
 #[expect(clippy::too_many_arguments, reason = "internal contact assembly")]
-fn push_contact(
+fn push_world_contact(
     out: &mut Vec<Contact>,
     body: &Body,
     slot: usize,
@@ -149,22 +160,143 @@ fn push_contact(
     depth: f32,
     voxel: IVec3,
     face_id: u8,
-    inv_iw: Mat3,
+    inv_iw: &Mat3,
 ) {
     let (t1, t2) = tangent_basis(n);
     out.push(Contact {
         body: slot,
+        body_b: None,
         normal: n,
         depth,
         r_arm,
-        key: (slot as u32, voxel, face_id),
+        r_arm_b: Vec3::ZERO,
+        key: (slot as u32, WORLD_SLOT, voxel, face_id),
         t1,
         t2,
-        kn: effective_mass(body.inv_mass, &inv_iw, r_arm, n),
-        kt1: effective_mass(body.inv_mass, &inv_iw, r_arm, t1),
-        kt2: effective_mass(body.inv_mass, &inv_iw, r_arm, t2),
+        kn: effective_mass(n, body.inv_mass, inv_iw, r_arm, None),
+        kt1: effective_mass(t1, body.inv_mass, inv_iw, r_arm, None),
+        kt2: effective_mass(t2, body.inv_mass, inv_iw, r_arm, None),
         acc_n: 0.0,
         acc_t1: 0.0,
         acc_t2: 0.0,
-    });
+    })
+}
+
+/// Result of pair narrowphase.
+pub struct PairResult {
+    /// Peak |relative normal velocity| across penetrating points, used by the
+    /// caller to decide whether to wake a sleeping target.
+    pub max_rel_speed: f32,
+    pub contact_count: usize,
+}
+
+/// Generate contacts between two bodies. `sampler` samples the `target`'s
+/// grid; roles are chosen by the caller (fewer surface points samples).
+///
+/// If `target_static` is true the target contributes no mass terms and takes
+/// no impulses (a sleeping body treated as scenery).
+pub fn pair_contacts(
+    sampler: &Body,
+    sampler_slot: usize,
+    target: &Body,
+    target_slot: usize,
+    target_static: bool,
+    out: &mut Vec<Contact>,
+) -> PairResult {
+    let s_t = target.half_voxel * 2.0;
+    let r_point = sampler.half_voxel;
+    let inv_iw_a = sampler.inv_inertia_world();
+    let inv_iw_b = target.inv_inertia_world();
+    let inv_rot_t: Quat = target.rot.inverse();
+
+    let mut result = PairResult {
+        max_rel_speed: 0.0,
+        contact_count: 0,
+    };
+
+    for &p_local in &sampler.surface {
+        let r_arm = sampler.rot * p_local;
+        let p_w = sampler.pos + r_arm;
+        // Into the target's grid frame (origin at grid min corner).
+        let in_target = inv_rot_t * (p_w - target.pos) - target.grid_offset;
+        let cell = (in_target / s_t).floor().as_ivec3();
+
+        // Quick reject: outside the grid entirely (with one-cell margin).
+        if cell.cmplt(IVec3::splat(-1)).any() || cell.cmpgt(target.grid.dims).any() {
+            continue;
+        }
+
+        let mut found: Option<(Vec3, f32, IVec3, u8)> = None;
+        if target.grid.solid(cell) {
+            let mut best: Option<(IVec3, f32, u8)> = None;
+            for (face_id, dir) in FACE_DIRS {
+                if target.grid.solid(cell + dir) {
+                    continue;
+                }
+                let d = face_dist(in_target, cell, dir, s_t);
+                if best.is_none_or(|(_, bd, _)| d < bd) {
+                    best = Some((dir, d, face_id));
+                }
+            }
+            if let Some((dir, dist, face_id)) = best {
+                found = Some((dir.as_vec3(), r_point + dist, cell, face_id));
+            }
+        } else {
+            // Nearest penetrating face within the point radius.
+            let mut best: Option<(IVec3, f32, u8)> = None;
+            for (face_id, dir) in FACE_DIRS {
+                if !target.grid.solid(cell + dir) {
+                    continue;
+                }
+                let d = face_dist(in_target, cell, dir, s_t);
+                if d < r_point && best.is_none_or(|(_, bd, _)| r_point - d > bd) {
+                    best = Some((-dir, r_point - d, face_id));
+                }
+            }
+            if let Some((n_local, depth, face_id)) = best {
+                found = Some((n_local.as_vec3(), depth, cell, face_id));
+            }
+        }
+
+        let Some((n_local, depth, cell, face_id)) = found else {
+            continue;
+        };
+        // Rotate the face normal into world space; it pushes the sampler out.
+        let n = target.rot * n_local;
+        let r_arm_b = p_w - target.pos;
+
+        let va = sampler.vel + sampler.omega.cross(r_arm);
+        let vb = target.vel + target.omega.cross(r_arm_b);
+        result.max_rel_speed = result.max_rel_speed.max((va - vb).dot(n).abs());
+        result.contact_count += 1;
+
+        let b_terms = if target_static {
+            None
+        } else {
+            Some((target.inv_mass, &inv_iw_b, r_arm_b))
+        };
+        let (t1, t2) = tangent_basis(n);
+        out.push(Contact {
+            body: sampler_slot,
+            body_b: if target_static {
+                None
+            } else {
+                Some(target_slot)
+            },
+            normal: n,
+            depth,
+            r_arm,
+            r_arm_b,
+            key: (sampler_slot as u32, target_slot as u32, cell, face_id),
+            t1,
+            t2,
+            kn: effective_mass(n, sampler.inv_mass, &inv_iw_a, r_arm, b_terms),
+            kt1: effective_mass(t1, sampler.inv_mass, &inv_iw_a, r_arm, b_terms),
+            kt2: effective_mass(t2, sampler.inv_mass, &inv_iw_a, r_arm, b_terms),
+            acc_n: 0.0,
+            acc_t1: 0.0,
+            acc_t2: 0.0,
+        });
+    }
+    result
 }

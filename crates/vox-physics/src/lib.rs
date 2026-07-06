@@ -2,6 +2,7 @@
 //! and the destruction pipeline (carve → connectivity → debris).
 
 pub mod body;
+pub mod broadphase;
 pub mod character;
 pub mod contact;
 pub mod solver;
