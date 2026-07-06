@@ -9,10 +9,11 @@ use rayon::prelude::*;
 
 use vox_core::consts::CHUNK_SIZE;
 use vox_core::{MaterialRegistry, WorldConfig, chunk_origin, voxel_at};
+use vox_gen::{TerrainGen, TerrainMaterials};
 use vox_mesh::{VoxelSlab, mesh_slab};
 use vox_platform::{App, FrameControl, FrameTiming, InputState, run_app};
 use vox_render::{Camera, Frustum, Gpu, VoxelPipeline};
-use vox_world::{Voxel, World};
+use vox_world::World;
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
@@ -42,44 +43,20 @@ fn assets_dir() -> PathBuf {
     PathBuf::from("assets")
 }
 
-/// Build the M1 placeholder world: a flat grass-topped slab.
-fn build_flat_world(registry: &MaterialRegistry) -> World {
+/// Build the world: noise terrain from the world config.
+fn build_terrain_world(
+    registry: &MaterialRegistry,
+) -> Result<World, Box<dyn std::error::Error + Send + Sync>> {
     let cfg = WorldConfig {
         voxel_size_m: 0.1,
-        extent_m: [64.0, 16.0, 64.0],
+        extent_m: [128.0, 48.0, 128.0],
         ..WorldConfig::default()
     };
+    cfg.validate()?;
     let mut world = World::new(cfg);
-    let id = |name: &str| -> Voxel {
-        Voxel(
-            registry
-                .id_by_name(name)
-                .unwrap_or_else(|| panic!("core material `{name}` missing"))
-                .0,
-        )
-    };
-    let (_, max) = world.bounds_voxels();
-    let s = world.cfg.voxel_size_m;
-    // Meter-based layer heights, converted at the point of use.
-    let stone_top = (2.4 / s) as i32;
-    let dirt_top = (2.9 / s) as i32;
-    let grass_top = (3.0 / s) as i32;
-    world.fill_box(
-        IVec3::ZERO,
-        IVec3::new(max.x, stone_top, max.z),
-        id("stone"),
-    );
-    world.fill_box(
-        IVec3::new(0, stone_top, 0),
-        IVec3::new(max.x, dirt_top, max.z),
-        id("dirt"),
-    );
-    world.fill_box(
-        IVec3::new(0, dirt_top, 0),
-        IVec3::new(max.x, grass_top, max.z),
-        id("grass"),
-    );
-    world
+    let mats = TerrainMaterials::from_registry(registry)?;
+    TerrainGen::new(&world.cfg).generate(&mut world, mats);
+    Ok(world)
 }
 
 /// The engine application.
@@ -102,7 +79,7 @@ impl VoxApp {
         let shader = std::fs::read_to_string(assets.join("shaders/voxel.wgsl"))?;
 
         let build_start = Instant::now();
-        let world = build_flat_world(&registry);
+        let world = build_terrain_world(&registry)?;
         tracing::info!(
             chunks = world.chunk_count(),
             elapsed_ms = build_start.elapsed().as_millis() as u64,
@@ -125,9 +102,11 @@ impl VoxApp {
         };
         app.mesh_dirty_chunks();
 
-        // Spawn the camera above the world center.
+        // Spawn the camera above the terrain surface at the world center.
         let center = Vec3::from(app.world.cfg.extent_m) * 0.5;
-        app.camera.pos = Vec3::new(center.x, 5.0, center.z);
+        let surface = TerrainGen::surface_height_m(&app.world, center.x, center.z)
+            .unwrap_or(app.world.cfg.extent_m[1] * 0.5);
+        app.camera.pos = Vec3::new(center.x, surface + 4.0, center.z);
         Ok(app)
     }
 
