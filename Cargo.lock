@@ -2277,6 +2277,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "pollster",
+ "rayon",
  "tracing",
  "tracing-subscriber",
  "vox-core",

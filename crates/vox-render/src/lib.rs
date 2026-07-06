@@ -5,9 +5,15 @@
 //! crate deliberately has no winit dependency: window types enter only as
 //! [`wgpu::SurfaceTarget`].
 
+pub mod camera;
+pub mod frustum;
 pub mod gpu;
+pub mod voxel_pipeline;
 
+pub use camera::Camera;
+pub use frustum::Frustum;
 pub use gpu::{DEPTH_FORMAT, Frame, Gpu};
+pub use voxel_pipeline::{DrawStats, VoxelPipeline};
 
 /// Errors from GPU initialization and per-frame surface operations.
 #[derive(Debug, thiserror::Error)]

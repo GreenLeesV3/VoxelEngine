@@ -1,13 +1,23 @@
-//! Voxel engine application entry point: window, GPU clear, frame loop.
+//! Voxel engine application entry point: world, meshing, camera, frame loop.
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
+use glam::{IVec3, Vec3};
+use rayon::prelude::*;
+
+use vox_core::consts::CHUNK_SIZE;
+use vox_core::{MaterialRegistry, WorldConfig, chunk_origin, voxel_at};
+use vox_mesh::{VoxelSlab, mesh_slab};
 use vox_platform::{App, FrameControl, FrameTiming, InputState, run_app};
-use vox_render::{Gpu, RenderError};
+use vox_render::{Camera, Frustum, Gpu, VoxelPipeline};
+use vox_world::{Voxel, World};
+use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
-use winit::window::Window;
+use winit::window::{CursorGrabMode, Window};
 
-/// Sky-blue clear color (linear-space RGBA).
+/// Sky-blue clear color (linear-space RGBA); must match the shader's fog sky.
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.45,
     g: 0.66,
@@ -15,30 +25,242 @@ const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-/// The engine application: currently clears the screen to sky blue.
+/// Fly-camera speed in m/s (`Ctrl` multiplies by 5).
+const FLY_SPEED: f32 = 12.0;
+/// Mouse look sensitivity in radians per pixel of raw mouse delta.
+const LOOK_SENSITIVITY: f32 = 0.0025;
+/// Fog end distance in meters.
+const FOG_END_M: f32 = 220.0;
+
+/// Locate the `assets/` directory: the workspace copy during development,
+/// else `assets/` beside the executable.
+fn assets_dir() -> PathBuf {
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+    if dev.is_dir() {
+        return dev;
+    }
+    PathBuf::from("assets")
+}
+
+/// Build the M1 placeholder world: a flat grass-topped slab.
+fn build_flat_world(registry: &MaterialRegistry) -> World {
+    let cfg = WorldConfig {
+        voxel_size_m: 0.1,
+        extent_m: [64.0, 16.0, 64.0],
+        ..WorldConfig::default()
+    };
+    let mut world = World::new(cfg);
+    let id = |name: &str| -> Voxel {
+        Voxel(
+            registry
+                .id_by_name(name)
+                .unwrap_or_else(|| panic!("core material `{name}` missing"))
+                .0,
+        )
+    };
+    let (_, max) = world.bounds_voxels();
+    let s = world.cfg.voxel_size_m;
+    // Meter-based layer heights, converted at the point of use.
+    let stone_top = (2.4 / s) as i32;
+    let dirt_top = (2.9 / s) as i32;
+    let grass_top = (3.0 / s) as i32;
+    world.fill_box(
+        IVec3::ZERO,
+        IVec3::new(max.x, stone_top, max.z),
+        id("stone"),
+    );
+    world.fill_box(
+        IVec3::new(0, stone_top, 0),
+        IVec3::new(max.x, dirt_top, max.z),
+        id("dirt"),
+    );
+    world.fill_box(
+        IVec3::new(0, dirt_top, 0),
+        IVec3::new(max.x, grass_top, max.z),
+        id("grass"),
+    );
+    world
+}
+
+/// The engine application.
 struct VoxApp {
+    window: Arc<Window>,
     gpu: Gpu,
+    pipeline: VoxelPipeline,
+    world: World,
+    camera: Camera,
+    grabbed: bool,
+    // FPS/stat reporting.
+    frames: u32,
+    last_report: Instant,
 }
 
 impl VoxApp {
-    fn new(window: Arc<Window>) -> Result<Self, RenderError> {
+    fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let assets = assets_dir();
+        let registry = MaterialRegistry::load_dir(&assets.join("materials"))?;
+        let shader = std::fs::read_to_string(assets.join("shaders/voxel.wgsl"))?;
+
+        let build_start = Instant::now();
+        let world = build_flat_world(&registry);
+        tracing::info!(
+            chunks = world.chunk_count(),
+            elapsed_ms = build_start.elapsed().as_millis() as u64,
+            "world built"
+        );
+
         let size = window.inner_size();
-        let gpu = Gpu::new(window, size.width, size.height)?;
-        Ok(Self { gpu })
+        let gpu = Gpu::new(window.clone(), size.width, size.height)?;
+        let pipeline = VoxelPipeline::new(&gpu, &shader, &registry, world.cfg.voxel_size_m);
+
+        let mut app = Self {
+            window,
+            gpu,
+            pipeline,
+            world,
+            camera: Camera::new(Vec3::ZERO),
+            grabbed: false,
+            frames: 0,
+            last_report: Instant::now(),
+        };
+        app.mesh_dirty_chunks();
+
+        // Spawn the camera above the world center.
+        let center = Vec3::from(app.world.cfg.extent_m) * 0.5;
+        app.camera.pos = Vec3::new(center.x, 5.0, center.z);
+        Ok(app)
+    }
+
+    /// Mesh and upload every dirty chunk (parallel mesh, sequential upload).
+    fn mesh_dirty_chunks(&mut self) {
+        let keys = self.world.drain_dirty();
+        if keys.is_empty() {
+            return;
+        }
+        let start = Instant::now();
+        let world = &self.world;
+        let meshes: Vec<(IVec3, vox_mesh::MeshData)> = keys
+            .par_iter()
+            .filter(|key| world.chunk_at(**key).is_some())
+            .map(|key| {
+                let slab =
+                    VoxelSlab::extract(world, chunk_origin(*key), IVec3::splat(CHUNK_SIZE as i32));
+                (*key, mesh_slab(&slab))
+            })
+            .collect();
+        let meshed = meshes.len();
+        let mut quads = 0usize;
+        for (key, mesh) in meshes {
+            quads += mesh.quads();
+            self.pipeline.upload_chunk(&self.gpu, key, &mesh);
+        }
+        tracing::info!(
+            chunks = meshed,
+            quads,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "meshed dirty chunks"
+        );
+    }
+
+    fn set_grab(&mut self, grab: bool) {
+        let mode = if grab {
+            CursorGrabMode::Locked
+        } else {
+            CursorGrabMode::None
+        };
+        let result = self.window.set_cursor_grab(mode).or_else(|_| {
+            self.window.set_cursor_grab(if grab {
+                CursorGrabMode::Confined
+            } else {
+                CursorGrabMode::None
+            })
+        });
+        match result {
+            Ok(()) => {
+                self.window.set_cursor_visible(!grab);
+                self.grabbed = grab;
+            }
+            Err(err) => tracing::warn!(%err, "cursor grab change failed"),
+        }
+    }
+
+    fn update_camera(&mut self, input: &InputState, dt: f32) {
+        if self.grabbed {
+            let d = input.mouse_delta;
+            self.camera
+                .look(-d.x * LOOK_SENSITIVITY, -d.y * LOOK_SENSITIVITY);
+        }
+        let mut wish = Vec3::ZERO;
+        let forward = self.camera.forward();
+        let right = self.camera.right();
+        if input.key_down(KeyCode::KeyW) {
+            wish += forward;
+        }
+        if input.key_down(KeyCode::KeyS) {
+            wish -= forward;
+        }
+        if input.key_down(KeyCode::KeyD) {
+            wish += right;
+        }
+        if input.key_down(KeyCode::KeyA) {
+            wish -= right;
+        }
+        if input.key_down(KeyCode::Space) {
+            wish += Vec3::Y;
+        }
+        if input.key_down(KeyCode::ShiftLeft) {
+            wish -= Vec3::Y;
+        }
+        if wish != Vec3::ZERO {
+            let boost = if input.key_down(KeyCode::ControlLeft) {
+                5.0
+            } else {
+                1.0
+            };
+            self.camera.pos += wish.normalize() * FLY_SPEED * boost * dt;
+        }
+    }
+
+    fn report_stats(&mut self, stats: vox_render::DrawStats) {
+        self.frames += 1;
+        if self.last_report.elapsed().as_secs_f32() >= 1.0 {
+            tracing::info!(
+                fps = self.frames,
+                drawn = stats.drawn,
+                culled = stats.culled,
+                cam = ?voxel_at(self.camera.pos, self.world.cfg.voxel_size_m),
+                "frame stats"
+            );
+            self.frames = 0;
+            self.last_report = Instant::now();
+        }
     }
 }
 
 impl App for VoxApp {
-    fn frame(&mut self, input: &mut InputState, _timing: FrameTiming) -> FrameControl {
+    fn frame(&mut self, input: &mut InputState, timing: FrameTiming) -> FrameControl {
         if input.key_pressed(KeyCode::Escape) {
-            return FrameControl::Exit;
+            if self.grabbed {
+                self.set_grab(false);
+            } else {
+                return FrameControl::Exit;
+            }
         }
+        if input.mouse_clicked(MouseButton::Left) && !self.grabbed {
+            self.set_grab(true);
+        }
+        self.update_camera(input, timing.dt_frame);
+
+        let (w, h) = self.gpu.surface_size();
+        let aspect = w as f32 / h.max(1) as f32;
+        let view_proj = self.camera.view_proj(aspect);
+        self.pipeline
+            .write_camera(&self.gpu, view_proj, self.camera.pos, FOG_END_M);
+        let frustum = Frustum::from_view_proj(view_proj);
 
         let frame = match self.gpu.begin_frame() {
             Ok(frame) => frame,
             Err(err) if err.is_transient() => {
-                // Lost/Outdated surfaces were already reconfigured inside
-                // begin_frame; just skip this frame.
                 tracing::warn!(error = %err, "transient surface error; skipping frame");
                 return FrameControl::Continue;
             }
@@ -54,9 +276,10 @@ impl App for VoxApp {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("frame-encoder"),
                 });
+        let stats;
         {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear-pass"),
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("voxel-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: frame.view(),
                     resolve_target: None,
@@ -76,9 +299,12 @@ impl App for VoxApp {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            stats = self.pipeline.draw_chunks(&mut pass, &frustum);
         }
         self.gpu.queue().submit([encoder.finish()]);
         frame.present();
+
+        self.report_stats(stats);
         FrameControl::Continue
     }
 
