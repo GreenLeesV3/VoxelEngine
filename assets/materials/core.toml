@@ -2,6 +2,12 @@
 # declared here; these materials get ids 1.. in declaration order.
 # Keys: name, color (linear RGB, 0..=1), jitter (0..=1, default 0.0),
 # density (kg/m³, > 0), strength (relative, >= 0), solid (default true).
+#
+# `strength` is relative destruction resistance: the blast/carve tools compare
+# against it, so higher values survive bigger blasts. `solid = false` means
+# air-like: no collision and skipped by the mesher.
+# Every *.toml in this directory is loaded in case-insensitive filename order;
+# a material name declared in two files is an error.
 
 [[material]]
 name = "stone"

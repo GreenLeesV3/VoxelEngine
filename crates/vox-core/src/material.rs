@@ -102,9 +102,10 @@ impl MaterialRegistry {
         Ok(registry)
     }
 
-    /// Read all `*.toml` files in `dir` sorted by filename and merge them in
-    /// order. A duplicate material name across files is an error; a missing
-    /// or unreadable directory is a [`CoreError::Asset`].
+    /// Read all `*.toml` files in `dir` sorted by filename (ASCII
+    /// case-insensitive, so order matches on case-insensitive filesystems) and
+    /// merge them in order. A duplicate material name across files is an
+    /// error; a missing or unreadable directory is a [`CoreError::Asset`].
     pub fn load_dir(dir: &Path) -> Result<Self, CoreError> {
         let entries = std::fs::read_dir(dir).map_err(|e| CoreError::Asset {
             path: dir.display().to_string(),
@@ -125,8 +126,13 @@ impl MaterialRegistry {
                 files.push(path);
             }
         }
-        // All paths share the `dir` prefix, so path order is filename order.
-        files.sort();
+        // Merge order = filename order, case-folded so `MyMod.toml` does not
+        // jump ahead of `core.toml` on case-insensitive filesystems.
+        files.sort_by_key(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default()
+        });
 
         let mut registry = Self::with_air();
         for path in files {
@@ -242,7 +248,7 @@ impl MaterialRegistry {
             return Err(material_error(
                 origin,
                 &name,
-                "registry is full: material ids are u16 (at most 65_536 materials including air)",
+                "registry is full: material ids are u16 (at most 65536 materials including air)",
             ));
         }
         // Fits by the cap check above.
@@ -516,5 +522,63 @@ mod tests {
             .expect("leaves present");
         assert_eq!(leaves.jitter, 0.10);
         assert!(leaves.solid, "solid defaults to true in shipped file");
+    }
+
+    /// Pins `deny_unknown_fields`: a typo'd optional key must fail loudly
+    /// instead of being silently ignored (the modding surface depends on it).
+    #[test]
+    fn unknown_keys_are_rejected_naming_the_typo() {
+        let source = r#"
+            [[material]]
+            name = "typo"
+            color = [0.2, 0.2, 0.2]
+            density = 1.0
+            strength = 0.0
+            jiter = 0.1
+        "#;
+        let err =
+            MaterialRegistry::from_toml_str(source, "typo.toml").expect_err("typo key must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("typo.toml"), "must name origin: {msg}");
+        assert!(msg.contains("jiter"), "must name the unknown key: {msg}");
+    }
+
+    #[test]
+    fn out_of_range_numeric_values_are_rejected_naming_the_key() {
+        let cases = [
+            ("density", "density = 0.0\nstrength = 1.0"),
+            ("density", "density = -5.0\nstrength = 1.0"),
+            ("density", "density = nan\nstrength = 1.0"),
+            ("strength", "density = 1.0\nstrength = -1.0"),
+            ("strength", "density = 1.0\nstrength = nan"),
+            ("jitter", "density = 1.0\nstrength = 1.0\njitter = 1.5"),
+            ("jitter", "density = 1.0\nstrength = 1.0\njitter = nan"),
+        ];
+        for (key, body) in cases {
+            let source = format!("[[material]]\nname = \"bad\"\ncolor = [0.2, 0.2, 0.2]\n{body}\n");
+            let err = MaterialRegistry::from_toml_str(&source, "range.toml")
+                .err()
+                .unwrap_or_else(|| panic!("case `{body}` must be rejected"));
+            let msg = err.to_string();
+            assert!(msg.contains(key), "error must name key `{key}`: {msg}");
+            assert!(msg.contains("bad"), "error must name the material: {msg}");
+        }
+    }
+
+    #[test]
+    fn load_dir_sort_is_case_insensitive() {
+        let dir = TempDir::new("case");
+        // Byte order would put `MyMod.toml` (M = 0x4D) before `core.toml`;
+        // case-folded filename order must not.
+        dir.write("MyMod.toml", &material("modded"));
+        dir.write("core.toml", &material("base"));
+
+        let reg = MaterialRegistry::load_dir(&dir.0).expect("load_dir succeeds");
+        assert_eq!(
+            reg.id_by_name("base"),
+            Some(MaterialId(1)),
+            "core.toml must load before MyMod.toml"
+        );
+        assert_eq!(reg.id_by_name("modded"), Some(MaterialId(2)));
     }
 }
