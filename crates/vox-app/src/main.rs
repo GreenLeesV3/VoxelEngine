@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use glam::{IVec3, Vec3};
+use glam::{IVec3, Mat4, Vec3};
 use rayon::prelude::*;
 
 use player::Player;
@@ -19,9 +19,10 @@ use vox_core::consts::CHUNK_SIZE;
 use vox_core::{MaterialRegistry, WorldConfig, chunk_origin, voxel_at};
 use vox_gen::{TerrainGen, TerrainMaterials, TreeMaterials, generate_trees};
 use vox_mesh::{VoxelSlab, mesh_slab};
+use vox_physics::{Body, PhysicsWorld, VoxelGrid};
 use vox_platform::{App, FrameControl, FrameTiming, InputState, run_app};
 use vox_render::{Camera, Frustum, Gpu, VoxelPipeline};
-use vox_world::World;
+use vox_world::{Voxel, World};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
@@ -78,6 +79,7 @@ struct VoxApp {
     camera: Camera,
     tools: Tools,
     remesh: RemeshQueue,
+    phys: PhysicsWorld,
     grabbed: bool,
     frames: u32,
     last_report: Instant,
@@ -112,6 +114,7 @@ impl VoxApp {
             camera: Camera::new(Vec3::ZERO),
             tools,
             remesh: RemeshQueue::new(),
+            phys: PhysicsWorld::new(),
             grabbed: false,
             frames: 0,
             last_report: Instant::now(),
@@ -153,6 +156,52 @@ impl VoxApp {
             elapsed_ms = start.elapsed().as_millis() as u64,
             "initial world mesh"
         );
+    }
+
+    /// Spawn a debris body at `origin_m` (a solid `extent`^3 wood cube),
+    /// meshing and uploading it immediately, with `vel_m_s` initial velocity.
+    fn spawn_debris(&mut self, origin_m: Vec3, extent: i32, vel_m_s: Vec3) {
+        let wood = self
+            .registry
+            .id_by_name("wood")
+            .map(|m| Voxel(m.0))
+            .unwrap_or(Voxel(1));
+        let dims = IVec3::splat(extent);
+        let voxels = vec![wood; (dims.x * dims.y * dims.z) as usize];
+        let grid = VoxelGrid::new(dims, voxels.clone());
+        let Some(mut body) =
+            Body::from_grid(grid, &self.registry, self.world.cfg.voxel_size_m, origin_m)
+        else {
+            return; // Massless grid (shouldn't happen for a solid cube).
+        };
+        body.vel = vel_m_s;
+        let id = self.phys.spawn(body);
+
+        let slab = VoxelSlab::from_grid(dims, &voxels);
+        let mesh = mesh_slab(&slab);
+        self.pipeline
+            .upload_body(&self.gpu, (id.slot, id.generation), &mesh);
+        tracing::info!(?id, ?origin_m, "spawned debris body");
+    }
+
+    /// Rewrite every awake debris body's GPU transform from the interpolated
+    /// physics state. Chunk mesh vertices are in grid-voxel corner units
+    /// scaled by `voxel_size_m` in the shader; the same scaling applies to
+    /// debris, so the model matrix carries only translation and rotation.
+    fn sync_debris_render(&mut self, alpha: f32) {
+        for (id, body) in self.phys.iter() {
+            let (pos, rot) = self
+                .phys
+                .interpolated_transform(id, alpha)
+                .expect("id came from iter()");
+            // grid_offset is already in meters (mass_props computes com_local
+            // in meters); the shader's `local` is also meters after scaling
+            // grid-corner units by voxel_size_m, so no unit conversion here.
+            let model = Mat4::from_rotation_translation(rot, pos)
+                * Mat4::from_translation(body.grid_offset);
+            self.pipeline
+                .update_body_transform(&self.gpu, (id.slot, id.generation), model);
+        }
     }
 
     fn set_grab(&mut self, grab: bool) {
@@ -208,6 +257,8 @@ impl VoxApp {
                 culled = stats.culled,
                 queue = self.remesh.pending_len(),
                 in_flight = self.remesh.in_flight,
+                bodies = self.phys.body_count(),
+                bodies_awake = self.phys.awake_count(),
                 pos = ?voxel_at(self.player.ctrl.pos, self.world.cfg.voxel_size_m),
                 grounded = self.player.ctrl.grounded,
                 "frame stats"
@@ -235,6 +286,19 @@ impl App for VoxApp {
         if input.key_pressed(KeyCode::KeyF) {
             self.player.toggle_fly();
         }
+        if input.key_pressed(KeyCode::KeyB) {
+            let origin = self.player.eye(1.0) + self.player.look_dir() * 4.0;
+            self.spawn_debris(origin, 4, self.player.look_dir() * 8.0);
+        }
+        if input.key_pressed(KeyCode::KeyX) {
+            let removed = self.phys.clear_sleeping();
+            for id in &removed {
+                self.pipeline.remove_body((id.slot, id.generation));
+            }
+            if !removed.is_empty() {
+                tracing::info!(count = removed.len(), "cleared sleeping debris");
+            }
+        }
         for (key, tool) in [
             (KeyCode::Digit1, Tool::Place),
             (KeyCode::Digit2, Tool::Break),
@@ -254,14 +318,18 @@ impl App for VoxApp {
         }
         self.player
             .fixed_steps(&self.world, input, timing.physics_steps);
+        for _ in 0..timing.physics_steps {
+            self.phys.step(&self.world, vox_core::consts::PHYSICS_DT);
+        }
 
         // Remeshing: absorb edits, dispatch to workers, upload results.
-        // Physics wake-up consumption arrives with the rigidbody milestone.
+        // Physics wake-up consumption arrives with the destruction milestone.
         let _ = self.world.drain_dirty_regions();
         self.remesh.absorb_dirty(&mut self.world);
         let eye = self.player.eye(timing.alpha);
         self.remesh.dispatch(&self.world, eye);
         self.remesh.collect(&self.gpu, &mut self.pipeline);
+        self.sync_debris_render(timing.alpha);
 
         // Camera from the interpolated player eye.
         self.camera.pos = eye;
@@ -316,6 +384,7 @@ impl App for VoxApp {
                 occlusion_query_set: None,
             });
             stats = self.pipeline.draw_chunks(&mut pass, &frustum);
+            self.pipeline.draw_bodies(&mut pass);
         }
         self.gpu.queue().submit([encoder.finish()]);
         frame.present();

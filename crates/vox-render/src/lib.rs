@@ -1,9 +1,7 @@
-//! wgpu-based renderer for voxel meshes.
-//!
-//! Currently provides GPU bootstrap and per-frame surface acquisition
-//! ([`Gpu`], [`Frame`]); mesh rendering arrives in later milestones. This
-//! crate deliberately has no winit dependency: window types enter only as
-//! [`wgpu::SurfaceTarget`].
+//! wgpu-based renderer: GPU bootstrap, the opaque voxel pipeline (drawing
+//! both world chunks and debris bodies), frustum culling, and a fly camera.
+//! This crate deliberately has no winit dependency: window types enter only
+//! as [`wgpu::SurfaceTarget`].
 
 pub mod camera;
 pub mod frustum;
@@ -13,7 +11,7 @@ pub mod voxel_pipeline;
 pub use camera::Camera;
 pub use frustum::Frustum;
 pub use gpu::{DEPTH_FORMAT, Frame, Gpu};
-pub use voxel_pipeline::{DrawStats, VoxelPipeline};
+pub use voxel_pipeline::{BodyMeshKey, DrawStats, VoxelPipeline};
 
 /// Errors from GPU initialization and per-frame surface operations.
 #[derive(Debug, thiserror::Error)]

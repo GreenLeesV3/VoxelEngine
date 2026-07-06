@@ -118,15 +118,19 @@ impl PhysicsWorld {
             .count()
     }
 
-    /// Remove all sleeping bodies (dev convenience). Returns removed count.
-    pub fn clear_sleeping(&mut self) -> usize {
-        let mut removed = 0;
+    /// Remove all sleeping bodies (dev convenience). Returns their ids so the
+    /// caller can drop any associated GPU meshes.
+    pub fn clear_sleeping(&mut self) -> Vec<BodyId> {
+        let mut removed = Vec::new();
         for slot in 0..self.slots.len() {
             if self.slots[slot].as_ref().is_some_and(|b| b.sleep.asleep) {
+                removed.push(BodyId {
+                    slot: slot as u32,
+                    generation: self.generations[slot],
+                });
                 self.slots[slot] = None;
                 self.generations[slot] += 1;
                 self.free.push(slot);
-                removed += 1;
             }
         }
         removed

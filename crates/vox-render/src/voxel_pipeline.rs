@@ -44,6 +44,20 @@ pub struct DrawStats {
     pub culled: u32,
 }
 
+/// A debris body's mesh: geometry is static (meshed once at spawn), the
+/// instance transform is rewritten every frame via `write_buffer`.
+struct GpuBodyMesh {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    index_count: u32,
+    instance: wgpu::Buffer,
+}
+
+/// Identifies a debris body's GPU mesh; callers use their physics body
+/// handle's (slot, generation) pair so a despawned-and-reused slot can never
+/// collide with a stale mesh.
+pub type BodyMeshKey = (u32, u32);
+
 /// The voxel pipeline: shader, bind group (camera + palette), and the chunk
 /// mesh store.
 pub struct VoxelPipeline {
@@ -51,6 +65,7 @@ pub struct VoxelPipeline {
     camera_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     chunks: HashMap<IVec3, GpuMesh>,
+    bodies: HashMap<BodyMeshKey, GpuBodyMesh>,
     voxel_size_m: f32,
 }
 
@@ -219,6 +234,7 @@ impl VoxelPipeline {
             camera_buf,
             bind_group,
             chunks: HashMap::new(),
+            bodies: HashMap::new(),
             voxel_size_m,
         }
     }
@@ -272,6 +288,65 @@ impl VoxelPipeline {
         self.chunks.len()
     }
 
+    /// Upload a debris body's mesh once at spawn. Geometry is in grid-voxel
+    /// units (as produced by `mesh_slab` over a `VoxelSlab::from_grid`); the
+    /// per-frame transform is written separately via `update_body_transform`.
+    pub fn upload_body(&mut self, gpu: &Gpu, key: BodyMeshKey, mesh: &MeshData) {
+        if mesh.is_empty() {
+            self.bodies.remove(&key);
+            return;
+        }
+        let device = gpu.device();
+        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("body vertices"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("body indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        // Identity placeholder; the first `update_body_transform` call before
+        // any draw overwrites it with the body's real transform.
+        let instance = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("body instance"),
+            contents: bytemuck::cast_slice(&Mat4::IDENTITY.to_cols_array()),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        self.bodies.insert(
+            key,
+            GpuBodyMesh {
+                vertices,
+                indices,
+                index_count: mesh.indices.len() as u32,
+                instance,
+            },
+        );
+    }
+
+    /// Rewrite a resident body's per-frame model matrix. No-op if the body's
+    /// mesh isn't uploaded (e.g. this frame's despawn already raced ahead).
+    pub fn update_body_transform(&self, gpu: &Gpu, key: BodyMeshKey, model: Mat4) {
+        if let Some(mesh) = self.bodies.get(&key) {
+            gpu.queue().write_buffer(
+                &mesh.instance,
+                0,
+                bytemuck::cast_slice(&model.to_cols_array()),
+            );
+        }
+    }
+
+    /// Drop a debris body's mesh (despawned or cleared).
+    pub fn remove_body(&mut self, key: BodyMeshKey) {
+        self.bodies.remove(&key);
+    }
+
+    /// Number of resident debris body meshes.
+    pub fn body_mesh_count(&self) -> usize {
+        self.bodies.len()
+    }
+
     /// Update the camera/environment uniform for this frame.
     pub fn write_camera(&self, gpu: &Gpu, view_proj: Mat4, cam_pos: Vec3, fog_end_m: f32) {
         let sun = Vec3::new(-0.45, -0.8, -0.35).normalize();
@@ -306,5 +381,29 @@ impl VoxelPipeline {
             stats.drawn += 1;
         }
         stats
+    }
+
+    /// Draw every resident debris body (no culling — the debris budget is
+    /// small enough that per-body AABB culling isn't worth vox-render taking
+    /// a dependency on vox-physics just to receive world-space bounds).
+    /// Assumes the pipeline/bind group are already bound (call after
+    /// `draw_chunks` in the same pass, or call `bind` first).
+    pub fn draw_bodies<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
+        let mut drawn = 0;
+        for mesh in self.bodies.values() {
+            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+            pass.set_vertex_buffer(1, mesh.instance.slice(..));
+            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            drawn += 1;
+        }
+        drawn
+    }
+
+    /// Bind the pipeline and its bind group (needed if drawing bodies without
+    /// having first called `draw_chunks` in this pass).
+    pub fn bind<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
     }
 }
