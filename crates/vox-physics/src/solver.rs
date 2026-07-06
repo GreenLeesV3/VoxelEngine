@@ -573,6 +573,117 @@ mod tests {
     }
 
     #[test]
+    fn two_cubes_stack_and_both_sleep() {
+        let reg = registry();
+        let world = floored_world();
+        let mut phys = PhysicsWorld::new();
+        let bottom = phys.spawn(cube_body(&reg, 4, Vec3::new(16.0, 4.5, 16.0)));
+        for _ in 0..120 {
+            phys.step(&world, PHYSICS_DT);
+        }
+        assert!(
+            phys.get(bottom).expect("alive").sleep.asleep,
+            "bottom must settle first"
+        );
+
+        let top = phys.spawn(cube_body(&reg, 4, Vec3::new(16.0, 5.2, 16.0)));
+        for _ in 0..240 {
+            phys.step(&world, PHYSICS_DT);
+        }
+
+        let b = phys.get(bottom).expect("alive");
+        let t = phys.get(top).expect("alive");
+        assert!(b.sleep.asleep, "bottom cube must (re)settle asleep");
+        assert!(t.sleep.asleep, "top cube must settle asleep");
+        // Bottom rests on the 4 m floor (0.4 m cube), top rests on bottom.
+        assert!(
+            (b.aabb_min.y - 4.0).abs() < 0.02,
+            "bottom rest height {}",
+            b.aabb_min.y
+        );
+        assert!(
+            (t.aabb_min.y - b.aabb_max.y).abs() < 0.02,
+            "top must rest on bottom: top_min={} bottom_max={}",
+            t.aabb_min.y,
+            b.aabb_max.y
+        );
+    }
+
+    #[test]
+    fn pile_of_twelve_in_a_pit_does_not_explode() {
+        let reg = registry();
+        // A 1.5 m x 1.5 m walled pit on the floor (floor at 4 m, walls to 7 m).
+        let mut world = floored_world();
+        let (lo, hi) = (14.0_f32, 15.5_f32);
+        let wall_top = 70; // 7.0 m at 0.1 m voxels
+        let floor_top = 40; // 4.0 m
+        let s = 0.1;
+        let iv = |m: f32| (m / s) as i32;
+        world.fill_box(
+            IVec3::new(iv(lo), floor_top, iv(lo)),
+            IVec3::new(iv(lo) + 1, wall_top, iv(hi)),
+            STONE,
+        );
+        world.fill_box(
+            IVec3::new(iv(hi), floor_top, iv(lo)),
+            IVec3::new(iv(hi) + 1, wall_top, iv(hi)),
+            STONE,
+        );
+        world.fill_box(
+            IVec3::new(iv(lo), floor_top, iv(lo)),
+            IVec3::new(iv(hi), wall_top, iv(lo) + 1),
+            STONE,
+        );
+        world.fill_box(
+            IVec3::new(iv(lo), floor_top, iv(hi)),
+            IVec3::new(iv(hi), wall_top, iv(hi) + 1),
+            STONE,
+        );
+
+        let mut phys = PhysicsWorld::new();
+        let mut rng = Rng(0xBADC0DE);
+        let mut ids = Vec::new();
+        for i in 0..12 {
+            let com = Vec3::new(
+                rng.range(14.3, 15.2),
+                5.0 + i as f32 * 0.35,
+                rng.range(14.3, 15.2),
+            );
+            ids.push(phys.spawn(cube_body(&reg, 3, com)));
+        }
+
+        let mut max_speed = 0.0f32;
+        for step in 0..900 {
+            phys.step(&world, PHYSICS_DT);
+            for id in &ids {
+                let b = phys.get(*id).expect("alive");
+                assert!(b.vel.is_finite() && b.pos.is_finite(), "NaN at step {step}");
+                max_speed = max_speed.max(b.vel.length());
+            }
+        }
+        assert!(
+            max_speed < 25.0,
+            "solver exploded: peak speed {max_speed} m/s"
+        );
+        for (i, id) in ids.iter().enumerate() {
+            let b = phys.get(*id).expect("alive");
+            assert!(
+                b.pos.x > lo && b.pos.x < hi && b.pos.z > lo && b.pos.z < hi,
+                "body {i} escaped the pit: {:?}",
+                b.pos
+            );
+        }
+        let asleep = ids
+            .iter()
+            .filter(|id| phys.get(**id).expect("alive").sleep.asleep)
+            .count();
+        assert!(
+            asleep >= 10,
+            "expected most of the pile asleep, got {asleep}/12"
+        );
+    }
+
+    #[test]
     fn world_edit_wakes_sleeping_body() {
         let reg = registry();
         let world = floored_world();
