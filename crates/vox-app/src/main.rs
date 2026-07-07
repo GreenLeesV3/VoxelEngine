@@ -80,6 +80,8 @@ struct VoxApp {
     tools: Tools,
     remesh: RemeshQueue,
     phys: PhysicsWorld,
+    /// Incrementing seed so repeated blasts get varied debris spin.
+    blast_seed: u32,
     grabbed: bool,
     frames: u32,
     last_report: Instant,
@@ -115,6 +117,7 @@ impl VoxApp {
             tools,
             remesh: RemeshQueue::new(),
             phys: PhysicsWorld::new(),
+            blast_seed: 0,
             grabbed: false,
             frames: 0,
             last_report: Instant::now(),
@@ -233,9 +236,27 @@ impl VoxApp {
         if input.mouse_clicked(MouseButton::Left) {
             match self.tools.tool {
                 Tool::Blast => {
-                    tracing::info!("blast tool arrives with the destruction milestone (M5)");
+                    let seed = self.blast_seed;
+                    self.blast_seed = self.blast_seed.wrapping_add(1);
+                    self.tools.blast(
+                        &mut self.world,
+                        &mut self.phys,
+                        &self.registry,
+                        eye,
+                        look,
+                        seed,
+                    );
                 }
-                _ => self.tools.break_voxel(&mut self.world, eye, look),
+                _ => {
+                    if let Some(v) = self.tools.break_voxel(&mut self.world, eye, look) {
+                        Tools::check_broken_support(
+                            &mut self.world,
+                            &mut self.phys,
+                            &self.registry,
+                            v,
+                        );
+                    }
+                }
             }
         }
         if input.mouse_clicked(MouseButton::Right) {
@@ -309,6 +330,14 @@ impl App for VoxApp {
                 tracing::info!(tool = ?tool, "tool selected");
             }
         }
+        if input.key_pressed(KeyCode::BracketLeft) {
+            self.tools.shrink_blast_radius();
+            tracing::info!(radius_m = self.tools.blast_radius, "blast radius");
+        }
+        if input.key_pressed(KeyCode::BracketRight) {
+            self.tools.grow_blast_radius();
+            tracing::info!(radius_m = self.tools.blast_radius, "blast radius");
+        }
 
         if self.grabbed {
             self.player.look(input.mouse_delta);
@@ -322,9 +351,12 @@ impl App for VoxApp {
             self.phys.step(&self.world, vox_core::consts::PHYSICS_DT);
         }
 
-        // Remeshing: absorb edits, dispatch to workers, upload results.
-        // Physics wake-up consumption arrives with the destruction milestone.
-        let _ = self.world.drain_dirty_regions();
+        // Wake any resting debris whose ground was just carved/edited from
+        // under it, then remesh: absorb edits, dispatch to workers, upload.
+        let s = self.world.cfg.voxel_size_m;
+        for (min, max) in self.world.drain_dirty_regions() {
+            self.phys.wake_region(min.as_vec3() * s, max.as_vec3() * s);
+        }
         self.remesh.absorb_dirty(&mut self.world);
         let eye = self.player.eye(timing.alpha);
         self.remesh.dispatch(&self.world, eye);

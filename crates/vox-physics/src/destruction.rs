@@ -98,24 +98,59 @@ const DIRS: [IVec3; 6] = [
     IVec3::NEG_Z,
 ];
 
-/// Find material in `region` that is no longer structurally supported,
-/// extract it from the world, and spawn each surviving component as a
-/// sleeping-eligible (initially awake, zero-velocity) rigid body. Components
-/// under [`DEBRIS_MIN_VOXELS`] are discarded as dust; components over
-/// [`MAX_BODY_VOXELS`] are left in the world untouched. Returns the spawned
-/// body ids.
-pub fn detach_unsupported(
-    world: &mut World,
-    phys: &mut PhysicsWorld,
-    registry: &MaterialRegistry,
-    region: Region,
-) -> Vec<BodyId> {
+/// Region growth: solid material sitting exactly on the search region's
+/// outer shell is ambiguous — it might be genuinely connected to the wide
+/// unexamined world (the common case, and the reason the shell-anchor rule
+/// exists at all), or it might just be *more of the same structure* we're
+/// trying to analyze, arbitrarily clipped by too small a search box (e.g. a
+/// tall column cut at its base: material immediately above the cut sits
+/// right at the padded region's edge). We can't tell which without looking
+/// further, so before running any connectivity analysis, grow the region
+/// until its shell is verified *clean* (no solid material touching it at
+/// all) — at that point nothing is being arbitrarily clipped, so anything
+/// still credited as an anchor is a deliberate, documented fallback, not an
+/// accident. Retry up to this many times, growing by this many voxels each
+/// time; if the shell still isn't clean after the cap, proceed anyway and
+/// let the shell-anchor rule apply as the safe default (never wrongly
+/// detach something that might still be connected further out than we
+/// could afford to check).
+const MAX_REGION_GROWTH_ITERS: u32 = 8;
+const REGION_GROWTH_STEP: i32 = 16;
+
+fn grow_region(region: Region) -> Region {
+    let (min, max) = region;
+    let pad = IVec3::splat(REGION_GROWTH_STEP);
+    (min - pad, max + pad)
+}
+
+/// True if any solid voxel lies exactly on `region`'s outer shell (its six
+/// faces only — cheap relative to scanning the whole volume).
+fn solid_touches_shell(world: &World, region: Region) -> bool {
+    let (min, max) = region;
+    let x_face =
+        |x: i32| (min.z..max.z).any(|z| (min.y..max.y).any(|y| world.solid(IVec3::new(x, y, z))));
+    let y_face =
+        |y: i32| (min.z..max.z).any(|z| (min.x..max.x).any(|x| world.solid(IVec3::new(x, y, z))));
+    let z_face =
+        |z: i32| (min.y..max.y).any(|y| (min.x..max.x).any(|x| world.solid(IVec3::new(x, y, z))));
+    x_face(min.x)
+        || x_face(max.x - 1)
+        || y_face(min.y)
+        || y_face(max.y - 1)
+        || z_face(min.z)
+        || z_face(max.z - 1)
+}
+
+/// Pure connectivity analysis: which solid voxels in `region` are no longer
+/// reachable from an anchor (region-shell material, assumed connected to the
+/// unexamined rest of the world, or anything resting on the world floor).
+/// Returns each unsupported connected component as a list of world-voxel
+/// positions. Does not touch the world.
+fn find_unsupported_components(world: &World, region: Region) -> Vec<Vec<IVec3>> {
     let (region_min, region_max) = region;
     let floor_y = world.bounds_voxels().0.y;
 
-    // Pass 1: collect solid voxels in the region and seed anchors — solid
-    // voxels touching the region's outer shell (assumed connected to
-    // whatever lies beyond it) or resting on the world floor.
+    // Pass 1: collect solid voxels in the region and seed anchors.
     let mut solid: HashSet<IVec3> = HashSet::new();
     let mut anchors: Vec<IVec3> = Vec::new();
     for z in region_min.z..region_max.z {
@@ -178,6 +213,35 @@ pub fn detach_unsupported(
         }
         components.push(comp);
     }
+    components
+}
+
+/// Find material in `region` that is no longer structurally supported,
+/// extract it from the world, and spawn each surviving component as a
+/// sleeping-eligible (initially awake, zero-velocity) rigid body. Components
+/// under [`DEBRIS_MIN_VOXELS`] are discarded as dust; components over
+/// [`MAX_BODY_VOXELS`] are left in the world untouched. Returns the spawned
+/// body ids.
+///
+/// Grows `region` first until its shell is verified clean of solid material
+/// (or the growth cap is hit) — see [`MAX_REGION_GROWTH_ITERS`] — so a
+/// structure taller or wider than the initial search box (e.g. a tall
+/// column cut at its base) is fully captured before analysis runs, rather
+/// than having its far side mistaken for an anchor.
+pub fn detach_unsupported(
+    world: &mut World,
+    phys: &mut PhysicsWorld,
+    registry: &MaterialRegistry,
+    region: Region,
+) -> Vec<BodyId> {
+    let mut region = region;
+    for _ in 0..MAX_REGION_GROWTH_ITERS {
+        if !solid_touches_shell(world, region) {
+            break;
+        }
+        region = grow_region(region);
+    }
+    let components = find_unsupported_components(world, region);
 
     // Pass 4: extract each component per the size policy.
     let voxel_size_m = world.cfg.voxel_size_m;
@@ -329,6 +393,36 @@ mod tests {
 
         assert!(ids.is_empty(), "bridge still anchored via the other pillar");
         assert_eq!(world.get_voxel(IVec3::new(12, 10, 5)), STONE);
+    }
+
+    #[test]
+    fn region_grows_to_capture_a_tall_severed_column() {
+        // A 60-voxel-tall, 1-wide pillar resting on the floor. Sever it near
+        // the base with a small manual cut and hand the connectivity check
+        // only a SMALL initial region around that cut — much shorter than
+        // the pillar — forcing region growth to find the true extent of the
+        // (now floating) upper 55-voxel section.
+        let mut world = World::new(WorldConfig {
+            voxel_size_m: 1.0,
+            extent_m: [32.0, 96.0, 32.0],
+            ..WorldConfig::default()
+        });
+        world.fill_box(IVec3::new(5, 0, 5), IVec3::new(6, 5, 6), STONE);
+        world.fill_box(IVec3::new(5, 5, 5), IVec3::new(6, 65, 6), STONE); // 60 voxels tall
+        world.fill_box(IVec3::new(5, 5, 5), IVec3::new(6, 8, 6), AIR); // sever at y=5..8
+
+        let reg = registry();
+        let mut phys = PhysicsWorld::new();
+        let small_region = (IVec3::new(3, 3, 3), IVec3::new(8, 10, 8));
+        let ids = detach_unsupported(&mut world, &mut phys, &reg, small_region);
+
+        assert_eq!(ids.len(), 1, "the 57-voxel upper section must detach");
+        let body = phys.get(ids[0]).expect("alive");
+        assert_eq!(
+            body.grid.solid_count(),
+            65 - 8,
+            "must capture the FULL upper section"
+        );
     }
 
     #[test]
