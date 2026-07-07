@@ -171,7 +171,7 @@
     {
       "id": 21,
       "subject": "Task 21: vox-debug egui overlay (HUD, timings, tuning)",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [
         20
       ]
@@ -193,5 +193,5 @@
       ]
     }
   ],
-  "lastUpdated": "2026-07-06T22:00:00Z"
+  "lastUpdated": "2026-07-07T01:20:00Z"
 }
