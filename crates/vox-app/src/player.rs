@@ -9,8 +9,6 @@ use winit::keyboard::KeyCode;
 
 /// Walking speed in m/s.
 const WALK_SPEED: f32 = 4.3;
-/// Noclip flight speed in m/s (`Ctrl` multiplies by 5).
-const FLY_SPEED: f32 = 12.0;
 /// Mouse look sensitivity in radians per pixel.
 const LOOK_SENSITIVITY: f32 = 0.0025;
 /// Pitch limit just short of straight up/down.
@@ -21,6 +19,9 @@ pub struct Player {
     pub ctrl: CharacterController,
     pub yaw: f32,
     pub pitch: f32,
+    /// Noclip/fly speed in m/s (`Ctrl` multiplies by 5); live-tunable via the
+    /// debug overlay, synced each frame from `vox_core::Tunables::fly_speed`.
+    pub fly_speed: f32,
     prev_pos: Vec3,
 }
 
@@ -30,6 +31,7 @@ impl Player {
             ctrl: CharacterController::new(pos),
             yaw: 0.0,
             pitch: 0.0,
+            fly_speed: vox_core::Tunables::default().fly_speed,
             prev_pos: pos,
         }
     }
@@ -91,7 +93,7 @@ impl Player {
                 } else {
                     1.0
                 };
-                FLY_SPEED * boost
+                self.fly_speed * boost
             } else {
                 WALK_SPEED
             };

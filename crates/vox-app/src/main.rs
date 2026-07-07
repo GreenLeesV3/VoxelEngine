@@ -16,7 +16,10 @@ use remesh::RemeshQueue;
 use tools::{Tool, Tools};
 
 use vox_core::consts::CHUNK_SIZE;
-use vox_core::{MaterialRegistry, WorldConfig, chunk_origin, voxel_at};
+use vox_core::{
+    FrameProfile, MaterialRegistry, ScopedTimer, Tunables, WorldConfig, chunk_origin, voxel_at,
+};
+use vox_debug::{DebugOverlay, OverlayState};
 use vox_gen::{TerrainGen, TerrainMaterials, TreeMaterials, generate_trees};
 use vox_mesh::{VoxelSlab, mesh_slab};
 use vox_physics::{Body, PhysicsWorld, VoxelGrid};
@@ -85,6 +88,25 @@ struct VoxApp {
     grabbed: bool,
     frames: u32,
     last_report: Instant,
+    /// Live-tunable parameters (friction, blast power, fly speed, ...),
+    /// edited by the debug overlay's sliders and synced into the systems
+    /// that actually consume them once per frame.
+    tunables: Tunables,
+    /// Rolling per-phase frame timings, shown in the debug overlay.
+    profile: FrameProfile,
+    debug_overlay: DebugOverlay,
+    debug_visible: bool,
+    /// Registry material names (excluding air), cached once for the debug
+    /// overlay's material picker.
+    material_names: Vec<String>,
+    /// Index into `material_names` (not into the registry — the offset from
+    /// `Tools`' own 1-based, air-inclusive indexing is handled where it's
+    /// synced back after the overlay runs).
+    selected_material: usize,
+    /// Chunk draw/cull counts from the previous frame — the overlay is built
+    /// before this frame's `draw_chunks` runs, so it necessarily shows the
+    /// prior frame's numbers (one frame of latency, imperceptible in a HUD).
+    last_draw_stats: vox_render::DrawStats,
 }
 
 impl VoxApp {
@@ -105,6 +127,16 @@ impl VoxApp {
         let gpu = Gpu::new(window.clone(), size.width, size.height)?;
         let pipeline = VoxelPipeline::new(&gpu, &shader, &registry, world.cfg.voxel_size_m);
         let tools = Tools::new(&registry);
+        let debug_overlay = DebugOverlay::new(gpu.device(), gpu.surface_format(), &window);
+        // Air (id 0) is never player-selectable; the picker mirrors that.
+        let material_names: Vec<String> = registry
+            .iter()
+            .skip(1)
+            .map(|(_, def)| def.name.clone())
+            .collect();
+        // Tools' material_index is 1-based (air-inclusive); the picker's
+        // index is 0-based into material_names — mirrors set_material_index.
+        let selected_material = tools.material_index() - 1;
 
         let mut app = Self {
             window,
@@ -121,6 +153,13 @@ impl VoxApp {
             grabbed: false,
             frames: 0,
             last_report: Instant::now(),
+            tunables: Tunables::default(),
+            profile: FrameProfile::new(),
+            debug_overlay,
+            debug_visible: false,
+            material_names,
+            selected_material,
+            last_draw_stats: vox_render::DrawStats::default(),
         };
         app.initial_mesh();
 
@@ -244,6 +283,7 @@ impl VoxApp {
                         &self.registry,
                         eye,
                         look,
+                        self.tunables.blast_power,
                         seed,
                     );
                 }
@@ -292,6 +332,10 @@ impl VoxApp {
 
 impl App for VoxApp {
     fn frame(&mut self, input: &mut InputState, timing: FrameTiming) -> FrameControl {
+        // Measured manually (not via ScopedTimer's RAII guard): this block
+        // calls several &mut self methods (set_grab, spawn_debris, ...),
+        // which would conflict with a live &mut self.profile.input borrow.
+        let input_start = Instant::now();
         if input.key_pressed(KeyCode::Escape) {
             if self.grabbed {
                 self.set_grab(false);
@@ -338,29 +382,56 @@ impl App for VoxApp {
             self.tools.grow_blast_radius();
             tracing::info!(radius_m = self.tools.blast_radius, "blast radius");
         }
+        if input.key_pressed(KeyCode::F3) {
+            self.debug_visible = !self.debug_visible;
+        }
+        self.profile
+            .input
+            .push(input_start.elapsed().as_secs_f32() * 1000.0);
+
+        // Sync the debug overlay's live tunables into the systems that
+        // actually consume them (both fields are pub; this is a cheap copy,
+        // not a real coupling).
+        self.player.fly_speed = self.tunables.fly_speed;
+        self.phys.tunables = self.tunables;
 
         if self.grabbed {
             self.player.look(input.mouse_delta);
-            if !grabbed_this_frame {
-                self.apply_tools(input);
-            }
         }
-        self.player
-            .fixed_steps(&self.world, input, timing.physics_steps);
-        for _ in 0..timing.physics_steps {
-            self.phys.step(&self.world, vox_core::consts::PHYSICS_DT);
+        {
+            let _t = ScopedTimer::new(&mut self.profile.player);
+            self.player
+                .fixed_steps(&self.world, input, timing.physics_steps);
+        }
+        if self.grabbed && !grabbed_this_frame {
+            // Manual timing: apply_tools takes &mut self as a whole, which
+            // would conflict with a live &mut self.profile.tools borrow.
+            let tools_start = Instant::now();
+            self.apply_tools(input);
+            self.profile
+                .tools
+                .push(tools_start.elapsed().as_secs_f32() * 1000.0);
+        }
+        {
+            let _t = ScopedTimer::new(&mut self.profile.physics);
+            for _ in 0..timing.physics_steps {
+                self.phys.step(&self.world, vox_core::consts::PHYSICS_DT);
+            }
         }
 
         // Wake any resting debris whose ground was just carved/edited from
         // under it, then remesh: absorb edits, dispatch to workers, upload.
-        let s = self.world.cfg.voxel_size_m;
-        for (min, max) in self.world.drain_dirty_regions() {
-            self.phys.wake_region(min.as_vec3() * s, max.as_vec3() * s);
-        }
-        self.remesh.absorb_dirty(&mut self.world);
         let eye = self.player.eye(timing.alpha);
-        self.remesh.dispatch(&self.world, eye);
-        self.remesh.collect(&self.gpu, &mut self.pipeline);
+        {
+            let _t = ScopedTimer::new(&mut self.profile.remesh);
+            let s = self.world.cfg.voxel_size_m;
+            for (min, max) in self.world.drain_dirty_regions() {
+                self.phys.wake_region(min.as_vec3() * s, max.as_vec3() * s);
+            }
+            self.remesh.absorb_dirty(&mut self.world);
+            self.remesh.dispatch(&self.world, eye);
+            self.remesh.collect(&self.gpu, &mut self.pipeline);
+        }
         self.sync_debris_render(timing.alpha);
 
         // Camera from the interpolated player eye.
@@ -374,6 +445,7 @@ impl App for VoxApp {
             .write_camera(&self.gpu, view_proj, self.camera.pos, FOG_END_M);
         let frustum = Frustum::from_view_proj(view_proj);
 
+        let render_start = Instant::now();
         let frame = match self.gpu.begin_frame() {
             Ok(frame) => frame,
             Err(err) if err.is_transient() => {
@@ -392,6 +464,36 @@ impl App for VoxApp {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("frame-encoder"),
                 });
+
+        // Debug overlay UI must be built and its buffers uploaded before the
+        // render pass opens (buffer uploads can't happen mid-pass); painting
+        // itself happens inside the pass, right after the world.
+        let prepared_overlay = self.debug_visible.then(|| {
+            let (w, h) = self.gpu.surface_size();
+            let state = OverlayState {
+                profile: &self.profile,
+                tunables: &mut self.tunables,
+                fps: self.frames,
+                chunks_drawn: self.last_draw_stats.drawn,
+                chunks_culled: self.last_draw_stats.culled,
+                mesh_queue: self.remesh.pending_len(),
+                bodies_awake: self.phys.awake_count(),
+                bodies_total: self.phys.body_count(),
+                blast_radius: &mut self.tools.blast_radius,
+                material_names: &self.material_names,
+                selected_material: &mut self.selected_material,
+            };
+            self.debug_overlay.prepare(
+                &self.window,
+                self.gpu.device(),
+                self.gpu.queue(),
+                &mut encoder,
+                (w, h),
+                state,
+            )
+        });
+        self.tools.set_material_index(self.selected_material + 1);
+
         let stats;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -417,9 +519,16 @@ impl App for VoxApp {
             });
             stats = self.pipeline.draw_chunks(&mut pass, &frustum);
             self.pipeline.draw_bodies(&mut pass);
+            if let Some(prepared) = &prepared_overlay {
+                self.debug_overlay.paint(&mut pass, prepared);
+            }
         }
         self.gpu.queue().submit([encoder.finish()]);
         frame.present();
+        self.profile
+            .render
+            .push(render_start.elapsed().as_secs_f32() * 1000.0);
+        self.last_draw_stats = stats;
 
         self.report_stats(stats);
         FrameControl::Continue
@@ -429,8 +538,8 @@ impl App for VoxApp {
         self.gpu.resize(width, height);
     }
 
-    fn window_event(&mut self, _event: &winit::event::WindowEvent) -> bool {
-        false
+    fn window_event(&mut self, event: &winit::event::WindowEvent) -> bool {
+        self.debug_overlay.on_window_event(&self.window, event)
     }
 }
 

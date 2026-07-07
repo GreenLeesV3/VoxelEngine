@@ -31,9 +31,9 @@ use crate::solver::PhysicsWorld;
 /// least one still-solid layer to seed anchors correctly.
 const REGION_PAD: i32 = 2;
 
-/// Blast impulse tuning: base strength (arbitrary units tuned by feel) and
-/// the maximum per-axis angular kick in rad/s.
-const BLAST_POWER: f32 = 40.0;
+/// Maximum per-axis angular kick applied to blast debris, in rad/s. Blast
+/// strength itself is a caller-supplied, live-tunable parameter (see
+/// [`blast`]), not a fixed constant.
 const BLAST_SPIN_MAX: f32 = 3.0;
 /// Floor on distance-from-center used in the impulse falloff, so a blast
 /// centered inside debris doesn't produce an infinite/huge speed.
@@ -298,15 +298,22 @@ fn small_hash(a: u32, b: u32) -> u32 {
 
 /// Give each listed body a blast impulse radiating from `center_m`, falling
 /// off with distance and scaled down for heavier bodies, plus a small
-/// deterministic angular kick.
-fn apply_blast_impulse(phys: &mut PhysicsWorld, ids: &[BodyId], center_m: Vec3, seed: u32) {
+/// deterministic angular kick. `power` is the tunable blast strength
+/// ([`vox_core::Tunables::blast_power`], typically).
+fn apply_blast_impulse(
+    phys: &mut PhysicsWorld,
+    ids: &[BodyId],
+    center_m: Vec3,
+    power: f32,
+    seed: u32,
+) {
     for (i, &id) in ids.iter().enumerate() {
         let Some(body) = phys.get(id) else { continue };
         let offset = body.pos - center_m;
         let dist = offset.length();
         let dir = if dist > 1e-6 { offset / dist } else { Vec3::Y };
         let mass = body.mass();
-        let speed = BLAST_POWER / dist.max(BLAST_MIN_DIST_M) / mass.sqrt();
+        let speed = power / dist.max(BLAST_MIN_DIST_M) / mass.sqrt();
 
         let h = small_hash(seed, i as u32);
         let spin = Vec3::new(
@@ -322,19 +329,22 @@ fn apply_blast_impulse(phys: &mut PhysicsWorld, ids: &[BodyId], center_m: Vec3, 
 }
 
 /// Carve a sphere, detach anything left unsupported, give the new debris a
-/// blast impulse, and wake any resting bodies the carve disturbed. `seed`
-/// drives the (deterministic) per-body angular kick.
+/// blast impulse, and wake any resting bodies the carve disturbed. `power`
+/// is the blast strength (pass [`vox_core::Tunables::blast_power`] for the
+/// live-tunable default); `seed` drives the deterministic per-body angular
+/// kick.
 pub fn blast(
     world: &mut World,
     phys: &mut PhysicsWorld,
     registry: &MaterialRegistry,
     center_m: Vec3,
     radius_m: f32,
+    power: f32,
     seed: u32,
 ) -> CarveResult {
     let carve = carve_sphere(world, center_m, radius_m);
     let ids = detach_unsupported(world, phys, registry, carve.region);
-    apply_blast_impulse(phys, &ids, center_m, seed);
+    apply_blast_impulse(phys, &ids, center_m, power, seed);
 
     let s = world.cfg.voxel_size_m;
     phys.wake_region(carve.region.0.as_vec3() * s, carve.region.1.as_vec3() * s);
@@ -524,6 +534,7 @@ mod tests {
             &reg,
             Vec3::new(5.5, 15.0, 5.5),
             12.0,
+            40.0,
             7,
         );
         assert!(carve.removed.len() > 10, "must remove a large chunk");

@@ -58,6 +58,20 @@ impl Tools {
         Voxel(self.material_index as u16)
     }
 
+    /// Set the selected build material directly by registry id (1..N,
+    /// skipping air). Out-of-range ids are ignored. Used by the debug
+    /// overlay's material picker.
+    pub fn set_material_index(&mut self, index: usize) {
+        if index >= 1 && index < self.material_count {
+            self.material_index = index;
+        }
+    }
+
+    /// Current material's registry id (1..N, skipping air).
+    pub fn material_index(&self) -> usize {
+        self.material_index
+    }
+
     /// Cycle the build material by `steps` (mouse wheel), skipping air.
     pub fn cycle_material(&mut self, steps: i32, registry: &MaterialRegistry) {
         let n = self.material_count as i32 - 1; // excluding air
@@ -95,8 +109,13 @@ impl Tools {
     }
 
     /// Blast the crosshair target: carve a sphere, detach whatever becomes
-    /// unsupported, and give the debris a blast impulse. `seed` drives
-    /// per-body spin variation — pass a different value each call.
+    /// unsupported, and give the debris a blast impulse. `power` is the
+    /// live-tunable blast strength; `seed` drives per-body spin variation —
+    /// pass a different value each call.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "plain parameter list is clearer here than a params struct"
+    )]
     pub fn blast(
         &self,
         world: &mut World,
@@ -104,13 +123,22 @@ impl Tools {
         registry: &MaterialRegistry,
         eye_m: Vec3,
         look: Vec3,
+        power: f32,
         seed: u32,
     ) {
         let Some(hit) = raycast(world, eye_m, look, REACH) else {
             return;
         };
         let hit_point_m = eye_m + look * hit.dist_m;
-        vox_physics::blast(world, phys, registry, hit_point_m, self.blast_radius, seed);
+        vox_physics::blast(
+            world,
+            phys,
+            registry,
+            hit_point_m,
+            self.blast_radius,
+            power,
+            seed,
+        );
     }
 
     /// Place the selected material against the hit face, unless it would
@@ -217,7 +245,7 @@ mod tests {
         let cz = px + 0.5 * s;
         let eye = Vec3::new(px - 2.0, floor_top_m + 1.0, cz);
         let look = Vec3::X;
-        tools.blast(&mut world, &mut phys, &reg, eye, look, 1);
+        tools.blast(&mut world, &mut phys, &reg, eye, look, 40.0, 1);
 
         assert!(phys.body_count() > 0, "the upper tower section must detach");
         for (_, body) in phys.iter() {
@@ -236,7 +264,7 @@ mod tests {
         for i in 0..5 {
             let y = floor_top_m + 3.0 + i as f32 * 0.5;
             let rampage_eye = Vec3::new(px - 2.0, y, cz);
-            tools.blast(&mut world, &mut phys, &reg, rampage_eye, look, 2 + i);
+            tools.blast(&mut world, &mut phys, &reg, rampage_eye, look, 40.0, 2 + i);
             for _ in 0..30 {
                 phys.step(&world, PHYSICS_DT);
                 for (_, body) in phys.iter() {

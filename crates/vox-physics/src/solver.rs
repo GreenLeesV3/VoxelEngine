@@ -8,18 +8,17 @@
 use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
-use vox_core::consts::{
-    CONTACT_BETA, CONTACT_SLOP, FRICTION, GRAVITY, SLEEP_ANG, SLEEP_FRAMES, SLEEP_LIN,
-    SOLVER_ITERS, SUBSTEPS,
-};
+use vox_core::Tunables;
+use vox_core::consts::{CONTACT_SLOP, GRAVITY, SLEEP_FRAMES, SOLVER_ITERS, SUBSTEPS};
 use vox_world::World;
 
 use crate::body::{Body, BodyId};
 use crate::broadphase::candidate_pairs;
 use crate::contact::{Contact, ContactKey, pair_contacts, world_contacts};
 
-/// Relative contact speed above which a sleeping body is woken by an impact.
-const WAKE_SPEED: f32 = 2.0 * SLEEP_LIN;
+/// Relative contact speed above which a sleeping body is woken by an impact,
+/// as a multiple of the live `sleep_lin` tunable.
+const WAKE_SPEED_FACTOR: f32 = 2.0;
 
 /// Two distinct mutable borrows out of the slot array.
 fn two_mut(slots: &mut [Option<Body>], a: usize, b: usize) -> (&mut Body, &mut Body) {
@@ -49,6 +48,9 @@ pub struct PhysicsWorld {
     generations: Vec<u32>,
     free: Vec<usize>,
     warm: HashMap<ContactKey, (f32, f32, f32)>,
+    /// Live-tunable solver parameters (friction, contact bias, sleep
+    /// thresholds); public so the debug overlay can bind sliders directly.
+    pub tunables: Tunables,
 }
 
 impl PhysicsWorld {
@@ -181,7 +183,8 @@ impl PhysicsWorld {
             if body.sleep.asleep {
                 continue;
             }
-            let quiet = body.vel.length() < SLEEP_LIN && body.omega.length() < SLEEP_ANG;
+            let quiet = body.vel.length() < self.tunables.sleep_lin
+                && body.omega.length() < self.tunables.sleep_ang;
             body.sleep.quiet_steps = if quiet { body.sleep.quiet_steps + 1 } else { 0 };
         }
 
@@ -310,7 +313,7 @@ impl PhysicsWorld {
             if result.contact_count == 0 {
                 continue;
             }
-            if target_asleep && result.max_rel_speed > WAKE_SPEED {
+            if target_asleep && result.max_rel_speed > WAKE_SPEED_FACTOR * self.tunables.sleep_lin {
                 // Impact wakes the sleeper: regenerate as a dynamic pair.
                 let tb = self.slots[target].as_mut().expect("alive");
                 tb.sleep.asleep = false;
@@ -339,14 +342,14 @@ impl PhysicsWorld {
         for _ in 0..SOLVER_ITERS {
             for c in &mut contacts {
                 let vn = Self::relative_velocity(&self.slots, c).dot(c.normal);
-                let bias = (CONTACT_BETA / h) * (c.depth - CONTACT_SLOP).max(0.0);
+                let bias = (self.tunables.contact_beta / h) * (c.depth - CONTACT_SLOP).max(0.0);
                 let lambda = (bias - vn) / c.kn;
                 let new_acc = (c.acc_n + lambda).max(0.0);
                 let applied = new_acc - c.acc_n;
                 c.acc_n = new_acc;
                 Self::apply_contact_impulse(&mut self.slots, c, c.normal * applied);
 
-                let max_f = FRICTION * c.acc_n;
+                let max_f = self.tunables.friction * c.acc_n;
                 for i in 0..2 {
                     let (t, kt) = if i == 0 { (c.t1, c.kt1) } else { (c.t2, c.kt2) };
                     let vt = Self::relative_velocity(&self.slots, c).dot(t);
