@@ -153,7 +153,7 @@
     {
       "id": 19,
       "subject": "Task 19: carve + connectivity + detach-to-body",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [
         17
       ]
@@ -161,7 +161,7 @@
     {
       "id": 20,
       "subject": "Task 20: blast tool + edit waking + money shot",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [
         19,
         14,
@@ -193,5 +193,5 @@
       ]
     }
   ],
-  "lastUpdated": "2026-07-06T19:00:00Z"
+  "lastUpdated": "2026-07-06T22:00:00Z"
 }
