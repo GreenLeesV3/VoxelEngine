@@ -18,7 +18,7 @@ struct Params {
 // Sobel edge detection on depth using textureLoad (depth textures can't
 // use textureSample — no filtering sampler). Takes integer texel coords.
 fn sobel_depth(texel: vec2u) -> f32 {
-    let w = textureDimensions(depth_tex);
+    let w = vec2i(textureDimensions(depth_tex));
     let tl = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i(-1, -1), vec2i(0), vec2i(w) - 1), 0u);
     let tm = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 0, -1), vec2i(0), vec2i(w) - 1), 0u);
     let tr = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 1, -1), vec2i(0), vec2i(w) - 1), 0u);
