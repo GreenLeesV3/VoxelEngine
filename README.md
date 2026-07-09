@@ -55,7 +55,7 @@ world.
 | 4 | Death Laser | An effectively infinite-range beam that tunnels straight through everything in its path in one shot -- no raycast gate, no impulse, just an instant, total cut. |
 | 5 | Place Water | Fills a sphere of adjustable radius with water at the crosshair target; it starts flowing immediately. |
 
-Slots 5-9 are reserved for future tools.
+Slots 6-9 are reserved for future tools.
 
 ### CLI
 

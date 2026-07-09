@@ -1,6 +1,6 @@
 //! Player tools, selected from a 1-9 hotbar: normal single-voxel dig,
-//! scalable-radius dig, an explosive bomb, and a long-range death laser.
-//! Placing (right-click) is independent of the active tool.
+//! scalable-radius dig, an explosive bomb, a long-range death laser, and
+//! placing water. Placing (right-click) is independent of the active tool.
 
 use glam::{IVec3, Vec3};
 use vox_core::consts::REACH;
@@ -9,7 +9,7 @@ use vox_physics::{Aabb, BodyId, PhysicsWorld};
 use vox_sim::FluidSim;
 use vox_world::{AIR, Voxel, World, raycast};
 
-/// The selectable hotbar tools. Slots 5-9 are reserved (not yet assigned to
+/// The selectable hotbar tools. Slots 6-9 are reserved (not yet assigned to
 /// a tool); selecting one of them leaves the previously active tool in
 /// place.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
