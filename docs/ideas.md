@@ -421,7 +421,7 @@ rains down. Uses existing apply_impulse + carve pipeline at scale.
 
 ---
 
-## Performance Critique (Grounded in Source Code)
+## Performance Critique (Grounded in Source Code) — ✅ DONE
 
 ### 51. CRITICAL: world_contacts does 7 HashMap lookups per surface point per substep
 File: vox-physics/src/contact.rs, function world_contacts (lines 115-161).
