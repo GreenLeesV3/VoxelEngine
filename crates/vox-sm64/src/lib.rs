@@ -211,6 +211,7 @@ impl Mario {
         }
 
         self.geometry.num_triangles = geo_buffers.numTrianglesUsed as usize;
+        self.geometry.version = self.geometry.version.wrapping_add(1);
 
         MarioTickResult {
             position: glam::Vec3::from_array(state.position),
@@ -247,6 +248,7 @@ impl Mario {
             sm64_mario_render_geometry(self.id, &mut geo_buffers);
         }
         self.geometry.num_triangles = geo_buffers.numTrianglesUsed as usize;
+        self.geometry.version = self.geometry.version.wrapping_add(1);
     }
 
     /// Teleport Mario to a position (in SM64 units).
@@ -328,6 +330,12 @@ pub struct MarioGeometry {
     pub colors: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub num_triangles: usize,
+    /// Monotonic version stamp, incremented every time the geometry
+    /// buffers are refreshed by [`Mario::tick`] or
+    /// [`Mario::render_interpolated`]. Renderers compare it against
+    /// the last uploaded version to skip redundant `write_buffer`
+    /// calls when Mario is idle and the mesh is unchanged frame-to-frame.
+    pub version: u64,
 }
 
 impl MarioGeometry {
@@ -339,12 +347,18 @@ impl MarioGeometry {
             colors: vec![[0.0; 3]; max_verts],
             uvs: vec![[0.0; 2]; max_verts],
             num_triangles: 0,
+            version: 0,
         }
     }
 
     /// Number of vertices currently in use (num_triangles * 3).
     pub fn num_vertices(&self) -> usize {
         self.num_triangles * 3
+    }
+
+    /// Current geometry version stamp (see [`MarioGeometry::version`]).
+    pub fn version(&self) -> u64 {
+        self.version
     }
 }
 

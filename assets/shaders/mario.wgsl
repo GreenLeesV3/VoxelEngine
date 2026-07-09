@@ -9,7 +9,9 @@ struct Camera {
     view_proj: mat4x4f,
     cam_pos: vec4f,
     sun_dir: vec4f,          // xyz = direction the sun shines toward (unit)
-    fog: vec4f,              // x = fog start (m), y = fog end (m), z = SM64 units per meter, w = unused
+    fog: vec4f,              // x = fog start (m), y = fog end (m), z = SM64 units per meter, w = model scale
+    interp_pos: vec4f,       // xyz = interpolated Mario position (SM64 units)
+    tick_pos: vec4f,         // xyz = tick position the geometry was authored at (SM64 units)
 };
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -39,15 +41,22 @@ const SUN_COLOR = vec3f(1.0, 0.95, 0.85);
 const SUN_STRENGTH = 0.45;
 const FOG_COLOR = vec3f(0.45, 0.66, 0.90);
 
-// SM64 units per meter is passed via cam.fog.z (set by the CPU each frame).
-// Mario's vertex positions are in SM64 units; divide by this to get meters.
+// SM64 units per meter is passed via cam.fog.z; cam.fog.w is the model
+// scale. Mario's vertex positions are raw SM64 units authored at
+// cam.tick_pos; the CPU uploads them verbatim and we apply the
+// per-frame translate (interp_pos - tick_pos) and model_scale here so
+// the vertex buffer only needs to change when the geometry actually
+// changes (not every interpolated render frame).
 
 @vertex
 fn vs_main(in: VIn) -> VOut {
     var out: VOut;
-    // libsm64 outputs absolute positions in SM64 integer units.
-    // Convert to meters using the uniform scale (cam.fog.z).
-    let world_pos = in.position / cam.fog.z;
+    // libsm64 outputs absolute positions in SM64 integer units, authored
+    // at cam.tick_pos. Translate to the interpolated camera target
+    // (interp_pos) and scale the model around that center.
+    let model_scale = cam.fog.w;
+    let sm64_pos = cam.interp_pos.xyz + (in.position - cam.tick_pos.xyz) * model_scale;
+    let world_pos = sm64_pos / cam.fog.z;
     out.clip = cam.view_proj * vec4f(world_pos, 1.0);
     out.color = in.color;
     out.world_normal = normalize(in.normal);

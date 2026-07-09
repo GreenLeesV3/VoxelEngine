@@ -402,12 +402,33 @@ impl VoxelPipeline {
     /// last `update_body_transform` call) are inside `frustum` -- same
     /// culling `draw_chunks` already does, now applied to debris too now
     /// that a single bomb can scatter dozens of small bodies at once.
+    ///
+    /// Bodies beyond `max_draw_distance` meters from `cam_pos` are also
+    /// culled: small debris chips 200m away contribute nothing to the image
+    /// (well past fog end) but still cost a draw call and vertex fetch.
+    /// Distance is measured to the closest point of the body's world-space
+    /// AABB, so a large body straddling the threshold is never split — it
+    /// stays visible while any part of it is within range.
     /// Assumes the pipeline/bind group are already bound (call after
     /// `draw_chunks` in the same pass, or call `bind` first).
-    pub fn draw_bodies<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>, frustum: &Frustum) -> DrawStats {
+    pub fn draw_bodies<'p>(
+        &'p self,
+        pass: &mut wgpu::RenderPass<'p>,
+        frustum: &Frustum,
+        cam_pos: Vec3,
+        max_draw_distance: f32,
+    ) -> DrawStats {
         let mut stats = DrawStats::default();
+        let max_dist_sq = max_draw_distance * max_draw_distance;
         for mesh in self.bodies.values() {
             if !frustum.aabb_visible(mesh.aabb_min, mesh.aabb_max) {
+                stats.culled += 1;
+                continue;
+            }
+            // Distance-based cull: closest point on the world-space AABB to
+            // the camera. Using the squared distance avoids a sqrt per body.
+            let closest = cam_pos.clamp(mesh.aabb_min, mesh.aabb_max);
+            if (closest - cam_pos).length_squared() > max_dist_sq {
                 stats.culled += 1;
                 continue;
             }

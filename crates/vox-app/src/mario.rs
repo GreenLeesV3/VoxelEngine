@@ -306,36 +306,34 @@ impl MarioMode {
         fog_start: f32,
         fog_end: f32,
     ) {
+        // Interpolated Mario position to match the camera target. The
+        // mesh vertices are authored at the current tick position
+        // (last_pos_sm64); the shader translates them by
+        // (interp_pos - tick_pos) so we can reuse the vertex buffer
+        // across interpolated render frames without re-uploading.
+        let a = self.tick_alpha;
+        let interp_pos = [
+            self.prev_tick_pos[0] + (self.last_pos_sm64[0] - self.prev_tick_pos[0]) * a,
+            self.prev_tick_pos[1] + (self.last_pos_sm64[1] - self.prev_tick_pos[1]) * a,
+            self.prev_tick_pos[2] + (self.last_pos_sm64[2] - self.prev_tick_pos[2]) * a,
+        ];
         let cam = MarioCameraUniform {
             view_proj,
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
-            fog: [fog_start, fog_end, self.units_per_meter, 0.0],
+            fog: [fog_start, fog_end, self.units_per_meter, self.model_scale],
+            interp_pos: [interp_pos[0], interp_pos[1], interp_pos[2], 0.0],
+            tick_pos: [
+                self.last_pos_sm64[0],
+                self.last_pos_sm64[1],
+                self.last_pos_sm64[2],
+                0.0,
+            ],
         };
         self.pipeline.update_camera(queue, &cam);
 
         if let Some(mario) = &self.mario {
-            // Compute interpolated position to match the camera target.
-            // The mesh vertices are at the current tick position (last_pos_sm64).
-            // We pass interp_pos != tick_pos so the draw method translates
-            // the mesh by (interp_pos - tick_pos) to match the smooth camera.
-            let a = self.tick_alpha;
-            let interp_pos = [
-                self.prev_tick_pos[0] + (self.last_pos_sm64[0] - self.prev_tick_pos[0]) * a,
-                self.prev_tick_pos[1] + (self.last_pos_sm64[1] - self.prev_tick_pos[1]) * a,
-                self.prev_tick_pos[2] + (self.last_pos_sm64[2] - self.prev_tick_pos[2]) * a,
-            ];
-            self.pipeline.draw(
-                queue,
-                pass,
-                mario.geometry(),
-                interp_pos,
-                self.last_pos_sm64,
-                self.model_scale,
-                &self.prev_positions,
-                self.prev_vertex_count,
-                self.tick_alpha,
-            );
+            self.pipeline.draw(queue, pass, mario.geometry());
         }
     }
 

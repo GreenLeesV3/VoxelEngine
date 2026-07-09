@@ -67,6 +67,7 @@ impl SurfaceProvider {
             return false;
         }
         self.surfaces = voxel_surfaces_near(world, mario_pos_m, SURFACE_RADIUS_M, self.units_per_meter);
+        self.last_center = mario_pos_m;
         tracing::debug!(
             surfaces = self.surfaces.len(),
             pos = ?mario_pos_m,
@@ -136,10 +137,24 @@ fn greedy_faces_for_chunk(
 ) {
     let cs = CHUNK_SIZE as i32;
 
+    // Per-axis slice mask: `slice_solid[axis][slice]` is true iff the chunk
+    // has at least one solid voxel with that coordinate along `axis`. Built
+    // in a single O(32³) pass (or instantly for uniform chunks) so we can
+    // skip all-air slices instead of building an empty 2D grid for them —
+    // a big win for sparse chunks where most slices are empty.
+    let slice_solid = chunk.solid_slice_masks();
+
     for &(axis, sign) in &FACES {
+        let axis = axis as usize;
 
         // For each slice along the normal axis
         for slice in 0..cs {
+            // Skip slices that contain no solid voxels at all — there can
+            // be no exposed faces to emit, so avoid the 32×32 scan.
+            if !slice_solid[axis][slice as usize] {
+                continue;
+            }
+
             // Build a 2D grid: is the face at this cell exposed?
             // grid[u][v] = true if the voxel at (slice along axis, u, v)
             // is solid AND its neighbor in the normal direction is air.
@@ -148,21 +163,21 @@ fn greedy_faces_for_chunk(
             for u in 0..cs {
                 for v in 0..cs {
                     // Convert (axis, slice, u, v) to chunk-local coords
-                    let (lx, ly, lz) = local_coords(axis, slice, u, v);
+                    let (lx, ly, lz) = local_coords(axis as u32, slice, u, v);
                     let local = UVec3::new(lx as u32, ly as u32, lz as u32);
                     if chunk.get(local) == AIR {
                         continue;
                     }
 
                     // Check if neighbor in the normal direction is air
-                    let (nx, ny, nz) = neighbor_offset(axis, sign);
+                    let (nx, ny, nz) = neighbor_offset(axis as u32, sign);
                     let is_exposed = is_neighbor_air(world, chunk_key, chunk, lx, ly, lz, nx, ny, nz);
                     grid[u as usize][v as usize] = is_exposed;
                 }
             }
 
             // Greedy merge the 2D grid into rectangles
-            merge_grid(grid, axis, sign, slice, chunk_key, voxel_size, surfaces, units_per_meter);
+            merge_grid(grid, axis as u32, sign, slice, chunk_key, voxel_size, surfaces, units_per_meter);
         }
     }
 }
@@ -424,6 +439,7 @@ fn make_surface(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meters_to_sm64;
     use vox_core::WorldConfig;
     use vox_world::Voxel;
 

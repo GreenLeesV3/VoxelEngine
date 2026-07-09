@@ -12,7 +12,7 @@ use vox_core::consts::{
     CLUTTER_LIFETIME_MAX_S, CLUTTER_LIFETIME_MIN_S, CLUTTER_MAX_VOXELS, CONTACT_SLOP, GRAVITY,
     SLEEP_FRAMES, SOLVER_ITERS, SUBSTEPS,
 };
-use vox_world::World;
+use vox_world::{SolidLookup, World};
 
 use crate::body::{Body, BodyId};
 use crate::broadphase::Broadphase;
@@ -334,9 +334,22 @@ impl PhysicsWorld {
         // Peak impulse (point, and push direction) per body slot, across
         // every substep.
         let mut peaks: FxHashMap<usize, (f32, Vec3, Vec3)> = FxHashMap::default();
+        // Reused scratch buffers for the contact solve, hoisted out of
+        // `substep` so a full step allocates them once instead of once per
+        // substep (Contact is ~100+ bytes; a debris pile easily grows this
+        // into thousands of entries). `.clear()` below retains capacity.
+        let mut contacts: Vec<Contact> = Vec::new();
+        let mut staged: Vec<Contact> = Vec::new();
         let h = dt / SUBSTEPS as f32;
+        // Build the broadphase candidate pairs once for the whole step and
+        // reuse them for every substep's narrowphase and the end-of-step
+        // island grouping. The grid is coarse (2 m cells) and a body moves
+        // at most `MAX_SPEED * h` (~1 m) per substep, so the pair set cannot
+        // change between substeps -- one build instead of three. See
+        // `Broadphase`'s doc comment for the capacity-reuse details.
+        self.broadphase.build(&self.slots);
         for _ in 0..SUBSTEPS {
-            self.substep(world, h, &mut peaks);
+            self.substep(world, h, &mut peaks, &mut contacts, &mut staged);
         }
         let impacts = peaks
             .into_iter()
@@ -419,7 +432,7 @@ impl PhysicsWorld {
             }
             parent[x]
         }
-        for &(a, b) in self.broadphase.candidate_pairs(&self.slots) {
+        for &(a, b) in self.broadphase.pairs() {
             let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
             if ra != rb {
                 parent[ra] = rb;
@@ -435,7 +448,7 @@ impl PhysicsWorld {
         groups.into_values().collect()
     }
 
-    fn substep(&mut self, world: &World, h: f32, peaks: &mut FxHashMap<usize, (f32, Vec3, Vec3)>) {
+    fn substep(&mut self, world: &World, h: f32, peaks: &mut FxHashMap<usize, (f32, Vec3, Vec3)>, contacts: &mut Vec<Contact>, staged: &mut Vec<Contact>) {
         // Refresh every live body's cached world inverse inertia -- rotation
         // only changes at the end of a substep, so this is constant across
         // the whole contact solve below (see `Body::inv_iw`'s docs).
@@ -445,8 +458,15 @@ impl PhysicsWorld {
             body.inv_iw = body.inv_inertia_world();
         }
 
-        // Integrate velocities and collect contacts.
-        let mut contacts: Vec<Contact> = Vec::new();
+        // Integrate velocities and collect contacts. `contacts` is hoisted
+        // to `step` and reused across substeps (`.clear()` retains capacity).
+        // One chunk-caching lookup per substep, reused across every awake
+        // body: consecutive awake bodies are often spatially coherent (a
+        // stack, a chain of debris), so carrying the cached chunk from one
+        // body's last query into the next turns most of those bodies' first
+        // solidity probes into array bounds checks instead of hash lookups.
+        let mut lookup = SolidLookup::new(world);
+        contacts.clear();
         for (slot, entry) in self.slots.iter_mut().enumerate() {
             let Some(body) = entry else { continue };
             if body.sleep.asleep {
@@ -460,15 +480,15 @@ impl PhysicsWorld {
                 body.omega = body.omega.normalize() * MAX_ANGULAR_SPEED_RAD_S;
             }
             debug_assert!(body.vel.is_finite() && body.pos.is_finite());
-            world_contacts(body, slot, world, &mut contacts);
+            world_contacts(body, slot, &mut *contacts, &mut lookup);
         }
 
         // Body-body narrowphase over broadphase candidates. One staging
         // buffer reused across every pair (`Vec::append` drains it but
         // keeps its capacity) instead of a fresh allocation per touching
-        // pair per substep.
-        let mut staged: Vec<Contact> = Vec::new();
-        for &(a, b) in self.broadphase.candidate_pairs(&self.slots) {
+        // pair per substep. `staged` is also hoisted to `step` so it
+        // persists across substeps with the same capacity-reuse reasoning.
+        for &(a, b) in self.broadphase.pairs() {
             let (asleep_a, asleep_b) = {
                 let ba = self.slots[a].as_ref().expect("pair body alive");
                 let bb = self.slots[b].as_ref().expect("pair body alive");
@@ -498,7 +518,7 @@ impl PhysicsWorld {
             let result = {
                 let sb = self.slots[sampler].as_ref().expect("alive");
                 let tb = self.slots[target].as_ref().expect("alive");
-                pair_contacts(sb, sampler, tb, target, target_asleep, &mut staged)
+                pair_contacts(sb, sampler, tb, target, target_asleep, &mut *staged)
             };
             if result.contact_count == 0 {
                 continue;
@@ -511,13 +531,13 @@ impl PhysicsWorld {
                 staged.clear();
                 let sb_ref = self.slots[sampler].as_ref().expect("alive");
                 let tb_ref = self.slots[target].as_ref().expect("alive");
-                pair_contacts(sb_ref, sampler, tb_ref, target, false, &mut staged);
+                pair_contacts(sb_ref, sampler, tb_ref, target, false, &mut *staged);
             }
-            contacts.append(&mut staged);
+            contacts.append(&mut *staged);
         }
 
         // Warm start from the previous substep's accumulated impulses.
-        for c in &mut contacts {
+        for c in &mut *contacts {
             if let Some(&(n0, t10, t20)) = self.warm.get(&c.key) {
                 c.acc_n = n0;
                 c.acc_t1 = t10;
@@ -543,7 +563,7 @@ impl PhysicsWorld {
         // recovered *positionally* (split impulse, below), which by
         // construction cannot add kinetic energy to anything.
         for _ in 0..SOLVER_ITERS {
-            for c in &mut contacts {
+            for c in &mut *contacts {
                 let vn = Self::relative_velocity(&self.slots, c).dot(c.normal);
                 let lambda = -vn / c.kn;
                 let new_acc = (c.acc_n + lambda).max(0.0);
@@ -569,7 +589,7 @@ impl PhysicsWorld {
         // material-based impact fracture (see `ImpactEvent`). Positions
         // here are pre-integration, matching the frame `c.r_arm`/`r_arm_b`
         // were computed in when this substep's contacts were generated.
-        for c in &contacts {
+        for c in &*contacts {
             if c.acc_n <= 0.0 || c.approach_speed < MIN_IMPACT_APPROACH_SPEED_M_S {
                 continue;
             }
@@ -598,7 +618,7 @@ impl PhysicsWorld {
         // resistance below.
         self.contact_flags.clear();
         self.contact_flags.resize(self.slots.len(), false);
-        for c in &contacts {
+        for c in &*contacts {
             self.contact_flags[c.body] = true;
             if let Some(b) = c.body_b {
                 self.contact_flags[b] = true;
@@ -653,7 +673,7 @@ impl PhysicsWorld {
         self.pos_corr.clear();
         self.pos_corr.resize(self.slots.len(), Vec3::ZERO);
         for _ in 0..POSITION_ITERS {
-            for c in &contacts {
+            for c in &*contacts {
                 let corr_b = c.body_b.map_or(Vec3::ZERO, |b| self.pos_corr[b]);
                 let already = (self.pos_corr[c.body] - corr_b).dot(c.normal);
                 let remaining = (c.depth - CONTACT_SLOP) - already;
@@ -687,7 +707,7 @@ impl PhysicsWorld {
 
         // Persist accumulated impulses for the next substep's warm start.
         self.warm.clear();
-        for c in &contacts {
+        for c in &*contacts {
             self.warm.insert(c.key, (c.acc_n, c.acc_t1, c.acc_t2));
         }
     }

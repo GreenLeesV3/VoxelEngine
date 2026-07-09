@@ -124,6 +124,44 @@ impl Chunk {
         self.solid_count == 0
     }
 
+    /// For each of the 3 axes, a `[bool; 32]` array marking which slices
+    /// (along that axis) contain at least one solid (non-air) voxel.
+    /// `mask[axis][slice]` is true iff some voxel with that axis-coordinate
+    /// is solid. Used to skip empty slices in greedy surface generation.
+    ///
+    /// Computed in a single pass over the chunk's voxels; for uniform
+    /// storage the answer is constant and produced without iteration.
+    pub fn solid_slice_masks(&self) -> [[bool; CHUNK_SIZE]; 3] {
+        let mut masks = [[false; CHUNK_SIZE]; 3];
+        match &self.storage {
+            ChunkStorage::Uniform(v) => {
+                if *v != AIR {
+                    for axis in 0..3 {
+                        for s in 0..CHUNK_SIZE {
+                            masks[axis][s] = true;
+                        }
+                    }
+                }
+                masks
+            }
+            ChunkStorage::Dense(data) => {
+                // Layout is y * 32² + z * 32 + x (see `index`).
+                for y in 0..CHUNK_SIZE {
+                    for z in 0..CHUNK_SIZE {
+                        let row = y * (CHUNK_SIZE * CHUNK_SIZE) + z * CHUNK_SIZE;
+                        for x in 0..CHUNK_SIZE {
+                            if data[row + x] != AIR {
+                                masks[0][x] = true;
+                                masks[1][y] = true;
+                                masks[2][z] = true;
+                            }
+                        }
+                    }
+                }
+                masks
+            }
+        }
+    }
     /// Collapse dense storage back to uniform when all voxels are equal.
     /// Returns true if the chunk is uniform afterwards.
     pub fn try_demote(&mut self) -> bool {
@@ -270,5 +308,45 @@ mod tests {
         // Force dense storage so `get` actually indexes.
         chunk.set(UVec3::new(0, 0, 0), STONE);
         let _ = chunk.get(UVec3::new(32, 0, 0));
+    }
+
+    #[test]
+    fn solid_slice_masks_empty_chunk_is_all_false() {
+        let chunk = Chunk::new();
+        let masks = chunk.solid_slice_masks();
+        for axis in 0..3 {
+            assert!(masks[axis].iter().all(|&s| !s), "axis {axis} all-air");
+        }
+    }
+
+    #[test]
+    fn solid_slice_masks_uniform_solid_is_all_true() {
+        let chunk = Chunk::uniform(STONE);
+        let masks = chunk.solid_slice_masks();
+        for axis in 0..3 {
+            assert!(masks[axis].iter().all(|&s| s), "axis {axis} all-solid");
+        }
+    }
+
+    #[test]
+    fn solid_slice_masks_dense_marks_only_occupied_slices() {
+        let mut chunk = Chunk::new();
+        // Place solids at (x=5, y=7, z=9) and (x=5, y=7, z=20).
+        chunk.set(UVec3::new(5, 7, 9), STONE);
+        chunk.set(UVec3::new(5, 7, 20), DIRT);
+        let masks = chunk.solid_slice_masks();
+
+        // X axis: only slice 5 has solids.
+        for x in 0..CHUNK_SIZE {
+            assert_eq!(masks[0][x], x == 5, "x={x}");
+        }
+        // Y axis: only slice 7 has solids.
+        for y in 0..CHUNK_SIZE {
+            assert_eq!(masks[1][y], y == 7, "y={y}");
+        }
+        // Z axis: slices 9 and 20 have solids.
+        for z in 0..CHUNK_SIZE {
+            assert_eq!(masks[2][z], z == 9 || z == 20, "z={z}");
+        }
     }
 }

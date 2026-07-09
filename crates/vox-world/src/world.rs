@@ -32,6 +32,14 @@ impl<'w> SolidLookup<'w> {
         }
     }
 
+    /// The world's configuration (voxel size, extent, etc.) -- lets callers
+    /// that already hold a [`SolidLookup`] read geometry constants without a
+    /// separate `&World` borrow.
+    #[inline]
+    pub fn world_cfg(&self) -> &WorldConfig {
+        &self.world.cfg
+    }
+
     /// True when the voxel at `v` is solid (non-air). Same semantics as
     /// [`World::solid`].
     pub fn solid(&mut self, v: IVec3) -> bool {

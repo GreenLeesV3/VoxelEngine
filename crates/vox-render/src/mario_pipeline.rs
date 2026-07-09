@@ -20,6 +20,14 @@ pub struct MarioCameraUniform {
     pub cam_pos: [f32; 4],
     pub sun_dir: [f32; 4],
     pub fog: [f32; 4],
+    /// Interpolated Mario position (SM64 units) the mesh should be
+    /// translated to this frame. xyz = position; w unused.
+    pub interp_pos: [f32; 4],
+    /// Position the geometry was authored at (the current tick's SM64
+    /// position). xyz = position; w unused. The shader translates
+    /// vertices by `(interp_pos - tick_pos)` so the buffer can hold
+    /// raw SM64 positions and be reused across interpolated frames.
+    pub tick_pos: [f32; 4],
 }
 
 /// Mario vertex: position + normal + color + uv, matching `mario.wgsl`.
@@ -46,6 +54,13 @@ pub struct MarioPipeline {
     texture_view: wgpu::TextureView,
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
+    /// Geometry version stamp of the vertex data currently in
+    /// `vertex_buf`. Compared against `MarioGeometry::version` to skip
+    /// the per-frame `write_buffer` when Mario is idle.
+    uploaded_version: std::sync::atomic::AtomicU64,
+    /// Vertex count currently in `index_buf`. Re-uploading the index
+    /// buffer is only needed when the vertex count changes.
+    uploaded_vertex_count: std::sync::atomic::AtomicUsize,
 }
 
 impl MarioPipeline {
@@ -266,67 +281,68 @@ impl MarioPipeline {
             texture_view,
             vertex_buf,
             index_buf,
+            uploaded_version: std::sync::atomic::AtomicU64::new(0),
+            uploaded_vertex_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
-
     /// Update the camera uniform. Call once per frame before drawing.
     pub fn update_camera(&self, queue: &wgpu::Queue, cam: &MarioCameraUniform) {
         queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(cam));
     }
 
-    /// Upload Mario's geometry for this frame and draw him.
+    /// Draw Mario's mesh for this frame.
     ///
-    /// `geometry` provides positions, normals, colors, uvs from
-    /// `sm64_mario_tick`. `mario_center` is Mario's world-space position
-    /// (in SM64 units) — used to scale the model around its center so
-    /// Mario isn't gigantic. `model_scale` shrinks the model (e.g. 0.2
-    /// makes Mario 1/5 his native SM64 size).
+    /// `geometry` provides the raw positions, normals, colors, and uvs
+    /// from `sm64_mario_tick`. The per-frame translate (interp_pos -
+    /// tick_pos) and model scale are applied in the vertex shader using
+    /// the camera uniform, so the vertex buffer only needs to change
+    /// when the geometry actually changes — not every interpolated
+    /// render frame. We compare `geometry.version()` against the last
+    /// uploaded version and skip `write_buffer` when unchanged, while
+    /// still issuing the draw call with the existing buffer contents.
     pub fn draw<'p>(
         &'p self,
         queue: &wgpu::Queue,
         render_pass: &mut wgpu::RenderPass<'p>,
         geometry: &vox_sm64::MarioGeometry,
-        interp_pos: [f32; 3],
-        tick_pos: [f32; 3],
-        model_scale: f32,
-        _prev_positions: &[[f32; 3]],
-        _prev_vertex_count: usize,
-        _tick_alpha: f32,
     ) {
         let n_verts = geometry.num_vertices();
         if n_verts == 0 {
             return;
         }
-        // Translate the mesh by (interp_pos - tick_pos) so it matches
-        // the camera's interpolated target. The vertices are at the
-        // current tick's world position; this offset moves them to the
-        // smooth interpolated position without per-vertex interpolation.
-        let delta = [
-            interp_pos[0] - tick_pos[0],
-            interp_pos[1] - tick_pos[1],
-            interp_pos[2] - tick_pos[2],
-        ];
-        let mut vertices = Vec::with_capacity(n_verts);
-        for i in 0..n_verts {
-            let p = geometry.positions[i];
-            let translated = [p[0] + delta[0], p[1] + delta[1], p[2] + delta[2]];
-            let scaled = [
-                interp_pos[0] + (translated[0] - interp_pos[0]) * model_scale,
-                interp_pos[1] + (translated[1] - interp_pos[1]) * model_scale,
-                interp_pos[2] + (translated[2] - interp_pos[2]) * model_scale,
-            ];
-            vertices.push(MarioVertex {
-                position: scaled,
-                normal: geometry.normals[i],
-                color: geometry.colors[i],
-                uv: geometry.uvs[i],
-            });
-        }
-        queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&vertices));
 
-        // Sequential index list (0, 1, 2, ...)
-        let indices: Vec<u32> = (0..n_verts as u32).collect();
-        queue.write_buffer(&self.index_buf, 0, bytemuck::cast_slice(&indices));
+        use std::sync::atomic::Ordering;
+
+        // Only re-upload the vertex buffer when the geometry changed
+        // this tick (new version stamp). Idle Mario keeps the same
+        // mesh, so we skip the CPU->GPU copy entirely.
+        let prev_version = self.uploaded_version.load(Ordering::Acquire);
+        if prev_version != geometry.version() {
+            // Interleave raw SM64 positions/normals/colors/uvs. The
+            // shader applies the per-frame translate + scale.
+            let mut vertices = Vec::with_capacity(n_verts);
+            for i in 0..n_verts {
+                vertices.push(MarioVertex {
+                    position: geometry.positions[i],
+                    normal: geometry.normals[i],
+                    color: geometry.colors[i],
+                    uv: geometry.uvs[i],
+                });
+            }
+            queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&vertices));
+            self.uploaded_version
+                .store(geometry.version(), Ordering::Release);
+        }
+
+        // Sequential index list (0, 1, 2, ...). Only re-upload when the
+        // vertex count changed (e.g. a different animation produced more
+        // or fewer triangles).
+        let prev_vcount = self.uploaded_vertex_count.load(Ordering::Acquire);
+        if prev_vcount != n_verts {
+            let indices: Vec<u32> = (0..n_verts as u32).collect();
+            queue.write_buffer(&self.index_buf, 0, bytemuck::cast_slice(&indices));
+            self.uploaded_vertex_count.store(n_verts, Ordering::Release);
+        }
 
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);

@@ -9,11 +9,16 @@ use crate::body::Body;
 const CELL_M: f32 = 2.0;
 
 /// Persistent broadphase scratch state. `PhysicsWorld` owns one and reuses
-/// it across every `candidate_pairs` call (three per physics step: once per
-/// substep, plus once for the end-of-step sleep-island grouping) instead of
-/// allocating a fresh hash map, hash set, and output vector each time --
-/// with `MAX_DEBRIS_BODIES` debris around, that reallocation was real,
-/// measurable overhead paid three times a frame for no behavioral benefit.
+/// it across a whole physics step instead of allocating a fresh hash map,
+/// hash set, and output vector each call. The broadphase is a coarse 2 m
+/// uniform grid, and body AABBs only move by at most `MAX_SPEED * h`
+/// (≈1 m) per substep -- well under one cell -- so the candidate pair set
+/// is built *once per step* (before the substep loop) and reused for every
+/// substep's narrowphase plus the end-of-step sleep-island grouping. That
+/// turns three full grid builds per step into one, with no behavioral
+/// change the coarse grid can resolve: a pair appearing or disappearing
+/// mid-step would require a body to cross a 2 m cell boundary inside a
+/// single substep, which the speed ceiling forbids.
 #[derive(Default)]
 pub struct Broadphase {
     cells: FxHashMap<IVec3, Vec<usize>>,
@@ -22,11 +27,14 @@ pub struct Broadphase {
 }
 
 impl Broadphase {
+    /// Rebuild the candidate-pair set from scratch, reusing `self`'s
+    /// existing buffer capacity (`.clear()` keeps allocations). Call this
+    /// once per physics step, then hand out the result via [`pairs`]
+    /// throughout the substeps and island grouping.
+    ///
     /// Candidate body pairs whose AABBs overlap. Pairs where both bodies
     /// sleep are skipped (they cannot move); pairs are unique with `a < b`.
-    /// Borrows the returned slice from `self`'s scratch buffers, so callers
-    /// must finish using it before the next `candidate_pairs` call.
-    pub fn candidate_pairs(&mut self, slots: &[Option<Body>]) -> &[(usize, usize)] {
+    pub fn build(&mut self, slots: &[Option<Body>]) {
         self.cells.clear();
         for (i, entry) in slots.iter().enumerate() {
             let Some(body) = entry else { continue };
@@ -65,7 +73,20 @@ impl Broadphase {
                 }
             }
         }
+    }
+
+    /// The candidate pairs produced by the last [`build`] call. Borrows
+    /// from `self`, so callers must finish with the slice before the next
+    /// `build`.
+    pub fn pairs(&self) -> &[(usize, usize)] {
         &self.pairs
+    }
+
+    /// Convenience: build and return the pairs in one call. Equivalent to
+    /// [`build`] followed by [`pairs`]; kept for tests and standalone use.
+    pub fn candidate_pairs(&mut self, slots: &[Option<Body>]) -> &[(usize, usize)] {
+        self.build(slots);
+        self.pairs()
     }
 }
 
@@ -118,5 +139,32 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(first, vec![(0, 1)], "only the two overlapping cubes must pair up");
+    }
+
+    #[test]
+    fn build_then_pairs_reuses_last_result() {
+        // Mirrors how `PhysicsWorld::step` uses it: `build` once, then
+        // `pairs()` handed out repeatedly (substeps + islands) with no
+        // rebuild in between.
+        let reg = registry();
+        let slots = vec![
+            Some(cube(&reg, Vec3::new(0.0, 0.0, 0.0))),
+            Some(cube(&reg, Vec3::new(0.4, 0.0, 0.0))),
+            Some(cube(&reg, Vec3::new(50.0, 0.0, 0.0))),
+        ];
+        let mut bp = Broadphase::default();
+        bp.build(&slots);
+        // Repeated `pairs()` calls return the same slice without rebuilding.
+        let a = bp.pairs().to_vec();
+        let b = bp.pairs().to_vec();
+        assert_eq!(a, b);
+        assert_eq!(a, vec![(0, 1)]);
+        // A fresh `build` with different slots replaces the cached pairs.
+        let far = vec![Some(cube(&reg, Vec3::new(100.0, 100.0, 100.0)))];
+        bp.build(&far);
+        assert!(bp.pairs().is_empty());
+        // And rebuilding the original slots recovers them -- no stale leak.
+        bp.build(&slots);
+        assert_eq!(bp.pairs(), &[(0, 1)]);
     }
 }

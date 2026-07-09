@@ -1168,7 +1168,7 @@ impl App for VoxApp {
                 occlusion_query_set: None,
             });
             let chunk_stats = self.pipeline.draw_chunks(&mut pass, &frustum);
-            let body_stats = self.pipeline.draw_bodies(&mut pass, &frustum);
+            let body_stats = self.pipeline.draw_bodies(&mut pass, &frustum, self.camera.pos, FOG_END_M);
             stats = vox_render::DrawStats {
                 drawn: chunk_stats.drawn + body_stats.drawn,
                 culled: chunk_stats.culled + body_stats.culled,
