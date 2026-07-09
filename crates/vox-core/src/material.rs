@@ -34,6 +34,11 @@ pub struct MaterialDef {
     pub strength: f32,
     /// Whether the material occupies space; air is the canonical non-solid.
     pub solid: bool,
+    /// Whether a `vox-sim`-family crate simulates this material as a fluid
+    /// (flows, spreads, settles). Implies `solid = false`, but is a distinct
+    /// flag: a future decorative non-solid material (tall grass, say) should
+    /// not be picked up by the fluid sim just because it's non-solid.
+    pub fluid: bool,
 }
 
 /// Registry of material definitions with stable `u16` ids.
@@ -65,6 +70,7 @@ struct RawMaterial {
     density: Option<f32>,
     strength: Option<f32>,
     solid: Option<bool>,
+    fluid: Option<bool>,
 }
 
 /// Validation error for a named material: `material '{name}': {detail}`.
@@ -85,6 +91,7 @@ impl MaterialRegistry {
             density: 0.0,
             strength: 0.0,
             solid: false,
+            fluid: false,
         };
         let mut by_name = HashMap::new();
         by_name.insert(air.name.clone(), MaterialId::AIR);
@@ -243,6 +250,7 @@ impl MaterialRegistry {
             ));
         }
         let solid = raw.solid.unwrap_or(true);
+        let fluid = raw.fluid.unwrap_or(false);
 
         if self.defs.len() > usize::from(u16::MAX) {
             return Err(material_error(
@@ -261,6 +269,7 @@ impl MaterialRegistry {
             density,
             strength,
             solid,
+            fluid,
         });
         Ok(())
     }
@@ -563,6 +572,34 @@ mod tests {
             assert!(msg.contains(key), "error must name key `{key}`: {msg}");
             assert!(msg.contains("bad"), "error must name the material: {msg}");
         }
+    }
+
+    #[test]
+    fn fluid_defaults_to_false_and_can_be_set_true() {
+        let reg = MaterialRegistry::from_toml_str(
+            r#"
+            [[material]]
+            name = "stone"
+            color = [0.5, 0.5, 0.5]
+            density = 2000.0
+            strength = 5.0
+
+            [[material]]
+            name = "water"
+            color = [0.1, 0.3, 0.8]
+            density = 1000.0
+            strength = 0.0
+            solid = false
+            fluid = true
+            "#,
+            "test.toml",
+        )
+        .expect("registry");
+        let stone = reg.get(reg.id_by_name("stone").unwrap()).unwrap();
+        let water = reg.get(reg.id_by_name("water").unwrap()).unwrap();
+        assert!(!stone.fluid, "fluid must default to false");
+        assert!(water.fluid, "explicit fluid = true must round-trip");
+        assert!(!water.solid, "water must not be solid");
     }
 
     #[test]
