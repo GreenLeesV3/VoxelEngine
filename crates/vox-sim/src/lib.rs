@@ -6,7 +6,15 @@
 //! See `docs/plans/2026-07-09-fluid-sim-design.md` for the full design
 //! rationale (why full/empty cells instead of fractional levels, why
 //! active-cell sleeping, why this doesn't need its own grid).
+//!
+//! Weathering consumes the fluid tick's `ContactEvent`s to transform
+//! terrain touched by water (grass -> dirt -> mud, stone -> sand).
 
 mod fluid;
+mod weathering;
 
 pub use fluid::{ContactEvent, FluidSim};
+pub use weathering::{
+    DIRT_SOAK_TICKS, GRASS_SOAK_TICKS, MUD_DRY_TICKS, STONE_ERODE_TICKS, STONE_FALL_BOOST,
+    WeatherTable, Weathering,
+};
