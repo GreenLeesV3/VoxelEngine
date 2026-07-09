@@ -9,12 +9,14 @@ pub mod config;
 pub mod consts;
 pub mod coords;
 pub mod error;
+pub mod fxhash;
 pub mod material;
 pub mod profile;
 pub mod tunables;
 
 pub use config::WorldConfig;
 pub use coords::{CHUNK, chunk_of, chunk_origin, local_of, voxel_at, voxel_center_m};
+pub use fxhash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher};
 pub use error::CoreError;
 pub use material::{MaterialDef, MaterialId, MaterialRegistry};
 pub use profile::{FrameProfile, ScopedTimer, TimingRing};

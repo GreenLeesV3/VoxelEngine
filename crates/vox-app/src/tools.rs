@@ -62,6 +62,13 @@ const DEATH_LASER_RADIUS_M: f32 = 1.5;
 pub struct CarveOutcome {
     pub spawned: Vec<BodyId>,
     pub removed: Vec<BodyId>,
+    /// World-space point the tool actually struck, if it struck anything --
+    /// where destruction feedback (dust/spark particles) should originate.
+    pub impact_m: Option<Vec3>,
+    /// The material at the struck voxel *before* it was carved (AIR when
+    /// nothing was hit) -- lets feedback particles take on the color of the
+    /// material actually being destroyed.
+    pub impact_material: Voxel,
 }
 
 /// What a scene raycast hit: a specific static-world voxel, or an existing
@@ -120,6 +127,18 @@ fn raycast_scene(
     best.map(|t| (t, eye_m + dir * (best_dist + SURFACE_NUDGE_M)))
 }
 
+/// The material a scene hit is about to destroy -- read *before* carving
+/// (afterwards the voxel is air, or the body is despawned entirely).
+fn hit_material(world: &World, phys: &PhysicsWorld, hit: &SceneHit) -> Voxel {
+    match *hit {
+        SceneHit::World(voxel) => world.get_voxel(voxel),
+        SceneHit::Body(id, local_voxel) => phys
+            .get(id)
+            .map(|b| b.grid.get(local_voxel))
+            .unwrap_or(AIR),
+    }
+}
+
 /// Build a [`CarveOutcome`] from one of `vox_physics::carve_body_*_at`'s
 /// results: if `id` still exists afterward, nothing was actually removed
 /// and the (untouched) body needs no mesh update at all -- the default,
@@ -131,6 +150,7 @@ fn body_outcome(phys: &PhysicsWorld, id: BodyId, spawned: Vec<BodyId>) -> CarveO
     CarveOutcome {
         spawned,
         removed: vec![id],
+        ..CarveOutcome::default()
     }
 }
 
@@ -243,22 +263,26 @@ impl Tools {
         eye_m: Vec3,
         look: Vec3,
     ) -> CarveOutcome {
-        let Some((hit, _)) = raycast_scene(world, phys, eye_m, look, REACH) else {
+        let Some((hit, hit_point_m)) = raycast_scene(world, phys, eye_m, look, REACH) else {
             return CarveOutcome::default();
         };
-        match hit {
+        let material = hit_material(world, phys, &hit);
+        let mut outcome = match hit {
             SceneHit::World(voxel) => {
                 world.set_voxel(voxel, AIR);
                 CarveOutcome {
                     spawned: vox_physics::detach_unsupported(world, phys, registry, &[voxel]),
-                    removed: Vec::new(),
+                    ..CarveOutcome::default()
                 }
             }
             SceneHit::Body(id, local_voxel) => {
                 let spawned = vox_physics::carve_body_voxel_at(phys, registry, id, local_voxel);
                 body_outcome(phys, id, spawned)
             }
-        }
+        };
+        outcome.impact_m = Some(hit_point_m);
+        outcome.impact_material = material;
+        outcome
     }
 
     /// Blast the crosshair target: carve a jagged explosion shape (a base
@@ -285,7 +309,8 @@ impl Tools {
         let Some((hit, hit_point_m)) = raycast_scene(world, phys, eye_m, look, REACH) else {
             return CarveOutcome::default();
         };
-        match hit {
+        let material = hit_material(world, phys, &hit);
+        let mut outcome = match hit {
             SceneHit::World(_) => CarveOutcome {
                 spawned: vox_physics::blast(
                     world,
@@ -297,7 +322,7 @@ impl Tools {
                     seed,
                 )
                 .spawned,
-                removed: Vec::new(),
+                ..CarveOutcome::default()
             },
             SceneHit::Body(id, _) => {
                 let spawned = vox_physics::carve_body_explosion_at(
@@ -312,7 +337,10 @@ impl Tools {
                 vox_physics::apply_blast_impulse(phys, &outcome.spawned, hit_point_m, power, seed);
                 outcome
             }
-        }
+        };
+        outcome.impact_m = Some(hit_point_m);
+        outcome.impact_material = material;
+        outcome
     }
 
     /// Scalable dig: carve a sphere of [`Tools::radius_m`] at the crosshair
@@ -330,7 +358,8 @@ impl Tools {
         let Some((hit, hit_point_m)) = raycast_scene(world, phys, eye_m, look, REACH) else {
             return CarveOutcome::default();
         };
-        match hit {
+        let material = hit_material(world, phys, &hit);
+        let mut outcome = match hit {
             SceneHit::World(_) => {
                 let mut carve = vox_physics::carve_sphere(world, hit_point_m, self.radius_m);
                 let removed: Vec<IVec3> = carve.removed.iter().map(|&(v, _)| v).collect();
@@ -340,11 +369,14 @@ impl Tools {
                 carve.spawned = ids;
                 CarveOutcome {
                     spawned: carve.spawned,
-                    removed: Vec::new(),
+                    ..CarveOutcome::default()
                 }
             }
             SceneHit::Body(id, _) => carve_body_sphere(phys, registry, id, hit_point_m, self.radius_m),
-        }
+        };
+        outcome.impact_m = Some(hit_point_m);
+        outcome.impact_material = material;
+        outcome
     }
 
     /// Death laser: fire an effectively infinite-range beam from the eye
@@ -361,10 +393,19 @@ impl Tools {
         look: Vec3,
     ) -> CarveOutcome {
         let end_m = eye_m + look * DEATH_LASER_RANGE_M;
+        // The beam itself needs no raycast gate, but destruction feedback
+        // wants the *entry* point -- where the beam first strikes something.
+        let entry = raycast_scene(world, phys, eye_m, look, DEATH_LASER_RANGE_M);
+        let (impact_m, impact_material) = match &entry {
+            Some((hit, point)) => (Some(*point), hit_material(world, phys, hit)),
+            None => (None, AIR),
+        };
         let mut outcome = CarveOutcome {
             spawned: vox_physics::laser(world, phys, registry, eye_m, end_m, DEATH_LASER_RADIUS_M)
                 .spawned,
-            removed: Vec::new(),
+            impact_m,
+            impact_material,
+            ..CarveOutcome::default()
         };
 
         // The beam also tunnels through every body already in its path --

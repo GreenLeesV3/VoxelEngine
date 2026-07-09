@@ -87,22 +87,30 @@ fn stress_physics_pile(reg: &MaterialRegistry, body_count: usize, cube_vox: i32)
         }
     }
 
-    let mut times = Vec::new();
+    let mut settling = Vec::new();
+    let mut settled = Vec::new();
     let total_steps = 600; // 10s at 60Hz
     for step in 0..total_steps {
         let t0 = Instant::now();
         phys.step(&world, PHYSICS_DT);
         let dt = t0.elapsed().as_secs_f32() * 1000.0;
-        // Only report the back half: by then bodies have landed and are
-        // mostly in steady-state contact, the actual worst case for a
-        // many-body solve (not the initial free-fall, which is cheap).
-        if step >= total_steps / 2 {
-            times.push(dt);
+        // Front half: bodies landing and grinding against each other while
+        // awake -- the many-contact solver worst case, and the phase the
+        // player actually feels right after a blast. Back half: steady
+        // state, mostly asleep -- the "long after the blast" cost.
+        if step < total_steps / 2 {
+            settling.push(dt);
+        } else {
+            settled.push(dt);
         }
     }
     report(
+        &format!("physics/{body_count}-bodies-settling"),
+        settling,
+    );
+    report(
         &format!("physics/{body_count}-bodies-settled"),
-        times,
+        settled,
     );
     println!(
         "  (awake={}, total={})",

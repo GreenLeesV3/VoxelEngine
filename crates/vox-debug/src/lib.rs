@@ -14,6 +14,7 @@
 //! required, not stylistic: the tessellated primitives must outlive the
 //! pass, and a pass's borrow can't be satisfied by data created after it.
 
+pub mod hud;
 mod panels;
 
 use std::sync::Arc;
@@ -37,6 +38,7 @@ pub struct OverlayState<'a> {
     pub body_mesh_in_flight: usize,
     pub bodies_awake: usize,
     pub bodies_total: usize,
+    pub particles: usize,
     pub tool_radius: &'a mut f32,
     pub material_names: &'a [String],
     pub selected_material: &'a mut usize,
@@ -93,9 +95,14 @@ impl DebugOverlay {
         self.winit_state.on_window_event(window, event).consumed
     }
 
-    /// Build this frame's UI from `state` and upload its draw data. Call
+    /// Build this frame's UI from `hud` (always drawn) and `debug` (the F3
+    /// windows -- pass `None` when hidden) and upload its draw data. Call
     /// before opening the render pass; hand the result to [`Self::paint`]
     /// inside it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one-per-frame plumbing call; a params struct would only relabel it"
+    )]
     pub fn prepare(
         &mut self,
         window: &Window,
@@ -103,10 +110,16 @@ impl DebugOverlay {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         size: (u32, u32),
-        state: OverlayState<'_>,
+        hud_state: &hud::HudState<'_>,
+        debug: Option<OverlayState<'_>>,
     ) -> PreparedFrame {
         let raw_input = self.winit_state.take_egui_input(window);
-        let full_output = self.ctx.run(raw_input, |ctx| panels::build(ctx, state));
+        let full_output = self.ctx.run(raw_input, |ctx| {
+            hud::build(ctx, hud_state);
+            if let Some(state) = debug {
+                panels::build(ctx, state);
+            }
+        });
         self.winit_state
             .handle_platform_output(window, full_output.platform_output);
 

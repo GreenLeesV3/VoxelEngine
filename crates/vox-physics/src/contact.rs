@@ -16,8 +16,20 @@ use vox_world::World;
 use crate::body::Body;
 
 /// Stable identity of a contact across steps: (body a, body b or MAX for the
-/// static world, cell in the target grid, face id).
-pub type ContactKey = (u32, u32, IVec3, u8);
+/// static world, index of body a's sampling surface point, face id).
+///
+/// Keyed by the *sampling point*, not the target cell it currently touches,
+/// for two reasons. First, uniqueness: several of a body's surface points
+/// can land in the same target cell (they're spaced one voxel apart -- any
+/// tilt or sub-voxel offset aliases neighbors together), and duplicate keys
+/// collide in the solver's warm-start map, which then applies one contact's
+/// full accumulated impulse to *every* contact sharing the key on the next
+/// substep -- a systematic over-injection at resting-weight scale that
+/// measurably pumped a heavy body sitting on the floor into ramping,
+/// oscillating velocity. Second, coherence: a point index never changes as
+/// a body slides/rotates across cell boundaries, so warm starting survives
+/// motion that used to discard it.
+pub type ContactKey = (u32, u32, u32, u8);
 
 /// Slot value in keys standing for the static world.
 pub const WORLD_SLOT: u32 = u32::MAX;
@@ -115,17 +127,25 @@ fn effective_mass(
 pub fn world_contacts(body: &Body, slot: usize, world: &World, out: &mut Vec<Contact>) {
     let s = world.cfg.voxel_size_m;
     let r_point = body.half_voxel;
-    let inv_iw = body.inv_inertia_world();
+    let inv_iw = body.inv_iw; // solver-refreshed cache, see the field's docs
 
-    for &p_local in &body.surface {
+    // Chunk-caching lookup instead of `world.solid` directly: each surface
+    // point costs up to 7 solidity queries (itself + 6 neighbors), and
+    // consecutive surface points are spatially coherent (generated in grid
+    // order), so nearly all of a large awake body's thousands of per-substep
+    // queries hit the same chunk as the previous one. A falling tree is
+    // exactly this case, every substep until it sleeps.
+    let mut lookup = vox_world::SolidLookup::new(world);
+
+    for (point_idx, &p_local) in body.surface.iter().enumerate() {
         let r_arm = body.rot * p_local;
         let p_w = body.pos + r_arm;
         let v = voxel_at(p_w, s);
 
-        if world.solid(v) {
+        if lookup.solid(v) {
             let mut best: Option<(Vec3, f32, u8)> = None;
             for (face_id, dir) in FACE_DIRS {
-                if world.solid(v + dir) {
+                if lookup.solid(v + dir) {
                     continue;
                 }
                 let d = face_dist(p_w, v, dir, s);
@@ -141,19 +161,29 @@ pub fn world_contacts(body: &Body, slot: usize, world: &World, out: &mut Vec<Con
                 r_arm,
                 n,
                 r_point + dist,
-                v,
+                point_idx as u32,
                 face_id,
                 &inv_iw,
             );
         } else {
             for (face_id, dir) in FACE_DIRS {
-                if !world.solid(v + dir) {
+                if !lookup.solid(v + dir) {
                     continue;
                 }
                 let d = face_dist(p_w, v, dir, s);
                 if d < r_point {
                     let n = -dir.as_vec3();
-                    push_world_contact(out, body, slot, r_arm, n, r_point - d, v, face_id, &inv_iw);
+                    push_world_contact(
+                        out,
+                        body,
+                        slot,
+                        r_arm,
+                        n,
+                        r_point - d,
+                        point_idx as u32,
+                        face_id,
+                        &inv_iw,
+                    );
                 }
             }
         }
@@ -168,7 +198,7 @@ fn push_world_contact(
     r_arm: Vec3,
     n: Vec3,
     depth: f32,
-    voxel: IVec3,
+    point_idx: u32,
     face_id: u8,
     inv_iw: &Mat3,
 ) {
@@ -186,7 +216,7 @@ fn push_world_contact(
         depth,
         r_arm,
         r_arm_b: Vec3::ZERO,
-        key: (slot as u32, WORLD_SLOT, voxel, face_id),
+        key: (slot as u32, WORLD_SLOT, point_idx, face_id),
         t1,
         t2,
         kn: effective_mass(n, body.inv_mass, inv_iw, r_arm, None),
@@ -222,8 +252,8 @@ pub fn pair_contacts(
 ) -> PairResult {
     let s_t = target.half_voxel * 2.0;
     let r_point = sampler.half_voxel;
-    let inv_iw_a = sampler.inv_inertia_world();
-    let inv_iw_b = target.inv_inertia_world();
+    let inv_iw_a = sampler.inv_iw; // solver-refreshed caches, see the field's docs
+    let inv_iw_b = target.inv_iw;
     let inv_rot_t: Quat = target.rot.inverse();
 
     let mut result = PairResult {
@@ -231,7 +261,7 @@ pub fn pair_contacts(
         contact_count: 0,
     };
 
-    for &p_local in &sampler.surface {
+    for (point_idx, &p_local) in sampler.surface.iter().enumerate() {
         let r_arm = sampler.rot * p_local;
         let p_w = sampler.pos + r_arm;
         // Into the target's grid frame (origin at grid min corner).
@@ -243,7 +273,7 @@ pub fn pair_contacts(
             continue;
         }
 
-        let mut found: Option<(Vec3, f32, IVec3, u8)> = None;
+        let mut found: Option<(Vec3, f32, u8)> = None;
         if target.grid.solid(cell) {
             let mut best: Option<(IVec3, f32, u8)> = None;
             for (face_id, dir) in FACE_DIRS {
@@ -256,7 +286,7 @@ pub fn pair_contacts(
                 }
             }
             if let Some((dir, dist, face_id)) = best {
-                found = Some((dir.as_vec3(), r_point + dist, cell, face_id));
+                found = Some((dir.as_vec3(), r_point + dist, face_id));
             }
         } else {
             // Nearest penetrating face within the point radius.
@@ -271,11 +301,11 @@ pub fn pair_contacts(
                 }
             }
             if let Some((n_local, depth, face_id)) = best {
-                found = Some((n_local.as_vec3(), depth, cell, face_id));
+                found = Some((n_local.as_vec3(), depth, face_id));
             }
         }
 
-        let Some((n_local, depth, cell, face_id)) = found else {
+        let Some((n_local, depth, face_id)) = found else {
             continue;
         };
         // Rotate the face normal into world space; it pushes the sampler out.
@@ -308,7 +338,7 @@ pub fn pair_contacts(
             depth,
             r_arm,
             r_arm_b,
-            key: (sampler_slot as u32, target_slot as u32, cell, face_id),
+            key: (sampler_slot as u32, target_slot as u32, point_idx as u32, face_id),
             t1,
             t2,
             kn: effective_mass(n, sampler.inv_mass, &inv_iw_a, r_arm, b_terms),

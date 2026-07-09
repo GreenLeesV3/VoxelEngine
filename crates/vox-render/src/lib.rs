@@ -6,11 +6,13 @@
 pub mod camera;
 pub mod frustum;
 pub mod gpu;
+pub mod particles;
 pub mod voxel_pipeline;
 
 pub use camera::Camera;
 pub use frustum::Frustum;
 pub use gpu::{DEPTH_FORMAT, Frame, Gpu};
+pub use particles::{MAX_PARTICLES, ParticleInstance, ParticlePipeline};
 pub use voxel_pipeline::{BodyMeshKey, DrawStats, VoxelPipeline};
 
 /// Errors from GPU initialization and per-frame surface operations.

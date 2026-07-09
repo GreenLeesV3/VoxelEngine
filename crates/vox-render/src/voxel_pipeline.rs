@@ -4,7 +4,6 @@
 //! is an 8-byte-vertex mesh plus a per-draw model matrix supplied through a
 //! one-instance vertex buffer.
 
-use std::collections::HashMap;
 
 use glam::{IVec3, Mat4, Vec3, Vec4};
 use wgpu::util::DeviceExt;
@@ -67,8 +66,8 @@ pub struct VoxelPipeline {
     pipeline: wgpu::RenderPipeline,
     camera_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    chunks: HashMap<IVec3, GpuMesh>,
-    bodies: HashMap<BodyMeshKey, GpuBodyMesh>,
+    chunks: vox_core::FxHashMap<IVec3, GpuMesh>,
+    bodies: vox_core::FxHashMap<BodyMeshKey, GpuBodyMesh>,
     voxel_size_m: f32,
 }
 
@@ -236,8 +235,8 @@ impl VoxelPipeline {
             pipeline,
             camera_buf,
             bind_group,
-            chunks: HashMap::new(),
-            bodies: HashMap::new(),
+            chunks: Default::default(),
+            bodies: Default::default(),
             voxel_size_m,
         }
     }

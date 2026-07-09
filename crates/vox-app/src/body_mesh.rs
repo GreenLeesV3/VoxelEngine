@@ -59,17 +59,23 @@ impl BodyMeshQueue {
         });
     }
 
-    /// Upload every mesh that's finished since the last call. A result for
-    /// a body that was despawned (e.g. evicted by the debris budget, or
-    /// destroyed again) before its mesh even arrived is uploaded anyway and
-    /// then simply never referenced again by any live `BodyId` (`BodyMeshKey`
-    /// bakes in the generation, so a reused slot never collides with a
-    /// stale result) -- a small, bounded, one-off leaked GPU buffer set in
-    /// that narrow race, not a correctness problem.
-    pub fn collect(&mut self, gpu: &Gpu, pipeline: &mut VoxelPipeline) {
+    /// Upload every mesh that's finished since the last call, returning the
+    /// keys that just arrived so the caller can resolve anything waiting on
+    /// them (see `VoxApp::replace_body`'s "keep the old ghost mesh until its
+    /// replacement is ready" bookkeeping). A result for a body that was
+    /// despawned (e.g. evicted by the debris budget, or destroyed again)
+    /// before its mesh even arrived is uploaded anyway and then simply never
+    /// referenced again by any live `BodyId` (`BodyMeshKey` bakes in the
+    /// generation, so a reused slot never collides with a stale result) --
+    /// a small, bounded, one-off leaked GPU buffer set in that narrow race,
+    /// not a correctness problem.
+    pub fn collect(&mut self, gpu: &Gpu, pipeline: &mut VoxelPipeline) -> Vec<BodyMeshKey> {
+        let mut uploaded = Vec::new();
         while let Ok((key, mesh)) = self.rx.try_recv() {
             self.in_flight = self.in_flight.saturating_sub(1);
             pipeline.upload_body(gpu, key, &mesh);
+            uploaded.push(key);
         }
+        uploaded
     }
 }

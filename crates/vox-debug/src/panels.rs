@@ -1,5 +1,6 @@
 //! The overlay's actual widgets: FPS/frame-timing graph, counts, physics
-//! tuning sliders, material picker, and a center-screen crosshair.
+//! tuning sliders, and a material picker. (The crosshair and hotbar are
+//! player-facing HUD, not debug -- see [`crate::hud`].)
 
 use egui::{Color32, Context, RichText, Slider, Stroke, Window};
 
@@ -9,7 +10,6 @@ use crate::OverlayState;
 pub fn build(ctx: &Context, mut state: OverlayState<'_>) {
     stats_window(ctx, &state);
     tuning_window(ctx, &mut state);
-    crosshair(ctx);
 }
 
 fn stats_window(ctx: &Context, state: &OverlayState<'_>) {
@@ -40,6 +40,7 @@ fn stats_window(ctx: &Context, state: &OverlayState<'_>) {
                 "bodies awake/total: {}/{}",
                 state.bodies_awake, state.bodies_total
             ));
+            ui.label(format!("particles: {}", state.particles));
         });
 }
 
@@ -121,21 +122,3 @@ fn tuning_window(ctx: &Context, state: &mut OverlayState<'_>) {
         });
 }
 
-/// A small dot at the exact center of the viewport.
-fn crosshair(ctx: &Context) {
-    let screen = ctx.screen_rect();
-    let center = screen.center();
-    ctx.layer_painter(egui::LayerId::background())
-        .circle_filled(
-            center,
-            2.5,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 220),
-        );
-    // A faint outline improves visibility over bright terrain.
-    ctx.layer_painter(egui::LayerId::background())
-        .circle_stroke(
-            center,
-            2.5,
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 160)),
-        );
-}

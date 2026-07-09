@@ -46,11 +46,11 @@
 //! from debris floating forever. See [`FLOOD_GIVE_UP_VOXELS`].)
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::BinaryHeap;
 
 use glam::{IVec3, Vec3};
 use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
-use vox_core::{MaterialRegistry, voxel_at, voxel_center_m};
+use vox_core::{FxHashSet, MaterialRegistry, voxel_at, voxel_center_m};
 use vox_world::{AIR, SolidLookup, Voxel, World};
 
 use crate::BodyId;
@@ -385,7 +385,7 @@ fn flood_from(
     world: &World,
     lookup: &mut SolidLookup<'_>,
     start: IVec3,
-    visited: &mut HashSet<IVec3>,
+    visited: &mut FxHashSet<IVec3>,
 ) -> FloodResult {
     let floor_y = world.bounds_voxels().0.y;
     // Keyed by (distance-to-floor, x, y, z) -- IVec3 isn't Ord, so the voxel
@@ -431,7 +431,7 @@ pub fn detach_unsupported(
     registry: &MaterialRegistry,
     removed: &[IVec3],
 ) -> Vec<BodyId> {
-    let mut visited: HashSet<IVec3> = HashSet::new();
+    let mut visited: FxHashSet<IVec3> = FxHashSet::default();
     let mut components: Vec<Vec<IVec3>> = Vec::new();
     // Shared across every seed in this call, not rebuilt per flood: most
     // seeds from the same edit land in the same handful of chunks, so the

@@ -5,11 +5,12 @@
 //! MVP enforces a finite extent from [`WorldConfig`]: reads outside are air,
 //! writes outside are ignored.
 
-use std::collections::{HashMap, HashSet};
-
 use glam::{IVec3, UVec3};
 use vox_core::coords::{CHUNK, chunk_of, local_of};
-use vox_core::{WorldConfig, chunk_origin};
+// FxHashMap over the std default: the chunk map is consulted on *every*
+// voxel read engine-wide (contacts, raycasts, carves, floods), where
+// SipHash's collision-flood hardening buys nothing and costs plenty.
+use vox_core::{FxHashMap, FxHashSet, WorldConfig, chunk_origin};
 
 use crate::chunk::{AIR, Chunk, Voxel};
 
@@ -57,8 +58,8 @@ pub type DirtyRegion = (IVec3, IVec3);
 pub struct World {
     /// Per-world configuration (voxel scale, extent, seed).
     pub cfg: WorldConfig,
-    chunks: HashMap<IVec3, Chunk>,
-    dirty: HashSet<IVec3>,
+    chunks: FxHashMap<IVec3, Chunk>,
+    dirty: FxHashSet<IVec3>,
     dirty_regions: Vec<DirtyRegion>,
     /// Half-open world bounds in voxels, `[min, max)`.
     bounds_voxels: (IVec3, IVec3),
@@ -71,8 +72,8 @@ impl World {
         let bounds_voxels = (IVec3::ZERO, cfg.extent_voxels());
         Self {
             cfg,
-            chunks: HashMap::new(),
-            dirty: HashSet::new(),
+            chunks: FxHashMap::default(),
+            dirty: FxHashSet::default(),
             dirty_regions: Vec::new(),
             bounds_voxels,
             warned_out_of_bounds: false,
@@ -286,6 +287,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     const STONE: Voxel = Voxel(1);
     const DIRT: Voxel = Voxel(2);

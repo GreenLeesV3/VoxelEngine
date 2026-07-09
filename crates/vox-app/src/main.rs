@@ -2,11 +2,12 @@
 
 mod args;
 mod body_mesh;
+mod particles;
 mod player;
 mod remesh;
 mod tools;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,20 +17,22 @@ use rayon::prelude::*;
 
 use player::Player;
 use body_mesh::BodyMeshQueue;
+use particles::{Burst, ParticleSystem};
 use remesh::RemeshQueue;
-use tools::{Tool, Tools};
+use tools::{CarveOutcome, HOTBAR, Tool, Tools};
 
 use vox_core::consts::CHUNK_SIZE;
 use vox_core::{
     FrameProfile, MaterialId, MaterialRegistry, ScopedTimer, Tunables, WorldConfig, chunk_origin,
     voxel_at,
 };
+use vox_debug::hud::HudState;
 use vox_debug::{DebugOverlay, OverlayState};
 use vox_gen::{TerrainGen, TerrainMaterials, TreeMaterials, generate_trees};
 use vox_mesh::{VoxelSlab, mesh_slab};
 use vox_physics::{Body, BodyId, ImpactEvent, PhysicsWorld, VoxelGrid};
 use vox_platform::{App, FrameControl, FrameTiming, InputState, run_app};
-use vox_render::{Camera, Frustum, Gpu, VoxelPipeline};
+use vox_render::{BodyMeshKey, Camera, Frustum, Gpu, ParticlePipeline, VoxelPipeline};
 use vox_world::{AIR, Voxel, World};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
@@ -129,6 +132,15 @@ struct VoxApp {
     /// `enforce_debris_budget` to evict the oldest *settled* debris once the
     /// total exceeds `MAX_DEBRIS_BODIES`.
     debris_order: VecDeque<BodyId>,
+    /// Old debris meshes kept alive past their body's despawn, each waiting
+    /// on the set of its replacement fragments' async mesh jobs still in
+    /// flight -- see `replace_body`'s doc comment for why this exists (a
+    /// carved body that's too big to mesh inline would otherwise vanish for
+    /// the frame or more its fragments' meshes take).
+    pending_body_removal: HashMap<BodyMeshKey, HashSet<BodyMeshKey>>,
+    /// CPU-simulated destruction feedback particles (see `particles`).
+    particles: ParticleSystem,
+    particle_pipeline: ParticlePipeline,
 }
 
 /// Hard cap on total debris bodies alive at once. Past this, the oldest
@@ -139,8 +151,22 @@ const MAX_DEBRIS_BODIES: usize = 200;
 
 /// Bodies at or below this voxel count mesh synchronously in
 /// `VoxApp::upload_debris_mesh` instead of going through the threaded
-/// `body_mesh` queue -- see that function's doc comment for why.
-const INLINE_MESH_VOXEL_BUDGET: usize = 64_000;
+/// `body_mesh` queue -- see that function's doc comment for why. Raised
+/// from an initial 64,000: a felled tree's trunk-plus-canopy is one
+/// connected mass that can easily clear 100,000+ voxels (a single canopy
+/// ellipsoid alone is tens of thousands), and that's a rare, one-off event
+/// worth a several-millisecond synchronous hitch rather than an invisible
+/// frame -- the stress example extrapolates ~5ms at this size, against a
+/// 16.6ms frame budget at 60Hz.
+const INLINE_MESH_VOXEL_BUDGET: usize = 200_000;
+
+/// Whether `upload_debris_mesh` meshed a body right there on the spot or
+/// handed it to the background queue -- see `replace_body`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MeshDispatch {
+    Sync,
+    Async,
+}
 
 impl VoxApp {
     fn new(
@@ -150,6 +176,7 @@ impl VoxApp {
         let assets = assets_dir();
         let registry = MaterialRegistry::load_dir(&assets.join("materials"))?;
         let shader = std::fs::read_to_string(assets.join("shaders/voxel.wgsl"))?;
+        let particle_shader = std::fs::read_to_string(assets.join("shaders/particle.wgsl"))?;
 
         let build_start = Instant::now();
         let world = build_terrain_world(cfg, &registry)?;
@@ -162,6 +189,7 @@ impl VoxApp {
         let size = window.inner_size();
         let gpu = Gpu::new(window.clone(), size.width, size.height)?;
         let pipeline = VoxelPipeline::new(&gpu, &shader, &registry, world.cfg.voxel_size_m);
+        let particle_pipeline = ParticlePipeline::new(&gpu, &particle_shader);
         let tools = Tools::new(&registry);
         let debug_overlay = DebugOverlay::new(
             gpu.device(),
@@ -205,6 +233,9 @@ impl VoxApp {
             selected_material,
             last_draw_stats: vox_render::DrawStats::default(),
             debris_order: VecDeque::new(),
+            pending_body_removal: HashMap::new(),
+            particles: ParticleSystem::new(),
+            particle_pipeline,
         };
         app.initial_mesh();
 
@@ -271,39 +302,98 @@ impl VoxApp {
     /// path that calls `phys.spawn` must follow up with this — a body with
     /// no uploaded mesh is simulated (falls, collides, sleeps) but never
     /// drawn, which looks indistinguishable from the material having simply
-    /// vanished. Does nothing if `id` is no longer alive.
+    /// vanished. Does nothing if `id` is no longer alive. Returns whether
+    /// meshing was dispatched to the background queue (`Async`) or done
+    /// right here (`Sync`) — callers replacing an existing body use this to
+    /// decide whether the old mesh needs to be kept alive a little longer
+    /// (see [`Self::replace_body`]).
     ///
     /// Small bodies mesh right here, synchronously: the stress example
     /// measures even a 40^3 cube (64,000 voxels) at ~1.7ms average, cheap
     /// enough not to be worth deferring. This matters because splitting a
     /// body during destruction is the overwhelmingly common case, and it
     /// always produces several small fragments in the same frame the old
-    /// body is despawned — sending every one of those through the
-    /// background queue meant the whole cluster popped out of existence for
-    /// the frame or two its meshes took to come back, which is exactly the
-    /// "flicker"/"goes invisible as it destroys" symptom: not a rendering
-    /// glitch, but a real gap where nothing was uploaded yet. Only bodies
-    /// above the budget (a large one-off spawn, e.g. a whole tree trunk
-    /// detached at once) still go through `body_mesh` to keep that meshing
-    /// cost off the main thread.
-    fn upload_debris_mesh(&mut self, id: BodyId) {
+    /// body is despawned. Only bodies above the budget (a large one-off
+    /// mass -- a whole tree's trunk-plus-canopy is one connected component
+    /// easily past 100,000 voxels) still go through `body_mesh` to keep
+    /// that meshing cost off the main thread.
+    fn upload_debris_mesh(&mut self, id: BodyId) -> MeshDispatch {
         let Some(body) = self.phys.get(id) else {
-            return;
+            return MeshDispatch::Sync;
         };
         let voxel_count = (body.grid.dims.x * body.grid.dims.y * body.grid.dims.z) as usize;
-        if voxel_count <= INLINE_MESH_VOXEL_BUDGET {
+        let dispatch = if voxel_count <= INLINE_MESH_VOXEL_BUDGET {
             let slab = VoxelSlab::from_grid(body.grid.dims, &body.grid.voxels);
             let mesh = mesh_slab(&slab, IVec3::ZERO);
             self.pipeline
                 .upload_body(&self.gpu, (id.slot, id.generation), &mesh);
+            MeshDispatch::Sync
         } else {
             self.body_mesh.dispatch(
                 (id.slot, id.generation),
                 body.grid.dims,
                 body.grid.voxels.clone(),
             );
-        }
+            MeshDispatch::Async
+        };
         self.debris_order.push_back(id);
+        dispatch
+    }
+
+    /// Despawn-and-replace bookkeeping shared by every carve path (tool
+    /// hits and impact fracture): a carved body is always despawned and 0+
+    /// fragments spawned in its place, never updated in place. If every
+    /// fragment meshes synchronously (the common case for anything but a
+    /// genuinely huge mass), the old mesh is dropped immediately -- its
+    /// replacements are already on screen this same frame, so there's no
+    /// gap to cover. If any fragment is large enough to need threaded
+    /// meshing, the old mesh is instead kept exactly where it is (frozen,
+    /// at its last known transform) until *every* one of that group's async
+    /// meshes has arrived, instead of vanishing for the frame or more that
+    /// takes: a felled tree's trunk-plus-canopy is one connected mass well
+    /// past `INLINE_MESH_VOXEL_BUDGET`, and it stays that large across many
+    /// subsequent hits, not just the first -- which is exactly what made
+    /// this "invisible for a solid frame every time damage is applied"
+    /// rather than a one-off pop on the initial break.
+    fn replace_body(&mut self, old_id: BodyId, spawned: Vec<BodyId>) {
+        let old_key = (old_id.slot, old_id.generation);
+        if spawned.is_empty() {
+            self.pipeline.remove_body(old_key);
+            return;
+        }
+        let mut pending = HashSet::new();
+        for id in spawned {
+            if self.upload_debris_mesh(id) == MeshDispatch::Async {
+                pending.insert((id.slot, id.generation));
+            }
+        }
+        if pending.is_empty() {
+            self.pipeline.remove_body(old_key);
+        } else {
+            self.pending_body_removal.insert(old_key, pending);
+        }
+    }
+
+    /// Drop any old ghost mesh whose replacement fragments have all finished
+    /// meshing this frame -- see [`Self::replace_body`]. Must run after
+    /// `body_mesh.collect` so `uploaded` reflects this frame's arrivals.
+    fn resolve_pending_removals(&mut self, uploaded: &[BodyMeshKey]) {
+        if uploaded.is_empty() || self.pending_body_removal.is_empty() {
+            return;
+        }
+        let mut finished = Vec::new();
+        for (&old_key, waiting) in &mut self.pending_body_removal {
+            for key in uploaded {
+                waiting.remove(key);
+            }
+            if waiting.is_empty() {
+                finished.push(old_key);
+            }
+        }
+        for old_key in finished {
+            self.pending_body_removal.remove(&old_key);
+            self.pipeline.remove_body(old_key);
+        }
     }
 
     /// Keep total debris body count under `MAX_DEBRIS_BODIES`: evict the
@@ -333,6 +423,11 @@ impl VoxApp {
             let Some(body) = self.phys.get(event.body) else {
                 continue;
             };
+            // Terminal rubble never re-fractures -- see
+            // `MIN_FRACTURE_BODY_VOXELS` for the cascade this gate breaks.
+            if body.grid.solid_count() < MIN_FRACTURE_BODY_VOXELS {
+                continue;
+            }
             let impact_speed = event.impulse / body.mass();
             let voxel_size_m = body.half_voxel * 2.0;
             let local = body.rot.inverse() * (event.point_m - body.pos) - body.grid_offset;
@@ -372,11 +467,19 @@ impl VoxApp {
                 seed,
             );
             if self.phys.get(event.body).is_none() {
-                self.pipeline
-                    .remove_body((event.body.slot, event.body.generation));
-                for id in spawned {
-                    self.upload_debris_mesh(id);
-                }
+                // Dust in the fractured material's color, scaled by both
+                // the bite size and how hard the hit actually was.
+                self.particles.burst(Burst {
+                    center: event.point_m,
+                    count: ((radius_vox * 5.0) as usize).clamp(4, 18),
+                    color: def.color,
+                    speed: (impact_speed * 0.4).clamp(0.8, 3.0),
+                    upward: 0.6,
+                    life: 0.8,
+                    size: 0.045,
+                    buoyant: false,
+                });
+                self.replace_body(event.body, spawned);
             }
         }
     }
@@ -473,14 +576,22 @@ impl VoxApp {
                 }
             };
             // A carved body is despawned and replaced, not updated in
-            // place -- drop its old mesh before uploading the new
-            // fragments', or a frozen ghost of the original stays on
-            // screen forever at its last known transform.
-            for id in outcome.removed {
-                self.pipeline.remove_body((id.slot, id.generation));
-            }
-            for id in outcome.spawned {
-                self.upload_debris_mesh(id);
+            // place. `removed` is empty for a carve that only ever touched
+            // fresh material (world terrain, or no existing body in range)
+            // -- those fragments have no old ghost to protect, just upload
+            // them. Otherwise it's exactly the one body the carve hit (every
+            // `Tools` method that populates `removed` puts at most one id in
+            // it -- see `body_outcome`); `replace_body` keeps its mesh alive
+            // until every replacement fragment is ready (see its own doc
+            // comment).
+            self.emit_tool_particles(&outcome);
+            match outcome.removed.first() {
+                Some(&old_id) => self.replace_body(old_id, outcome.spawned),
+                None => {
+                    for id in outcome.spawned {
+                        self.upload_debris_mesh(id);
+                    }
+                }
             }
         }
         if input.mouse_clicked(MouseButton::Right) {
@@ -493,6 +604,109 @@ impl VoxApp {
                 self.tools.adjust_radius(steps);
             } else {
                 self.tools.cycle_material(steps, &self.registry);
+            }
+        }
+    }
+
+    /// The palette color of `v`, for destruction-feedback particles; a
+    /// neutral gray when the material is unknown or air.
+    fn material_color(&self, v: Voxel) -> [f32; 3] {
+        self.registry
+            .get(MaterialId(v.0))
+            .map(|d| d.color)
+            .unwrap_or([0.6, 0.58, 0.55])
+    }
+
+    /// Destruction feedback for one tool use: dust in the destroyed
+    /// material's color, plus tool-specific flavor (sparks and smoke for
+    /// the bomb, hot sparks for the laser). Purely visual -- no gameplay
+    /// state reads these.
+    fn emit_tool_particles(&mut self, outcome: &CarveOutcome) {
+        let Some(center) = outcome.impact_m else {
+            return;
+        };
+        let dust = self.material_color(outcome.impact_material);
+        match self.tools.tool {
+            Tool::Dig => self.particles.burst(Burst {
+                center,
+                count: 10,
+                color: dust,
+                speed: 1.6,
+                upward: 0.8,
+                life: 0.7,
+                size: 0.035,
+                buoyant: false,
+            }),
+            Tool::ScalableDig => {
+                let r = self.tools.radius_m;
+                self.particles.burst(Burst {
+                    center,
+                    count: (r * 14.0) as usize + 8,
+                    color: dust,
+                    speed: 1.2 + r,
+                    upward: 1.0,
+                    life: 0.9,
+                    size: 0.05,
+                    buoyant: false,
+                });
+            }
+            Tool::Bomb => {
+                let r = self.tools.radius_m;
+                // Hot sparks first, then a wave of material dust, then slow
+                // rising smoke -- three layers with different speeds/lives
+                // read as one explosion instead of one flat puff.
+                self.particles.burst(Burst {
+                    center,
+                    count: 30,
+                    color: [1.0, 0.65, 0.2],
+                    speed: 7.0 + r * 2.0,
+                    upward: 2.0,
+                    life: 0.5,
+                    size: 0.05,
+                    buoyant: false,
+                });
+                self.particles.burst(Burst {
+                    center,
+                    count: (r * 16.0) as usize + 16,
+                    color: dust,
+                    speed: 4.0 + r,
+                    upward: 1.5,
+                    life: 1.1,
+                    size: 0.06,
+                    buoyant: false,
+                });
+                self.particles.burst(Burst {
+                    center,
+                    count: 14,
+                    color: [0.35, 0.34, 0.33],
+                    speed: 1.2,
+                    upward: 0.8,
+                    life: 2.4,
+                    size: 0.30,
+                    buoyant: true,
+                });
+            }
+            Tool::DeathLaser => {
+                self.particles.burst(Burst {
+                    center,
+                    count: 24,
+                    color: [1.0, 0.35, 0.25],
+                    speed: 6.0,
+                    upward: 0.5,
+                    life: 0.4,
+                    size: 0.04,
+                    buoyant: false,
+                });
+                self.particles.burst(Burst {
+                    center,
+                    count: 10,
+                    color: dust,
+                    speed: 2.5,
+                    upward: 1.0,
+                    life: 0.8,
+                    size: 0.05,
+                    buoyant: false,
+                });
             }
         }
     }
@@ -623,7 +837,7 @@ impl App for VoxApp {
         // Wake any resting debris whose ground was just carved/edited from
         // under it, then remesh: absorb edits, dispatch to workers, upload.
         let eye = self.player.eye(timing.alpha);
-        {
+        let uploaded = {
             let _t = ScopedTimer::new(&mut self.profile.remesh);
             let s = self.world.cfg.voxel_size_m;
             for (min, max) in self.world.drain_dirty_regions() {
@@ -632,9 +846,11 @@ impl App for VoxApp {
             self.remesh.absorb_dirty(&mut self.world);
             self.remesh.dispatch(&self.world, eye);
             self.remesh.collect(&self.gpu, &mut self.pipeline);
-            self.body_mesh.collect(&self.gpu, &mut self.pipeline);
-        }
+            self.body_mesh.collect(&self.gpu, &mut self.pipeline)
+        };
+        self.resolve_pending_removals(&uploaded);
         self.sync_debris_render(timing.alpha);
+        self.particles.update(timing.dt_frame);
 
         // Camera from the interpolated player eye.
         self.camera.pos = eye;
@@ -645,6 +861,14 @@ impl App for VoxApp {
         let view_proj = self.camera.view_proj(aspect);
         self.pipeline
             .write_camera(&self.gpu, view_proj, self.camera.pos, FOG_END_M);
+        // Billboard basis: camera right and true up (right x forward).
+        let cam_right = self.camera.right();
+        let cam_up = cam_right.cross(self.camera.forward()).normalize();
+        self.particle_pipeline
+            .write_camera(&self.gpu, view_proj, cam_right, cam_up);
+        let particle_instances = self.particles.instances();
+        self.particle_pipeline
+            .upload(&self.gpu, &particle_instances);
         let frustum = Frustum::from_view_proj(view_proj);
 
         let render_start = Instant::now();
@@ -667,34 +891,60 @@ impl App for VoxApp {
                     label: Some("frame-encoder"),
                 });
 
-        // Debug overlay UI must be built and its buffers uploaded before the
-        // render pass opens (buffer uploads can't happen mid-pass); painting
-        // itself happens inside the pass, right after the world.
-        let prepared_overlay = self.debug_visible.then(|| {
-            let (w, h) = self.gpu.surface_size();
-            let state = OverlayState {
-                profile: &self.profile,
-                tunables: &mut self.tunables,
-                fps: self.last_fps,
-                chunks_drawn: self.last_draw_stats.drawn,
-                chunks_culled: self.last_draw_stats.culled,
-                mesh_queue: self.remesh.pending_len(),
-                body_mesh_in_flight: self.body_mesh.in_flight,
-                bodies_awake: self.phys.awake_count(),
-                bodies_total: self.phys.body_count(),
-                tool_radius: &mut self.tools.radius_m,
-                material_names: &self.material_names,
-                selected_material: &mut self.selected_material,
-            };
-            self.debug_overlay.prepare(
-                &self.window,
-                self.gpu.device(),
-                self.gpu.queue(),
-                &mut encoder,
-                (w, h),
-                state,
-            )
+        // HUD + debug overlay UI must be built and their buffers uploaded
+        // before the render pass opens (buffer uploads can't happen
+        // mid-pass); painting itself happens inside the pass, after the
+        // world. The HUD (crosshair, hotbar) draws every frame; the debug
+        // windows only when F3-visible.
+        let mut hud_slots: [Option<&str>; 9] = [None; 9];
+        for (i, (_, tool)) in HOTBAR.iter().enumerate() {
+            hud_slots[i] = Some(tool_label(*tool));
+        }
+        let hud_state = HudState {
+            slots: hud_slots,
+            active: HOTBAR
+                .iter()
+                .position(|(_, t)| *t == self.tools.tool)
+                .unwrap_or(0),
+            radius_m: self
+                .tools
+                .has_adjustable_radius()
+                .then_some(self.tools.radius_m),
+            material_name: self
+                .material_names
+                .get(self.selected_material)
+                .map(String::as_str)
+                .unwrap_or("(none)"),
+            material_color: self
+                .registry
+                .get(MaterialId((self.selected_material + 1) as u16))
+                .map(|d| d.color)
+                .unwrap_or([0.8, 0.8, 0.8]),
+        };
+        let debug_state = self.debug_visible.then(|| OverlayState {
+            profile: &self.profile,
+            tunables: &mut self.tunables,
+            fps: self.last_fps,
+            chunks_drawn: self.last_draw_stats.drawn,
+            chunks_culled: self.last_draw_stats.culled,
+            mesh_queue: self.remesh.pending_len(),
+            body_mesh_in_flight: self.body_mesh.in_flight,
+            bodies_awake: self.phys.awake_count(),
+            bodies_total: self.phys.body_count(),
+            particles: self.particles.len(),
+            tool_radius: &mut self.tools.radius_m,
+            material_names: &self.material_names,
+            selected_material: &mut self.selected_material,
         });
+        let prepared_overlay = self.debug_overlay.prepare(
+            &self.window,
+            self.gpu.device(),
+            self.gpu.queue(),
+            &mut encoder,
+            (w, h),
+            &hud_state,
+            debug_state,
+        );
         self.tools.set_material_index(self.selected_material + 1);
 
         let stats;
@@ -726,9 +976,10 @@ impl App for VoxApp {
                 drawn: chunk_stats.drawn + body_stats.drawn,
                 culled: chunk_stats.culled + body_stats.culled,
             };
-            if let Some(prepared) = &prepared_overlay {
-                self.debug_overlay.paint(&mut pass, prepared);
-            }
+            // Alpha-blended particles after all opaque geometry (they depth
+            // test against it), UI last, on top of everything.
+            self.particle_pipeline.draw(&mut pass);
+            self.debug_overlay.paint(&mut pass, &prepared_overlay);
         }
         self.gpu.queue().submit([encoder.finish()]);
         frame.present();
@@ -783,6 +1034,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Short human-facing label for a hotbar slot.
+fn tool_label(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Dig => "Dig",
+        Tool::ScalableDig => "Carve",
+        Tool::Bomb => "Bomb",
+        Tool::DeathLaser => "Laser",
+    }
+}
+
 /// Radius, in voxels, of the smallest possible fracture -- what *every*
 /// material chips loose the instant an impact just barely clears its own
 /// threshold, regardless of how fragile or tough that material is. A tiny
@@ -806,6 +1067,29 @@ const CRUMBLE_SCALE_RANGE: (f32, f32) = (1.0, 5.0);
 /// impact (e.g. a falling boulder) still can't carve out most of a small
 /// body in one hit.
 const ENERGY_GROWTH_CAP: f32 = 1.5;
+/// Absolute ceiling on the fracture radius, in voxels, regardless of how
+/// fragile the material or how violent the impact -- a hard backstop on top
+/// of `ENERGY_GROWTH_CAP`/`CRUMBLE_SCALE_RANGE`'s already-clamped growth.
+/// Impact fracture is meant to read as "a chunk breaks free and crumbles,"
+/// not "a chunk of the object vanishes into a smooth spherical void": a
+/// single-hit carve this large on something like a tree's leaf canopy (a
+/// low-strength material with the fastest growth) looked exactly like the
+/// latter before this cap existed, however many small flying chips were
+/// scattered around its edge.
+const MAX_FRACTURE_RADIUS_VOX: f32 = 3.0;
+/// Bodies with fewer solid voxels than this are terminal rubble: they
+/// bounce and settle, but never impact-fracture again. Without this floor,
+/// destruction *cascaded*: a fracture scatters 3-voxel chips, a chip's next
+/// bounce trivially clears a fragile material's threshold (leaves fracture
+/// at 0.5 m/s of delta-v -- every bounce), and since every fragment of a
+/// 3-voxel body is below `DEBRIS_MIN_VOXELS` (4), the chip vanished as dust
+/// while `spawn_impact_chips` emitted fresh chips from what was removed --
+/// each generation re-cloning grids, re-running component labeling,
+/// re-meshing, and churning GPU buffers, every single bounce, until the
+/// debris budget filled with popping, vanishing, respawning specks. That
+/// churn was both the "debris glitches around" report and a large share of
+/// the "lots of debris causes lag" one.
+const MIN_FRACTURE_BODY_VOXELS: usize = 16;
 
 /// Pure impact-fracture decision, kept free of live GPU/registry state so
 /// it's unit-testable without a whole `VoxApp`: given a material's
@@ -842,7 +1126,8 @@ fn fracture_radius_vox(strength: f32, impact_speed: f32, fracture_sensitivity: f
     let fragility = (FRACTURE_REFERENCE_STRENGTH / strength).clamp(CRUMBLE_SCALE_RANGE.0, CRUMBLE_SCALE_RANGE.1);
     let excess = (impact_speed / threshold - 1.0).max(0.0);
     let growth = excess.sqrt().min(ENERGY_GROWTH_CAP);
-    Some(FRACTURE_RADIUS_VOX * (1.0 + growth * (fragility - 1.0)))
+    let radius = FRACTURE_RADIUS_VOX * (1.0 + growth * (fragility - 1.0));
+    Some(radius.min(MAX_FRACTURE_RADIUS_VOX))
 }
 
 /// Pure eviction decision behind `VoxApp::enforce_debris_budget`, kept free
