@@ -19,14 +19,14 @@ struct Params {
 // use textureSample — no filtering sampler). Takes integer texel coords.
 fn sobel_depth(texel: vec2u) -> f32 {
     let w = textureDimensions(depth_tex);
-    let tl = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i(-1, -1), vec2i(0), vec2i(w) - 1)).r;
-    let tm = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 0, -1), vec2i(0), vec2i(w) - 1)).r;
-    let tr = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 1, -1), vec2i(0), vec2i(w) - 1)).r;
-    let ml = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i(-1,  0), vec2i(0), vec2i(w) - 1)).r;
-    let mr = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 1,  0), vec2i(0), vec2i(w) - 1)).r;
-    let bl = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i(-1,  1), vec2i(0), vec2i(w) - 1)).r;
-    let bm = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 0,  1), vec2i(0), vec2i(w) - 1)).r;
-    let br = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 1,  1), vec2i(0), vec2i(w) - 1)).r;
+    let tl = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i(-1, -1), vec2i(0), vec2i(w) - 1), 0u).r;
+    let tm = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 0, -1), vec2i(0), vec2i(w) - 1), 0u).r;
+    let tr = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 1, -1), vec2i(0), vec2i(w) - 1), 0u).r;
+    let ml = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i(-1,  0), vec2i(0), vec2i(w) - 1), 0u).r;
+    let mr = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 1,  0), vec2i(0), vec2i(w) - 1), 0u).r;
+    let bl = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i(-1,  1), vec2i(0), vec2i(w) - 1), 0u).r;
+    let bm = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 0,  1), vec2i(0), vec2i(w) - 1), 0u).r;
+    let br = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 1,  1), vec2i(0), vec2i(w) - 1), 0u).r;
     let gx = abs(tr + 2.0 * mr + br - tl - 2.0 * ml - bl);
     let gy = abs(bl + 2.0 * bm + br - tl - 2.0 * tm - tr);
     return clamp(gx + gy, 0.0, 1.0);
