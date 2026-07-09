@@ -54,6 +54,7 @@ color = [0.28, 0.48, 0.22]
 jitter = 0.10
 density = 200.0
 strength = 0.5
+solid = false
 flammable = true
 [[material]]
 name = "brick"

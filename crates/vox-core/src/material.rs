@@ -575,7 +575,7 @@ mod tests {
             .get(reg.id_by_name("leaves").expect("leaves registered"))
             .expect("leaves present");
         assert_eq!(leaves.jitter, 0.10);
-        assert!(leaves.solid, "solid defaults to true in shipped file");
+        assert!(!leaves.solid, "leaves are non-solid (decorative foliage)");
         assert!(leaves.flammable, "leaves must be flammable");
     }
 

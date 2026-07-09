@@ -36,6 +36,15 @@ impl VoxelGrid {
         }
     }
 
+    /// Set voxel at `p`; out-of-bounds writes are silently dropped.
+    #[inline]
+    pub fn set(&mut self, p: IVec3, v: Voxel) {
+        if p.cmpge(IVec3::ZERO).all() && p.cmplt(self.dims).all() {
+            let idx = self.index(p);
+            self.voxels[idx] = v;
+        }
+    }
+
     #[inline]
     pub fn solid(&self, p: IVec3) -> bool {
         self.get(p) != AIR

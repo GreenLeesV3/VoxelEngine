@@ -999,6 +999,7 @@ impl App for VoxApp {
                 w.tick(&mut self.world, &events);
             }
             let mut spawned_ids: Vec<vox_physics::BodyId> = Vec::new();
+            let mut remesh_ids: Vec<vox_physics::BodyId> = Vec::new();
             if let Some(f) = &mut self.fire {
                 f.tick(&mut self.world);
                 // Collect consumed positions for debris detach, and emit
@@ -1070,12 +1071,17 @@ impl App for VoxApp {
                         &consumed_positions,
                     );
                 }
-                // Body-to-world fire spread: if any debris body carries
-                // ember voxels, check their world-space neighbors for
-                // flammable world cells and ignite them.
+                // Fire spread between debris bodies and the world, in
+                // both directions:
+                //   body→world: ember voxels in a body ignite flammable
+                //     world neighbors (a burning tree falls on a house).
+                //   world→body: ember voxels in the world ignite flammable
+                //     voxels in nearby bodies (a burning floor ignites a
+                //     falling tree that lands on it).
                 let s = self.world.cfg.voxel_size_m;
                 let ember_vox = self.registry.id_by_name("ember").map(|m| Voxel(m.0));
-                let mut ignite_targets: Vec<IVec3> = Vec::new();
+                let mut ignite_world: Vec<IVec3> = Vec::new();
+                let mut ignite_body: Vec<(vox_physics::BodyId, IVec3)> = Vec::new();
                 if let Some(ember_vox) = ember_vox {
                     let body_ids: Vec<vox_physics::BodyId> = self.phys.iter().map(|(id, _)| id).collect();
                     for bid in &body_ids {
@@ -1085,19 +1091,38 @@ impl App for VoxApp {
                         for x in 0..dims.x {
                             for y in 0..dims.y {
                                 for z in 0..dims.z {
-                                    if body.grid.get(IVec3::new(x, y, z)) != ember_vox { continue; }
+                                    let bv = body.grid.get(IVec3::new(x, y, z));
                                     let local = (Vec3::new(x as f32, y as f32, z as f32) + 0.5) * s + body.grid_offset;
                                     let world_pos = body.pos + body.rot * local;
                                     let world_vox = vox_core::voxel_at(world_pos, s);
-                                    for n in [
-                                        IVec3::X, IVec3::NEG_X, IVec3::Y,
-                                        IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z,
-                                    ] {
-                                        let neighbor = world_vox + n;
-                                        let nv = self.world.get_voxel(neighbor);
-                                        if let Some(def) = self.registry.get(vox_core::MaterialId(nv.0)) {
-                                            if def.flammable && nv != ember_vox {
-                                                ignite_targets.push(neighbor);
+                                    if bv == ember_vox {
+                                        // Body→world: this ember voxel ignites
+                                        // flammable world neighbors.
+                                        for n in [
+                                            IVec3::X, IVec3::NEG_X, IVec3::Y,
+                                            IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z,
+                                        ] {
+                                            let neighbor = world_vox + n;
+                                            let nv = self.world.get_voxel(neighbor);
+                                            if let Some(def) = self.registry.get(vox_core::MaterialId(nv.0)) {
+                                                if def.flammable && nv != ember_vox {
+                                                    ignite_world.push(neighbor);
+                                                }
+                                            }
+                                        }
+                                    } else if bv != vox_world::AIR {
+                                        // World→body: check if any world
+                                        // neighbor is ember (burning). If this
+                                        // body voxel is flammable, ignite it.
+                                        if let Some(def) = self.registry.get(vox_core::MaterialId(bv.0)) {
+                                            if def.flammable {
+                                                let world_burning = [
+                                                    IVec3::X, IVec3::NEG_X, IVec3::Y,
+                                                    IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z,
+                                                ].iter().any(|&n| self.world.get_voxel(world_vox + n) == ember_vox);
+                                                if world_burning {
+                                                    ignite_body.push((*bid, IVec3::new(x, y, z)));
+                                                }
                                             }
                                         }
                                     }
@@ -1105,16 +1130,31 @@ impl App for VoxApp {
                             }
                         }
                     }
+                    // Apply body ignitions: swap the body voxel to ember.
+                    for (bid, local) in &ignite_body {
+                        if let Some(body) = self.phys.get_mut(*bid) {
+                            body.grid.set(*local, ember_vox);
+                            remesh_ids.push(*bid);
+                        }
+                    }
                 }
-                for pos in &ignite_targets {
+                // Apply world ignitions (fire sim handles the swap).
+                for pos in &ignite_world {
                     f.ignite(&mut self.world, *pos);
                 }
             }
-            // Upload meshes for newly spawned debris outside the fire
-            // borrow scope — self.upload_debris_mesh needs &mut self.
+            // Upload meshes for newly spawned debris and re-mesh bodies
+            // whose voxels changed (ember swap) — outside the fire borrow
+            // scope since upload_debris_mesh needs &mut self.
             for id in &spawned_ids {
                 self.upload_debris_mesh(*id);
                 self.debris_order.push_back(*id);
+            }
+            // Re-mesh bodies whose voxels changed (ember swap from
+            // world→body fire spread). Don't push to debris_order —
+            // the body is already tracked from its initial spawn.
+            for id in &remesh_ids {
+                self.upload_debris_mesh(*id);
             }
         }
 
