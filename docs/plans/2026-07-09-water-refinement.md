@@ -9,7 +9,7 @@
 **Tech Stack:** Rust workspace; `cargo test -p vox-sim`, `cargo test --workspace`. No new dependencies.
 
 **Invariants that must never break** (existing tests enforce them — run the full vox-sim suite after every task):
-- Water-cell count conserved; flat sheets / full basins / leveled columns sleep (`active_count() == 0`); tick budget respected; behavior independent of `voxel_size_m`.
+- Water-cell count conserved; flat sheets / full basins / leveled columns sleep (`active_count() == 0`); every active cell processed each tick (volume-independent flow speed); behavior independent of `voxel_size_m`.
 
 ---
 

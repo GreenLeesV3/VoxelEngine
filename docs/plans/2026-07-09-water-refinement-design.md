@@ -56,8 +56,8 @@ direction per **active** cell:
   positions no longer active). The map is empty whenever the water sleeps.
 
 Momentum only reorders *preference* among already-legal moves — it can never
-create a move that today's rules would reject — so conservation, settling
-guarantees, and the tick budget are structurally unaffected.
+create a move that today's rules would reject — so conservation and settling
+guarantees are structurally unaffected.
 
 ## 3. Weathering (`vox-sim/src/weathering.rs`)
 

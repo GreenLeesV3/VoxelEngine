@@ -14,13 +14,6 @@ const NEIGHBORS_6: [IVec3; 6] = [
     IVec3::new(0, 0, -1),
 ];
 
-/// Hard ceiling on active cells processed in one `tick` call -- mirrors
-/// `MAX_DEBRIS_BODIES`'s budget pattern. A tick given more active cells than
-/// this processes exactly this many (in randomized order, so it's not
-/// always the same subset stalling) and leaves the rest active for the next
-/// tick, spreading a huge flood event (a blasted-open reservoir) over a few
-/// extra ticks instead of spiking one frame.
-const FLUID_TICK_BUDGET: usize = 4096;
 
 /// How far sideways a blocked cell searches for a reachable drop (an open
 /// cell with air beneath it) before giving up and settling. Larger values
@@ -170,30 +163,14 @@ impl FluidSim {
         let mut next_active = FxHashSet::default();
         let mut next_momentum = FxHashMap::default();
 
-        // Budget: if there are more active (real-water) cells than we're
-        // willing to process this call, shuffle so the overflow isn't
-        // always the same tail of whatever order the hash set happened to
-        // yield, then carry the overflow straight into `next_active`
-        // untouched. Each carried-over position still holds real water (it
-        // was filtered above and nothing this tick has mutated it yet), so
-        // it is exactly as valid for next tick's snapshot filter as any
-        // settled/woken cell already in `next_active` -- it's simply
-        // processed on a later call instead of this one.
-        if cells.len() > FLUID_TICK_BUDGET {
-            for i in (1..cells.len()).rev() {
-                let j = (self.next_u64() as usize) % (i + 1);
-                cells.swap(i, j);
-            }
-            let overflow = cells.split_off(FLUID_TICK_BUDGET);
-            // Carried-over cells keep their momentum too -- deferring a cell
-            // to the next tick must not erase the direction it was moving.
-            for &p in &overflow {
-                if let Some(&d) = self.momentum.get(&p) {
-                    next_momentum.insert(p, d);
-                }
-            }
-            next_active.extend(overflow);
-        }
+        // Every active cell is processed every tick -- no per-tick cell
+        // budget. Flow speed is therefore volume-independent: a 500-cell
+        // flood and a 50000-cell flood each advance one cell per tick. The
+        // frame-level death-spiral guard (`MAX_STEPS_PER_FRAME` in
+        // `vox-platform`) handles the case where a tick is too slow to run
+        // in real time -- it runs fewer ticks per frame (dilating simulated
+        // time uniformly across all water), never just a subset of cells
+        // within a single tick.
         let processed = cells.len();
 
         for pos in cells {
@@ -711,16 +688,21 @@ mod tests {
     }
 
     #[test]
-    fn tick_never_processes_more_than_the_budget_in_one_call() {
-        // `test_world()` is only 16 voxels per axis, far too small to hold a
-        // sphere wide enough to clear `FLUID_TICK_BUDGET` (4096) cells --
-        // volume of a radius-r sphere is ~(4/3)*pi*r^3, so r must exceed
-        // ~9.93 (since (4/3)*pi*9.93^3 ~= 4096); r=12 gives ~7238 cells,
-        // comfortably over budget without being enormous. That needs a
+    fn tick_processes_all_active_cells_regardless_of_volume() {
+        // Flow speed must be volume-independent: every active cell gets one
+        // step per tick, no matter how many there are. A large blob (well
+        // over the old 4096-cell budget this sim used to cap) must process
+        // *all* its cells in a single tick, deferring none. The frame-level
+        // death-spiral guard (MAX_STEPS_PER_FRAME) handles slow ticks by
+        // running fewer ticks per frame, not by skipping cells.
+        //
+        // `test_world()` is only 16 voxels per axis, far too small to hold
+        // a sphere wide enough to be meaningful here. Volume of a radius-r
+        // sphere is ~(4/3)*pi*r^3; r=12 gives ~7238 cells. That needs a
         // world spanning at least 2*12+1 = 25 voxels per axis around the
         // blob's center, so this test builds its own larger, self-contained
-        // world rather than changing the shared `test_world()` helper (used
-        // by other tests that may depend on its current 16-voxel extent).
+        // world rather than changing the shared `test_world()` helper.
+        const OLD_BUDGET: usize = 4096;
         let mut world = World::new(WorldConfig {
             voxel_size_m: 1.0,
             extent_m: [40.0, 40.0, 40.0],
@@ -729,14 +711,17 @@ mod tests {
         world.set_solid_table(vec![false, false, true]); // [air, water, floor]
         let mut sim = FluidSim::new(WATER);
         sim.place_blob(&mut world, IVec3::new(20, 20, 20), 12, WATER);
+        let active_before = sim.active_count();
         assert!(
-            sim.active_count() > FLUID_TICK_BUDGET,
-            "test needs more active cells than the budget to be meaningful: got {}",
-            sim.active_count()
+            active_before > OLD_BUDGET,
+            "test needs more active cells than the old budget to be meaningful: got {active_before}"
         );
 
         let processed = sim.tick(&mut world);
-        assert!(processed <= FLUID_TICK_BUDGET, "must not process more than the budget in one tick: {processed}");
+        assert_eq!(
+            processed, active_before,
+            "every active cell must be processed -- no cell budget, no deferred overflow"
+        );
     }
 
     #[test]
