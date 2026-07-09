@@ -1160,4 +1160,123 @@ mod tests {
              {DRAIN_TICK_BUDGET} ticks"
         );
     }
+
+    /// Registry with the full weathering material set (grass, dirt, mud,
+    /// stone, sand, water) -- mirrors the shipped `core.toml` ids by name
+    /// resolution, the same path `weather_table` in `main.rs` takes.
+    fn registry_with_weathering() -> MaterialRegistry {
+        MaterialRegistry::from_toml_str(
+            r#"
+            [[material]]
+            name = "stone"
+            color = [0.55, 0.55, 0.57]
+            density = 2600.0
+            strength = 8.0
+
+            [[material]]
+            name = "dirt"
+            color = [0.45, 0.32, 0.22]
+            density = 1500.0
+            strength = 2.0
+
+            [[material]]
+            name = "grass"
+            color = [0.33, 0.55, 0.25]
+            density = 1400.0
+            strength = 2.0
+
+            [[material]]
+            name = "sand"
+            color = [0.86, 0.79, 0.58]
+            density = 1600.0
+            strength = 1.0
+
+            [[material]]
+            name = "mud"
+            color = [0.30, 0.22, 0.16]
+            density = 1700.0
+            strength = 1.0
+
+            [[material]]
+            name = "water"
+            color = [0.16, 0.35, 0.62]
+            density = 1000.0
+            strength = 0.0
+            solid = false
+            fluid = true
+            "#,
+            "test_weathering.toml",
+        )
+        .expect("registry")
+    }
+
+    fn voxel_by_name(reg: &MaterialRegistry, name: &str) -> Voxel {
+        Voxel(reg.id_by_name(name).unwrap().0)
+    }
+
+    /// End-to-end through the real registry: place water on a grass field,
+    /// run the fluid + weathering loop the way the frame loop does, and the
+    /// grass beneath must progress grass -> dirt -> mud. This is the
+    /// integration contract Task 7 pins -- if `main.rs` ever drops the
+    /// `drain_events -> weathering.tick` call, the sim still works but this
+    /// test proves the material transformation is actually wired.
+    #[test]
+    fn a_pool_on_grass_turns_its_bed_to_mud() {
+        let reg = registry_with_weathering();
+        let water = voxel_by_name(&reg, "water");
+        let grass = voxel_by_name(&reg, "grass");
+        let mud = voxel_by_name(&reg, "mud");
+
+        let mut world = World::new(WorldConfig {
+            voxel_size_m: 1.0,
+            extent_m: [24.0, 24.0, 24.0],
+            ..WorldConfig::default()
+        });
+        world.set_solid_table(solid_table_for(&reg));
+        let (_, max) = world.bounds_voxels();
+
+        // Solid stone floor, grass top layer.
+        world.fill_box(IVec3::ZERO, IVec3::new(max.x, 5, max.z), voxel_by_name(&reg, "stone"));
+        world.fill_box(IVec3::new(0, 4, 0), IVec3::new(max.x, 5, max.z), grass);
+
+        // Build the weathering table from the registry exactly like main.rs.
+        let table = vox_sim::WeatherTable {
+            water,
+            stone: voxel_by_name(&reg, "stone"),
+            grass,
+            dirt: voxel_by_name(&reg, "dirt"),
+            mud,
+            sand: voxel_by_name(&reg, "sand"),
+        };
+        let mut sim = FluidSim::new(water);
+        let mut weathering = vox_sim::Weathering::new(table);
+
+        // Place a small pool and run the loop the way the frame loop does:
+        // fluid.tick -> drain_events -> weathering.tick -> drain dirty
+        // regions -> wake. The grass beneath must progress to mud.
+        sim.place_blob(&mut world, IVec3::new(12, 8, 12), 2, water);
+
+        let budget = (vox_sim::GRASS_SOAK_TICKS + vox_sim::DIRT_SOAK_TICKS) * 3;
+        let mut found_mud = false;
+        for _ in 0..budget {
+            sim.tick(&mut world);
+            let events = sim.drain_events();
+            weathering.tick(&mut world, &events);
+            for (min, max) in world.drain_dirty_regions() {
+                sim.wake_region(&world, min, max);
+            }
+            // Check for mud under the pool area.
+            for x in 9..16 {
+                for z in 9..16 {
+                    if world.get_voxel(IVec3::new(x, 4, z)) == mud {
+                        found_mud = true;
+                    }
+                }
+            }
+            if found_mud {
+                break;
+            }
+        }
+        assert!(found_mud, "the pool's grass bed must turn to mud within the soak budget");
+    }
 }

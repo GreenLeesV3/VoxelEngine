@@ -101,6 +101,22 @@ fn water_material(registry: &MaterialRegistry) -> Voxel {
         .unwrap_or(Voxel(1))
 }
 
+/// Weathering material table, or `None` (weathering disabled) if any
+/// required material is missing from the asset set -- mirrors
+/// `water_material`'s graceful-fallback pattern. A missing material name
+/// disables weathering with a log line, not a crash.
+fn weather_table(registry: &MaterialRegistry) -> Option<vox_sim::WeatherTable> {
+    let id = |name: &str| registry.id_by_name(name).map(|m| Voxel(m.0));
+    Some(vox_sim::WeatherTable {
+        water: id("water")?,
+        stone: id("stone")?,
+        grass: id("grass")?,
+        dirt: id("dirt")?,
+        mud: id("mud")?,
+        sand: id("sand")?,
+    })
+}
+
 /// The engine application.
 struct VoxApp {
     window: Arc<Window>,
@@ -120,6 +136,10 @@ struct VoxApp {
     /// Fluid ticks run at their own fixed rate (`FLUID_DT`), independent of
     /// the 60 Hz physics loop -- see the design doc §5.
     fluid_clock: vox_platform::FrameClock,
+    /// Water-driven material transformation (grass→dirt→mud, stone→sand),
+    /// fed by the fluid tick's contact events. `None` when the asset set
+    /// is missing a material weathering needs (see `weather_table`).
+    weathering: Option<vox_sim::Weathering>,
     /// Incrementing seed so repeated blasts get varied debris spin.
     blast_seed: u32,
     /// Incrementing seed so repeated impact-fracture chips get varied
@@ -236,6 +256,10 @@ impl VoxApp {
         // Tools' material_index is 1-based (air-inclusive); the picker's
         // index is 0-based into material_names — mirrors set_material_index.
         let selected_material = tools.material_index() - 1;
+        let weathering = weather_table(&registry).map(vox_sim::Weathering::new);
+        if weathering.is_none() {
+            tracing::info!("weathering disabled -- a required material is missing from the asset set");
+        }
 
         let mut app = Self {
             window,
@@ -244,6 +268,7 @@ impl VoxApp {
             world,
             fluid: vox_sim::FluidSim::new(water_material(&registry)),
             fluid_clock: vox_platform::FrameClock::new(vox_core::consts::FLUID_DT),
+            weathering,
             registry,
             player: Player::new(Vec3::ZERO),
             camera: Camera::new(Vec3::ZERO),
@@ -893,6 +918,10 @@ impl App for VoxApp {
         let fluid_timing = self.fluid_clock.advance(timing.dt_frame);
         for _ in 0..fluid_timing.physics_steps {
             self.fluid.tick(&mut self.world);
+            if let Some(w) = &mut self.weathering {
+                let events = self.fluid.drain_events();
+                w.tick(&mut self.world, &events);
+            }
         }
 
         // Wake any resting debris whose ground was just carved/edited from
