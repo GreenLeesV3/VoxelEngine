@@ -29,6 +29,22 @@ const FLUID_TICK_BUDGET: usize = 4096;
 /// meters involved, so scale invariance is preserved.
 const FLOW_HORIZON: i32 = 8;
 
+/// What the fluid tick observed about a cell -- consumed by weathering
+/// (`drain_events`), which uses arrival mode to grade erosion. Bounded:
+/// the buffer is cleared at the start of every tick, so an app that never
+/// drains holds at most one tick's worth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactEvent {
+    /// Water arrived here by falling (straight or diagonal down).
+    Fell(IVec3),
+    /// Water arrived here by a horizontal move (flow or spread).
+    Flowed(IVec3),
+    /// Water here found no move and left the active set.
+    Settled(IVec3),
+    /// Water left this cell (every move emits one).
+    Vacated(IVec3),
+}
+
 /// Tracks which water cells are still moving. A cell not in this set is
 /// settled and costs nothing to tick -- the entire performance story of
 /// this crate (mirrors `PhysicsWorld`'s sleep bookkeeping).
@@ -49,6 +65,8 @@ pub struct FluidSim {
     /// spawn jitter) -- avoids a visible left/right or diagonal bias in how
     /// water spreads.
     rng: u64,
+    /// This tick's `ContactEvent`s (see the enum's docs for the bound).
+    events: Vec<ContactEvent>,
 }
 
 impl FluidSim {
@@ -58,7 +76,13 @@ impl FluidSim {
             momentum: FxHashMap::default(),
             water,
             rng: 0x9E37_79B9_7F4A_7C15,
+            events: Vec::new(),
         }
+    }
+
+    /// Take this tick's contact events (empties the buffer).
+    pub fn drain_events(&mut self) -> Vec<ContactEvent> {
+        std::mem::take(&mut self.events)
     }
 
     /// Number of cells currently flowing (debug-overlay stat).
@@ -118,6 +142,7 @@ impl FluidSim {
     /// new position -- the entire wake cascade, no separate propagation pass
     /// needed.
     pub fn tick(&mut self, world: &mut World) -> usize {
+        self.events.clear();
         let water = self.water;
 
         // Snapshot exactly the positions that hold real water *before* any
@@ -192,6 +217,12 @@ impl FluidSim {
                 world.set_voxel(pos, AIR);
                 world.set_voxel(dest, water);
                 next_active.insert(dest);
+                self.events.push(ContactEvent::Vacated(pos));
+                self.events.push(if dest.y < pos.y {
+                    ContactEvent::Fell(dest)
+                } else {
+                    ContactEvent::Flowed(dest)
+                });
                 let hdir = IVec3::new(dest.x - pos.x, 0, dest.z - pos.z);
                 // A pure vertical fall keeps whatever direction the cell
                 // already had; any horizontal component overwrites it.
@@ -216,7 +247,10 @@ impl FluidSim {
                         }
                     }
                 }
-            } // else: settled -- not re-added
+            } else {
+                // Settled -- not re-added to the active set.
+                self.events.push(ContactEvent::Settled(pos));
+            }
         }
         self.active = next_active;
         self.momentum = next_momentum;
@@ -808,6 +842,23 @@ mod tests {
         }
         assert_eq!(sim.active_count(), 0, "blob must settle");
         assert_eq!(sim.momentum_count(), 0, "settled water must carry no momentum state");
+    }
+
+    #[test]
+    fn tick_emits_fell_vacated_and_settled_events() {
+        let mut world = test_world();
+        let mut sim = FluidSim::new(WATER);
+        sim.place_blob(&mut world, IVec3::new(8, 7, 8), 0, WATER); // 2 above floor
+        sim.tick(&mut world);
+        let ev = sim.drain_events();
+        assert!(ev.contains(&ContactEvent::Vacated(IVec3::new(8, 7, 8))), "leaving a cell must emit Vacated: {ev:?}");
+        assert!(ev.contains(&ContactEvent::Fell(IVec3::new(8, 6, 8))), "a downward arrival must emit Fell: {ev:?}");
+
+        sim.tick(&mut world); // lands on floor -> second Fell
+        sim.drain_events();
+        sim.tick(&mut world); // nowhere to go -> settles
+        let ev = sim.drain_events();
+        assert!(ev.contains(&ContactEvent::Settled(IVec3::new(8, 5, 8))), "settling must emit Settled: {ev:?}");
     }
 
     fn count_water(world: &World) -> usize {

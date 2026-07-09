@@ -9,4 +9,4 @@
 
 mod fluid;
 
-pub use fluid::FluidSim;
+pub use fluid::{ContactEvent, FluidSim};
