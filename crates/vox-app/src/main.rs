@@ -405,6 +405,19 @@ impl VoxApp {
         }
     }
 
+    /// Despawn any clutter-sized debris (see
+    /// `vox_core::consts::CLUTTER_MAX_VOXELS`) whose 35-60s lifetime just
+    /// ran out, and drop its GPU mesh. This is what actually keeps a busy
+    /// destruction site cheap: a felled tree at small voxel scales sheds
+    /// far more gravel-sized chips than `MAX_DEBRIS_BODIES` eviction alone
+    /// would ever clear in a reasonable time, since eviction only fires
+    /// once the global cap is hit.
+    fn expire_clutter(&mut self, dt: f32) {
+        for id in self.phys.tick_lifetimes(dt) {
+            self.pipeline.remove_body((id.slot, id.generation));
+        }
+    }
+
     /// Material-based impact destruction: check each impact this frame's
     /// physics step(s) produced against the material actually at that
     /// point. A hit whose speed (impulse/mass -- the velocity change the
@@ -833,6 +846,7 @@ impl App for VoxApp {
         };
         self.apply_impact_fracture(impacts);
         self.enforce_debris_budget();
+        self.expire_clutter(timing.physics_steps as f32 * vox_core::consts::PHYSICS_DT);
 
         // Wake any resting debris whose ground was just carved/edited from
         // under it, then remesh: absorb edits, dispatch to workers, upload.

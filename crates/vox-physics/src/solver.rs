@@ -8,7 +8,10 @@
 
 use glam::{Quat, Vec3};
 use vox_core::{FxHashMap, Tunables};
-use vox_core::consts::{CONTACT_SLOP, GRAVITY, SLEEP_FRAMES, SOLVER_ITERS, SUBSTEPS};
+use vox_core::consts::{
+    CLUTTER_LIFETIME_MAX_S, CLUTTER_LIFETIME_MIN_S, CLUTTER_MAX_VOXELS, CONTACT_SLOP, GRAVITY,
+    SLEEP_FRAMES, SOLVER_ITERS, SUBSTEPS,
+};
 use vox_world::World;
 
 use crate::body::{Body, BodyId};
@@ -149,15 +152,42 @@ pub struct PhysicsWorld {
     /// Live-tunable solver parameters (friction, contact bias, sleep
     /// thresholds); public so the debug overlay can bind sliders directly.
     pub tunables: Tunables,
+    /// xorshift64* state driving the 35-60s jitter on clutter lifetimes (see
+    /// `spawn`). Not used for anything gameplay-visible or requiring
+    /// reproducibility across runs, so a fixed non-zero seed (xorshift
+    /// stalls forever on zero) is all this needs.
+    lifetime_rng: u64,
 }
 
 impl PhysicsWorld {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            lifetime_rng: 0x2545_F491_4F6C_DD1D,
+            ..Self::default()
+        }
     }
 
-    /// Insert a body, waking it. Returns its handle.
-    pub fn spawn(&mut self, body: Body) -> BodyId {
+    /// xorshift64* -- deterministic, dependency-free spawn jitter (same
+    /// algorithm as `vox_app::particles::ParticleSystem::next_f32`).
+    fn next_lifetime_jitter(&mut self) -> f32 {
+        self.lifetime_rng ^= self.lifetime_rng << 13;
+        self.lifetime_rng ^= self.lifetime_rng >> 7;
+        self.lifetime_rng ^= self.lifetime_rng << 17;
+        ((self.lifetime_rng >> 40) as f32) / ((1u64 << 24) as f32)
+    }
+
+    /// Insert a body, waking it. Returns its handle. Small "clutter" bodies
+    /// (see `vox_core::consts::CLUTTER_MAX_VOXELS`) are given a randomized
+    /// 35-60s lifetime here, at the single choke point every body passes
+    /// through on the way into the world -- see `tick_lifetimes` for where
+    /// that countdown is spent.
+    pub fn spawn(&mut self, mut body: Body) -> BodyId {
+        if body.lifetime_s.is_none() && body.grid.solid_count() <= CLUTTER_MAX_VOXELS {
+            let jitter = self.next_lifetime_jitter();
+            body.lifetime_s = Some(
+                CLUTTER_LIFETIME_MIN_S + jitter * (CLUTTER_LIFETIME_MAX_S - CLUTTER_LIFETIME_MIN_S),
+            );
+        }
         let slot = if let Some(slot) = self.free.pop() {
             self.slots[slot] = Some(body);
             slot
@@ -170,6 +200,32 @@ impl PhysicsWorld {
             slot: slot as u32,
             generation: self.generations[slot],
         }
+    }
+
+    /// Tick every timed body's countdown (see `spawn`) by `dt` seconds and
+    /// despawn any that reach zero, returning their ids so the caller can
+    /// drop associated GPU meshes -- same contract as `clear_sleeping`. A
+    /// cheap no-op scan for the overwhelming majority of bodies, which carry
+    /// no lifetime at all.
+    pub fn tick_lifetimes(&mut self, dt: f32) -> Vec<BodyId> {
+        let mut expired = Vec::new();
+        for (slot, body) in self.slots.iter_mut().enumerate() {
+            let Some(body) = body else { continue };
+            let Some(remaining) = body.lifetime_s.as_mut() else {
+                continue;
+            };
+            *remaining -= dt;
+            if *remaining <= 0.0 {
+                expired.push(BodyId {
+                    slot: slot as u32,
+                    generation: self.generations[slot],
+                });
+            }
+        }
+        for &id in &expired {
+            self.despawn(id);
+        }
+        expired
     }
 
     /// Remove a body if the handle is current.
@@ -1159,5 +1215,52 @@ mod tests {
         );
         let drift = (phys.get(big).unwrap().pos - rest_pos).length();
         assert!(drift < 0.01, "the block must not creep: drifted {drift} m");
+    }
+
+    #[test]
+    fn clutter_sized_bodies_get_a_lifetime_and_larger_ones_dont() {
+        let reg = registry();
+        let mut phys = PhysicsWorld::new();
+
+        let clutter = cube_body(&reg, 1, Vec3::ZERO); // 1 voxel <= CLUTTER_MAX_VOXELS
+        let clutter_id = phys.spawn(clutter);
+        assert!(
+            phys.get(clutter_id).unwrap().lifetime_s.is_some(),
+            "a 1-voxel body must be timed"
+        );
+        let life = phys.get(clutter_id).unwrap().lifetime_s.unwrap();
+        assert!(
+            (CLUTTER_LIFETIME_MIN_S..=CLUTTER_LIFETIME_MAX_S).contains(&life),
+            "lifetime {life} must land in the configured 35-60s window"
+        );
+
+        let permanent = cube_body(&reg, 2, Vec3::splat(10.0)); // 8 voxels
+        let permanent_id = phys.spawn(permanent);
+        assert!(
+            phys.get(permanent_id).unwrap().lifetime_s.is_none(),
+            "an 8-voxel body must not be timed"
+        );
+    }
+
+    #[test]
+    fn tick_lifetimes_despawns_expired_clutter_and_leaves_others() {
+        let reg = registry();
+        let mut phys = PhysicsWorld::new();
+        let clutter_id = phys.spawn(cube_body(&reg, 1, Vec3::ZERO));
+        let permanent_id = phys.spawn(cube_body(&reg, 2, Vec3::splat(10.0)));
+
+        // Nowhere near expiry yet.
+        let expired = phys.tick_lifetimes(1.0);
+        assert!(expired.is_empty());
+        assert!(phys.get(clutter_id).is_some());
+
+        // Push it past even the longest possible lifetime.
+        let expired = phys.tick_lifetimes(CLUTTER_LIFETIME_MAX_S + 1.0);
+        assert_eq!(expired, vec![clutter_id]);
+        assert!(phys.get(clutter_id).is_none(), "expired clutter must be despawned");
+        assert!(
+            phys.get(permanent_id).is_some(),
+            "an untimed body must survive any number of ticks"
+        );
     }
 }

@@ -44,3 +44,23 @@ pub const DEBRIS_MIN_VOXELS: usize = 4;
 /// 200k voxels, so a cap too close to that (65_536 undershoots it) makes
 /// severing a tree misfire unpredictably depending on its randomized size.
 pub const MAX_BODY_VOXELS: usize = 300_000;
+/// A spawned body at or below this many solid voxels counts as "clutter":
+/// gravel-sized chips that read as visual noise, not as objects a player
+/// notices individually. They're given a finite lifetime (see
+/// `CLUTTER_LIFETIME_MIN_S`/`MAX_S`) instead of persisting forever, because
+/// a single destroyed tree at small voxel scales sheds *hundreds* of these
+/// -- each one a live rigid body the broadphase and solver keep paying for
+/// even asleep -- and unlike `MAX_DEBRIS_BODIES` eviction (which only
+/// kicks in once the global cap is hit), this keeps the steady-state count
+/// low continuously. Equal to `DEBRIS_MIN_VOXELS`, the smallest size a
+/// debris body can ever be, so in practice this covers every body at the
+/// theoretical minimum -- deliberately a separate constant from
+/// `DEBRIS_MIN_VOXELS` since they answer different questions (chip-creation
+/// floor vs. despawn-timer ceiling) that happen to share a value today.
+pub const CLUTTER_MAX_VOXELS: usize = 4;
+/// Minimum lifetime, in seconds, for a body at or under `CLUTTER_MAX_VOXELS`
+/// before it despawns.
+pub const CLUTTER_LIFETIME_MIN_S: f32 = 35.0;
+/// Maximum lifetime, in seconds, for a body at or under `CLUTTER_MAX_VOXELS`
+/// before it despawns.
+pub const CLUTTER_LIFETIME_MAX_S: f32 = 60.0;
