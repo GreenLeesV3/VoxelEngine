@@ -2,7 +2,7 @@
 //! `docs/plans/2026-07-09-fluid-sim-design.md` for the rationale.
 
 use glam::IVec3;
-use vox_core::FxHashSet;
+use vox_core::{FxHashMap, FxHashSet};
 use vox_world::{AIR, Voxel, World};
 
 const NEIGHBORS_6: [IVec3; 6] = [
@@ -34,6 +34,12 @@ const FLOW_HORIZON: i32 = 8;
 /// this crate (mirrors `PhysicsWorld`'s sleep bookkeeping).
 pub struct FluidSim {
     active: FxHashSet<IVec3>,
+    /// Horizontal direction of each *active* cell's last move (plus what
+    /// woken neighbors inherited). Consulted first in `step_cell` so a
+    /// draining current stays coherent instead of re-randomizing each
+    /// tick. Rebuilt every tick alongside the active set -- empty whenever
+    /// the water sleeps, so settled cost is still zero.
+    momentum: FxHashMap<IVec3, IVec3>,
     /// The single voxel material this sim treats as water. Set once at
     /// construction -- never inferred from the active set (see `tick` and
     /// `wake_region` doc comments for why inference was fragile).
@@ -49,6 +55,7 @@ impl FluidSim {
     pub fn new(water: Voxel) -> Self {
         Self {
             active: FxHashSet::default(),
+            momentum: FxHashMap::default(),
             water,
             rng: 0x9E37_79B9_7F4A_7C15,
         }
@@ -57,6 +64,11 @@ impl FluidSim {
     /// Number of cells currently flowing (debug-overlay stat).
     pub fn active_count(&self) -> usize {
         self.active.len()
+    }
+
+    /// Number of cells carrying momentum (debug-overlay stat / tests).
+    pub fn momentum_count(&self) -> usize {
+        self.momentum.len()
     }
 
     /// xorshift64* -- deterministic, dependency-free.
@@ -129,6 +141,7 @@ impl FluidSim {
             .collect();
 
         let mut next_active = FxHashSet::default();
+        let mut next_momentum = FxHashMap::default();
 
         // Budget: if there are more active (real-water) cells than we're
         // willing to process this call, shuffle so the overflow isn't
@@ -145,6 +158,13 @@ impl FluidSim {
                 cells.swap(i, j);
             }
             let overflow = cells.split_off(FLUID_TICK_BUDGET);
+            // Carried-over cells keep their momentum too -- deferring a cell
+            // to the next tick must not erase the direction it was moving.
+            for &p in &overflow {
+                if let Some(&d) = self.momentum.get(&p) {
+                    next_momentum.insert(p, d);
+                }
+            }
             next_active.extend(overflow);
         }
         let processed = cells.len();
@@ -158,12 +178,27 @@ impl FluidSim {
                     world.in_bounds(p) && (world.solid(p) || world.get_voxel(p) == water)
                 };
                 let has_water_above = world.get_voxel(pos + IVec3::Y) == water;
-                step_cell(pos, &mut is_open, &mut is_supported, has_water_above, coin, coin2)
+                step_cell_with_momentum(
+                    pos,
+                    &mut is_open,
+                    &mut is_supported,
+                    has_water_above,
+                    coin,
+                    coin2,
+                    self.momentum.get(&pos).copied(),
+                )
             };
             if let Some(dest) = dest {
                 world.set_voxel(pos, AIR);
                 world.set_voxel(dest, water);
                 next_active.insert(dest);
+                let hdir = IVec3::new(dest.x - pos.x, 0, dest.z - pos.z);
+                // A pure vertical fall keeps whatever direction the cell
+                // already had; any horizontal component overwrites it.
+                let carried = if hdir != IVec3::ZERO { Some(hdir) } else { self.momentum.get(&pos).copied() };
+                if let Some(d) = carried {
+                    next_momentum.insert(dest, d);
+                }
                 // Wake only actual water, not generic non-solid cells (air
                 // used to be inserted here and inflated `active_count()` by
                 // one stale entry per neighboring empty voxel). Include the
@@ -175,12 +210,16 @@ impl FluidSim {
                         let neighbor = changed + n;
                         if world.get_voxel(neighbor) == water {
                             next_active.insert(neighbor);
+                            if let Some(d) = carried {
+                                next_momentum.entry(neighbor).or_insert(d);
+                            }
                         }
                     }
                 }
             } // else: settled -- not re-added
         }
         self.active = next_active;
+        self.momentum = next_momentum;
         processed
     }
 
@@ -214,6 +253,9 @@ impl FluidSim {
 /// pressure-gated sideways leveling onto supported terrain or water
 /// (randomized left/right, then front/back) -- see the design doc §4 for
 /// why this shape and not fractional pressure levels.
+/// Thin momentum-free wrapper kept for the unit tests that predate momentum;
+/// `tick` itself always calls `step_cell_with_momentum` directly.
+#[cfg(test)]
 fn step_cell(
     pos: IVec3,
     is_open: &mut impl FnMut(IVec3) -> bool,
@@ -222,19 +264,38 @@ fn step_cell(
     coin: bool,
     coin2: bool,
 ) -> Option<IVec3> {
+    step_cell_with_momentum(pos, is_open, is_supported, has_water_above, coin, coin2, None)
+}
+
+/// `step_cell` with an optional remembered horizontal direction: momentum's
+/// axis components bias the diagonal-fall and sideways-spread sign order,
+/// and the full vector (which may be diagonal, e.g. `(1, 0, 1)`) leads the
+/// flow scan ahead of the coin-ordered eight. `None` reproduces the
+/// coin-only behavior exactly.
+fn step_cell_with_momentum(
+    pos: IVec3,
+    is_open: &mut impl FnMut(IVec3) -> bool,
+    is_supported: &mut impl FnMut(IVec3) -> bool,
+    has_water_above: bool,
+    coin: bool,
+    coin2: bool,
+    momentum: Option<IVec3>,
+) -> Option<IVec3> {
     let down = pos + IVec3::NEG_Y;
     if is_open(down) {
         return Some(down);
     }
 
-    let (dx1, dx2) = if coin { (1, -1) } else { (-1, 1) };
+    // Diagonal fall: momentum's axis components first, then the coin order.
+    let m = momentum.unwrap_or(IVec3::ZERO);
+    let (dx1, dx2) = if m.x != 0 { (m.x, -m.x) } else if coin { (1, -1) } else { (-1, 1) };
     for dx in [dx1, dx2] {
         let diag = pos + IVec3::new(dx, -1, 0);
         if is_open(diag) {
             return Some(diag);
         }
     }
-    let (dz1, dz2) = if coin2 { (1, -1) } else { (-1, 1) };
+    let (dz1, dz2) = if m.z != 0 { (m.z, -m.z) } else if coin2 { (1, -1) } else { (-1, 1) };
     for dz in [dz1, dz2] {
         let diag = pos + IVec3::new(0, -1, dz);
         if is_open(diag) {
@@ -243,13 +304,14 @@ fn step_cell(
     }
 
     // Flow: no immediate fall exists, so search all eight horizontal
-    // directions -- the four axes, then the four diagonals, each group in
-    // randomized order -- for a reachable drop -- an open run of same-height
-    // cells ending in one with air beneath -- and take one step toward the
-    // first one found. Diagonal rays deliberately check only the cells on
-    // the ray, never the two orthogonal neighbors, so water can slip
-    // through the seam where two solid blocks touch only at a corner --
-    // accepted for a coarse voxel fluid, not an oversight.
+    // directions -- the momentum direction first (if any), then the
+    // remaining seven: the four axes, then the four diagonals, each group
+    // in randomized order -- for a reachable drop -- an open run of
+    // same-height cells ending in one with air beneath -- and take one step
+    // toward the first one found. Diagonal rays deliberately check only the
+    // cells on the ray, never the two orthogonal neighbors, so water can
+    // slip through the seam where two solid blocks touch only at a corner
+    // -- accepted for a coarse voxel fluid, not an oversight.
     // This is what keeps a mound from freezing into a stable
     // stepped pyramid: its surface cells can walk over the water below them
     // until they reach the pile's edge and fall off. Unlike an
@@ -257,7 +319,8 @@ fn step_cell(
     // lower destination is reachable, so a flat sheet or a full basin still
     // has nowhere to go and sleeps.
     let dirs = flow_dirs(coin, coin2);
-    for dir in dirs {
+    let ordered = momentum.into_iter().chain(dirs.into_iter().filter(|&d| Some(d) != momentum));
+    for dir in ordered {
         for k in 1..=FLOW_HORIZON {
             let q = pos + dir * k;
             if !is_open(q) {
@@ -279,14 +342,14 @@ fn step_cell(
     if !has_water_above {
         return None;
     }
-    let (sx1, sx2) = if coin { (1, -1) } else { (-1, 1) };
+    let (sx1, sx2) = if m.x != 0 { (m.x, -m.x) } else if coin { (1, -1) } else { (-1, 1) };
     for dx in [sx1, sx2] {
         let side = pos + IVec3::new(dx, 0, 0);
         if is_open(side) && is_supported(side + IVec3::NEG_Y) {
             return Some(side);
         }
     }
-    let (sz1, sz2) = if coin2 { (1, -1) } else { (-1, 1) };
+    let (sz1, sz2) = if m.z != 0 { (m.z, -m.z) } else if coin2 { (1, -1) } else { (-1, 1) };
     for dz in [sz1, sz2] {
         let side = pos + IVec3::new(0, 0, dz);
         if is_open(side) && is_supported(side + IVec3::NEG_Y) {
@@ -708,6 +771,42 @@ mod tests {
             Some(IVec3::new(9, 6, 9)),
             "the scan must step toward a diagonal-only drop"
         );
+    }
+
+    #[test]
+    fn step_cell_prefers_the_momentum_direction_on_equal_drops() {
+        // Drops exist both at +X and -X, two cells out. With no momentum the
+        // coin decides; with momentum -X the cell must step -X regardless of
+        // what the coins say.
+        let pos = IVec3::new(8, 6, 8);
+        let open = [
+            IVec3::new(9, 6, 8), IVec3::new(10, 6, 8), IVec3::new(10, 5, 8), // +X run
+            IVec3::new(7, 6, 8), IVec3::new(6, 6, 8), IVec3::new(6, 5, 8),   // -X run
+        ];
+        for coins in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut is_open = |p: IVec3| open.contains(&p);
+            let mut is_supported = |_: IVec3| true;
+            let dest = step_cell_with_momentum(
+                pos, &mut is_open, &mut is_supported, false, coins.0, coins.1,
+                Some(IVec3::NEG_X),
+            );
+            assert_eq!(dest, Some(IVec3::new(7, 6, 8)), "momentum -X must win for coins {coins:?}");
+        }
+    }
+
+    #[test]
+    fn momentum_is_forgotten_once_water_settles() {
+        let mut world = test_world();
+        let mut sim = FluidSim::new(WATER);
+        sim.place_blob(&mut world, IVec3::new(8, 8, 8), 2, WATER);
+        for _ in 0..400 {
+            sim.tick(&mut world);
+            if sim.active_count() == 0 {
+                break;
+            }
+        }
+        assert_eq!(sim.active_count(), 0, "blob must settle");
+        assert_eq!(sim.momentum_count(), 0, "settled water must carry no momentum state");
     }
 
     fn count_water(world: &World) -> usize {
