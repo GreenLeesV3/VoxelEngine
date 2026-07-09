@@ -39,7 +39,9 @@ pub enum ContactEvent {
     Fell(IVec3),
     /// Water arrived here by a horizontal move (flow or spread).
     Flowed(IVec3),
-    /// Water here found no move and left the active set.
+    /// Water here found no move this tick. Not necessarily permanent rest:
+    /// a later mover in the same tick can re-wake the cell, in which case
+    /// it emits another `Settled` each tick it stays stuck.
     Settled(IVec3),
     /// Water left this cell (every move emits one).
     Vacated(IVec3),
@@ -859,6 +861,24 @@ mod tests {
         sim.tick(&mut world); // nowhere to go -> settles
         let ev = sim.drain_events();
         assert!(ev.contains(&ContactEvent::Settled(IVec3::new(8, 5, 8))), "settling must emit Settled: {ev:?}");
+    }
+
+    #[test]
+    fn a_horizontal_flow_move_emits_flowed() {
+        // Weathering grades erosion on the Fell/Flowed distinction, so the
+        // horizontal arm needs its own pin. Water resting on the floor with
+        // a pit two cells away can't fall or slide diagonally -- its only
+        // legal move is a flow step at its own height toward the pit.
+        let mut world = test_world();
+        world.set_voxel(IVec3::new(10, 4, 8), AIR); // pit in the floor
+        let mut sim = FluidSim::new(WATER);
+        sim.place_blob(&mut world, IVec3::new(8, 5, 8), 0, WATER);
+        sim.tick(&mut world);
+        let ev = sim.drain_events();
+        assert!(
+            ev.contains(&ContactEvent::Flowed(IVec3::new(9, 5, 8))),
+            "a same-height flow step must emit Flowed: {ev:?}"
+        );
     }
 
     fn count_water(world: &World) -> usize {
