@@ -7,6 +7,7 @@ pub mod camera;
 pub mod frustum;
 pub mod gpu;
 pub mod particles;
+pub mod postprocess;
 pub mod voxel_pipeline;
 
 pub use camera::Camera;

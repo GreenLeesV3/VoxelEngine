@@ -1,7 +1,6 @@
-// Opaque voxel pipeline: chunks and debris bodies share this shader.
-// Shading: material palette color + per-vertex jitter hash, directional sun
-// with a soft (half-Lambert) terminator, a faint opposite-direction fill
-// light, a two-tone sky/ground ambient, baked vertex AO, distance fog.
+// Cel-shaded voxel pipeline: chunks and debris bodies share this shader.
+// Lighting is quantized into 4 bands (painterly cel-shading). Outputs both
+// color and world-space normals for the post-process edge detection pass.
 
 struct Camera {
     view_proj: mat4x4f,
@@ -97,16 +96,26 @@ fn vs(v: VIn, inst: Inst) -> VOut {
     return out;
 }
 
+struct FOut {
+    @location(0) color: vec4f,
+    @location(1) normal: vec4f,  // world normal encoded to 0..1 for edge detection
+};
+
 @fragment
-fn fs(in: VOut) -> @location(0) vec4f {
+fn fs(in: VOut) -> FOut {
     let n = normalize(in.world_normal);
     let ndotl = dot(n, -cam.sun_dir.xyz);
-    // Half-Lambert wrap instead of a plain clamped dot product: a hard
-    // `max(ndotl, 0)` goes fully dark the instant a face tips past 90
-    // degrees from the sun, which is exactly the flat, artificial "baked"
-    // look on structure sides this pass is fixing. Wrapping softens that
-    // terminator into a gradient.
-    let sun = pow(clamp(ndotl * 0.5 + 0.5, 0.0, 1.0), 1.5) * SUN_STRENGTH;
+
+    // Cel-shading: quantize the half-Lambert into 4 bands with smooth
+    // transitions at band edges (painterly, not flat).
+    let raw = clamp(ndotl * 0.5 + 0.5, 0.0, 1.0);
+    let bands = 4.0;
+    let quantized = floor(raw * bands + 0.5) / bands;
+    // Smooth the band edges slightly to avoid hard stair-stepping.
+    let frac_val = fract(raw * bands);
+    let smooth_q = mix(quantized, raw, smoothstep(0.4, 0.6, frac_val) * smoothstep(0.4, 0.6, 1.0 - frac_val));
+    let sun = smooth_q * SUN_STRENGTH;
+
     let fill = max(-ndotl, 0.0) * FILL_STRENGTH;
 
     let hemi_t = clamp(0.5 + 0.5 * n.y, 0.0, 1.0);
@@ -118,5 +127,12 @@ fn fs(in: VOut) -> @location(0) vec4f {
     let dist = length(in.world_pos - cam.cam_pos.xyz);
     let f = clamp((dist - cam.fog.x) / (cam.fog.y - cam.fog.x), 0.0, 1.0);
     c = mix(c, SKY_COLOR, f * f);
-    return vec4f(c, 1.0);
+
+    // Encode normal to 0..1 for the post-process edge detection pass.
+    let enc_n = n * 0.5 + 0.5;
+
+    var out: FOut;
+    out.color = vec4f(c, 1.0);
+    out.normal = vec4f(enc_n, 1.0);
+    return out;
 }

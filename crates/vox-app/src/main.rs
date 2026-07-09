@@ -241,6 +241,8 @@ struct VoxApp {
     /// CPU-simulated destruction feedback particles (see `particles`).
     particles: ParticleSystem,
     particle_pipeline: ParticlePipeline,
+    /// Post-processing pipeline (edge detection + saturation + color grading).
+    postprocess: vox_render::postprocess::PostProcessPipeline,
 }
 
 /// Hard cap on total debris bodies alive at once. Past this, the oldest
@@ -277,6 +279,7 @@ impl VoxApp {
         let registry = MaterialRegistry::load_dir(&assets.join("materials"))?;
         let shader = std::fs::read_to_string(assets.join("shaders/voxel.wgsl"))?;
         let particle_shader = std::fs::read_to_string(assets.join("shaders/particle.wgsl"))?;
+        let postprocess_shader = std::fs::read_to_string(assets.join("shaders/postprocess.wgsl"))?;
 
         let build_start = Instant::now();
         let world = build_terrain_world(cfg, &registry)?;
@@ -290,13 +293,16 @@ impl VoxApp {
         let gpu = Gpu::new(window.clone(), size.width, size.height)?;
         let pipeline = VoxelPipeline::new(&gpu, &shader, &registry, world.cfg.voxel_size_m);
         let particle_pipeline = ParticlePipeline::new(&gpu, &particle_shader);
-        let tools = Tools::new(&registry);
+        let postprocess = vox_render::postprocess::PostProcessPipeline::new(
+            &gpu, &postprocess_shader, size.width, size.height,
+        );
         let debug_overlay = DebugOverlay::new(
             gpu.device(),
             gpu.surface_format(),
             Some(vox_render::DEPTH_FORMAT),
             &window,
         );
+        let tools = Tools::new(&registry);
         // Air (id 0) is never player-selectable; the picker mirrors that.
         let material_names: Vec<String> = registry
             .iter()
@@ -351,6 +357,7 @@ impl VoxApp {
             pending_body_removal: HashMap::new(),
             particles: ParticleSystem::new(),
             particle_pipeline,
+            postprocess,
         };
         app.initial_mesh();
 
@@ -1280,18 +1287,29 @@ impl App for VoxApp {
 
         let stats;
         {
+            // Pass 1: scene → offscreen color + normal + depth.
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("voxel-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: frame.view(),
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                label: Some("scene-pass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: self.postprocess.color_view(),
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: self.postprocess.normal_view(),
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: self.gpu.depth_view(),
+                    view: self.postprocess.depth_view(),
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -1307,9 +1325,51 @@ impl App for VoxApp {
                 drawn: chunk_stats.drawn + body_stats.drawn,
                 culled: chunk_stats.culled + body_stats.culled,
             };
-            // Alpha-blended particles after all opaque geometry (they depth
-            // test against it), UI last, on top of everything.
+        }
+        // Particle pass: separate from scene (1 target vs 2). LOAD color
+        // and depth from the scene pass — no clear.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("particle-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.postprocess.color_view(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: self.postprocess.depth_view(),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
             self.particle_pipeline.draw(&mut pass);
+        }
+        // Pass 2: post-process → swapchain.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("postprocess-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: frame.view(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.postprocess.draw(&mut pass);
+            // Debug overlay on top of post-processed scene.
             self.debug_overlay.paint(&mut pass, &prepared_overlay);
         }
         self.gpu.queue().submit([encoder.finish()]);
@@ -1325,6 +1385,7 @@ impl App for VoxApp {
 
     fn resize(&mut self, width: u32, height: u32) {
         self.gpu.resize(width, height);
+        self.postprocess.resize(&self.gpu, width, height);
     }
 
     fn window_event(&mut self, event: &winit::event::WindowEvent) -> bool {
