@@ -59,6 +59,7 @@ impl PostProcessPipeline {
             ..Default::default()
         });
 
+
         // --- Params uniform ---
         let params = ParamsUniform {
             resolution: [width as f32, height as f32],
@@ -104,7 +105,7 @@ impl PostProcessPipeline {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        sample_type: wgpu::TextureSampleType::Depth,
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -138,6 +139,7 @@ impl PostProcessPipeline {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&depth_tex) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&normal_tex) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sampler) },
+
             ],
         });
 

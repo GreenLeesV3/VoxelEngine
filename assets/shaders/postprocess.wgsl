@@ -11,9 +11,26 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var color_tex: texture_2d<f32>;
-@group(0) @binding(2) var depth_tex: texture_2d<f32>;
+@group(0) @binding(2) var depth_tex: texture_depth_2d;
 @group(0) @binding(3) var normal_tex: texture_2d<f32>;
 @group(0) @binding(4) var samp: sampler;
+
+// Sobel edge detection on depth using textureLoad (depth textures can't
+// use textureSample — no filtering sampler). Takes integer texel coords.
+fn sobel_depth(texel: vec2u) -> f32 {
+    let w = textureDimensions(depth_tex);
+    let tl = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i(-1, -1), vec2i(0), vec2i(w) - 1)).r;
+    let tm = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 0, -1), vec2i(0), vec2i(w) - 1)).r;
+    let tr = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 1, -1), vec2i(0), vec2i(w) - 1)).r;
+    let ml = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i(-1,  0), vec2i(0), vec2i(w) - 1)).r;
+    let mr = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 1,  0), vec2i(0), vec2i(w) - 1)).r;
+    let bl = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i(-1,  1), vec2i(0), vec2i(w) - 1)).r;
+    let bm = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 0,  1), vec2i(0), vec2i(w) - 1)).r;
+    let br = textureLoad(depth_tex, clamp(vec2i(texel) + vec2i( 1,  1), vec2i(0), vec2i(w) - 1)).r;
+    let gx = abs(tr + 2.0 * mr + br - tl - 2.0 * ml - bl);
+    let gy = abs(bl + 2.0 * bm + br - tl - 2.0 * tm - tr);
+    return clamp(gx + gy, 0.0, 1.0);
+}
 
 // Fullscreen triangle: 3 vertices covering the screen.
 @vertex
@@ -27,20 +44,6 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
     return vec4f(p[vi], 0.0, 1.0);
 }
 
-// Sobel edge detection on a single channel.
-fn sobel(tex: texture_2d<f32>, uv: vec2f, ts: vec2f) -> f32 {
-    let tl = textureSample(tex, samp, uv + vec2f(-ts.x, -ts.y)).r;
-    let tm = textureSample(tex, samp, uv + vec2f(0.0,  -ts.y)).r;
-    let tr = textureSample(tex, samp, uv + vec2f( ts.x, -ts.y)).r;
-    let ml = textureSample(tex, samp, uv + vec2f(-ts.x,  0.0)).r;
-    let mr = textureSample(tex, samp, uv + vec2f( ts.x,  0.0)).r;
-    let bl = textureSample(tex, samp, uv + vec2f(-ts.x,  ts.y)).r;
-    let bm = textureSample(tex, samp, uv + vec2f(0.0,   ts.y)).r;
-    let br = textureSample(tex, samp, uv + vec2f( ts.x,  ts.y)).r;
-    let gx = abs(tr + 2.0 * mr + br - tl - 2.0 * ml - bl);
-    let gy = abs(bl + 2.0 * bm + br - tl - 2.0 * tm - tr);
-    return clamp(gx + gy, 0.0, 1.0);
-}
 
 // Sobel on a vec3 texture (normal).
 fn sobel_vec3(tex: texture_2d<f32>, uv: vec2f, ts: vec2f) -> f32 {
@@ -67,13 +70,14 @@ fn boost_saturation(c: vec3f, amount: f32) -> vec3f {
 fn fs(@builtin(position) frag_pos: vec4f) -> @location(0) vec4f {
     let uv = frag_pos.xy * params.texel_size;
     let ts = params.texel_size;
+    let texel = vec2u(frag_pos.xy);
 
     // Sample base color.
     let base = textureSample(color_tex, samp, uv).rgb;
 
     // Edge detection: depth edges (silhouette/depth discontinuities)
     // and normal edges (face/material boundaries).
-    let depth_edge = sobel(depth_tex, uv, ts);
+    let depth_edge = sobel_depth(texel);
     let normal_edge = sobel_vec3(normal_tex, uv, ts);
 
     // Combine edges. Depth edges are stronger (silhouettes); normal
