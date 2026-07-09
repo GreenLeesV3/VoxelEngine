@@ -998,20 +998,28 @@ impl App for VoxApp {
                 for ev in f.drain_events() {
                     match ev {
                         vox_sim::FireEvent::Burning(pos, _) => {
-                            let center = vox_core::voxel_center_m(pos, s);
+                            // Spawn just above the top face of the voxel,
+                            // not at its center — smoke rises from surfaces.
+                            let mut center = vox_core::voxel_center_m(pos, s);
+                            center.y += s * 0.5;
+                            // Small horizontal jitter so smoke doesn't
+                            // look like a single column from each cell.
+                            center.x += (pos.x as f32 * 0.37).fract() * s * 0.6 - s * 0.3;
+                            center.z += (pos.z as f32 * 0.61).fract() * s * 0.6 - s * 0.3;
                             self.particles.burst(Burst {
                                 center,
-                                count: 2,
+                                count: 1,
                                 color: [0.35, 0.34, 0.33],
-                                speed: 0.3,
-                                upward: 0.4,
+                                speed: 0.15,
+                                upward: 0.3,
                                 life: 6.0,
                                 size: 0.2,
                                 buoyant: true,
                             });
                         }
                         vox_sim::FireEvent::Extinguished(pos) => {
-                            let center = vox_core::voxel_center_m(pos, s);
+                            let mut center = vox_core::voxel_center_m(pos, s);
+                            center.y += s * 0.5;
                             self.particles.burst(Burst {
                                 center,
                                 count: 8,
@@ -1024,7 +1032,8 @@ impl App for VoxApp {
                             });
                         }
                         vox_sim::FireEvent::Consumed(pos) => {
-                            let center = vox_core::voxel_center_m(pos, s);
+                            let mut center = vox_core::voxel_center_m(pos, s);
+                            center.y += s * 0.5;
                             self.particles.burst(Burst {
                                 center,
                                 count: 5,

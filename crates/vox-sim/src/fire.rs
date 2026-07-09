@@ -224,7 +224,7 @@ impl FireSim {
             if state.ticks >= duration {
                 consumed.push((pos, state.original));
             } else {
-                if state.ticks % 3 == 0 {
+                if state.ticks % 10 == 0 {
                     self.events.push(FireEvent::Burning(pos, state.ticks));
                 }
             }
