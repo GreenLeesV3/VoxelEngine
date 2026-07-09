@@ -765,12 +765,12 @@ impl VoxApp {
                 });
                 self.particles.burst(Burst {
                     center,
-                    count: 14,
+                    count: 24,
                     color: [0.35, 0.34, 0.33],
-                    speed: 1.2,
-                    upward: 0.8,
-                    life: 2.4,
-                    size: 0.30,
+                    speed: 0.8,
+                    upward: 0.5,
+                    life: 4.0,
+                    size: 0.25,
                     buoyant: true,
                 });
             }
@@ -954,7 +954,7 @@ impl App for VoxApp {
         };
         self.resolve_pending_removals(&uploaded);
         self.sync_debris_render(timing.alpha);
-        self.particles.update(timing.dt_frame);
+        self.particles.update(timing.dt_frame, &self.world, self.world.cfg.voxel_size_m);
 
         // Camera from the interpolated player eye.
         self.camera.pos = eye;
