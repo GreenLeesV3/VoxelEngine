@@ -118,6 +118,7 @@ unsafe extern "C" {
         numDesiredSamples: u32,
         audio_buffer: *mut i16,
     ) -> u32;
+    pub fn sm64_set_sound_volume(vol: f32);
 
     pub fn sm64_static_surfaces_load(
         surfaceArray: *const SM64Surface,
