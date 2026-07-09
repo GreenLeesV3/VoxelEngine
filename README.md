@@ -453,9 +453,11 @@ pillar's base, confirm the upper section detaches, tumbles, and sleeps.
   `docs/plans/2026-07-09-gas-particles-design.md`.
 - ~~Fire system.~~ **Implemented:** ember ignition (placeable block, hotbar
   slot 6), fire spreading through flammable materials (wood, leaves, planks,
-  grass) via 6-neighbor CA, consumption to char, water extinguishing (ember→
-  char), and smoke particle emission from burning/consumed/extinguished
-  cells. See `docs/plans/2026-07-09-fire-system-design.md`.
+  grass) via 6-neighbor CA. Burning cells show orange ember glow that spreads
+  visually, then transition to ash (full burn) or char (water extinguished).
+  Ash wetted by water darkens to dark_ash. Smoke particle emission from
+  burning/consumed/extinguished cells with longer-lasting smoke. See
+  `docs/plans/2026-07-09-fire-system-design.md`.
 - An ecosystem/life crate: creatures, growth, populations.
 - Structural stress (load propagation -> creaking collapses) layered on top
   of the existing connectivity pass.
