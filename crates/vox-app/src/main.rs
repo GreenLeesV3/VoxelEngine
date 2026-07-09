@@ -137,6 +137,8 @@ fn fire_table(registry: &MaterialRegistry) -> Option<vox_sim::FireTable> {
     let water = id("water")?;
     let ember = id("ember")?;
     let char = id("char")?;
+    let ash = id("ash")?;
+    let dark_ash = id("dark_ash")?;
     let wood = id("wood")?;
     let leaves = id("leaves")?;
     let planks = id("planks")?;
@@ -152,6 +154,8 @@ fn fire_table(registry: &MaterialRegistry) -> Option<vox_sim::FireTable> {
         water,
         ember,
         char,
+        ash,
+        dark_ash,
         wood,
         leaves,
         planks,
@@ -709,7 +713,7 @@ impl VoxApp {
                         if let Some(hit) = vox_world::raycast(&self.world, eye, look, vox_core::consts::REACH) {
                             if let Some(face) = hit.face {
                                 let pos = hit.voxel + face;
-                                f.ignite(&self.world, pos);
+                                f.ignite(&mut self.world, pos);
                             }
                         }
                     }
@@ -1001,7 +1005,7 @@ impl App for VoxApp {
                                 color: [0.35, 0.34, 0.33],
                                 speed: 0.3,
                                 upward: 0.4,
-                                life: 3.0,
+                                life: 6.0,
                                 size: 0.2,
                                 buoyant: true,
                             });
@@ -1014,7 +1018,7 @@ impl App for VoxApp {
                                 color: [0.7, 0.7, 0.75],
                                 speed: 0.5,
                                 upward: 0.6,
-                                life: 2.0,
+                                life: 4.0,
                                 size: 0.15,
                                 buoyant: true,
                             });
@@ -1027,7 +1031,7 @@ impl App for VoxApp {
                                 color: [0.25, 0.22, 0.20],
                                 speed: 0.4,
                                 upward: 0.3,
-                                life: 2.5,
+                                life: 5.0,
                                 size: 0.18,
                                 buoyant: true,
                             });
@@ -1043,11 +1047,14 @@ impl App for VoxApp {
         let uploaded = {
             let _t = ScopedTimer::new(&mut self.profile.remesh);
             let s = self.world.cfg.voxel_size_m;
-            for (min, max) in self.world.drain_dirty_regions() {
+            let dirty = self.world.drain_dirty_regions();
+            for (min, max) in &dirty {
                 self.phys.wake_region(min.as_vec3() * s, max.as_vec3() * s);
-                self.fluid.wake_region(&self.world, min, max);
+                self.fluid.wake_region(&self.world, *min, *max);
+            }
+            for (min, max) in &dirty {
                 if let Some(f) = &mut self.fire {
-                    f.wake_region(&self.world, min, max);
+                    f.wake_region(&mut self.world, *min, *max);
                 }
             }
             self.remesh.absorb_dirty(&mut self.world);
