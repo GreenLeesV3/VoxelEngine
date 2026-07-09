@@ -82,7 +82,6 @@ impl FluidSim {
 mod tests {
     use super::*;
     use vox_core::WorldConfig;
-    use vox_world::{AIR, Voxel, World};
 
     const WATER: Voxel = Voxel(1);
 
