@@ -310,6 +310,7 @@ impl VoxApp {
         if weathering.is_none() {
             tracing::info!("weathering disabled -- a required material is missing from the asset set");
         }
+        let water_voxel = registry.id_by_name("water").map(|m| Voxel(m.0));
 
         let mut app = Self {
             window,
@@ -326,7 +327,13 @@ impl VoxApp {
             tools,
             remesh: RemeshQueue::new(),
             body_mesh: BodyMeshQueue::new(),
-            phys: PhysicsWorld::new(),
+            phys: {
+                let mut p = PhysicsWorld::new();
+                if let Some(wv) = water_voxel {
+                    p.set_water_voxel(wv);
+                }
+                p
+            },
             blast_seed: 0,
             impact_seed: 0,
             grabbed: false,
@@ -991,6 +998,7 @@ impl App for VoxApp {
                 let events = self.fluid.drain_events();
                 w.tick(&mut self.world, &events);
             }
+            let mut spawned_ids: Vec<vox_physics::BodyId> = Vec::new();
             if let Some(f) = &mut self.fire {
                 f.tick(&mut self.world);
                 // Collect consumed positions for debris detach, and emit
@@ -1055,17 +1063,58 @@ impl App for VoxApp {
                 // visually burning). When/if re-freezing is added, the
                 // fire sim's wake_region will re-ignite those cells.
                 if !consumed_positions.is_empty() {
-                    let spawned = vox_physics::detach_unsupported(
+                    spawned_ids = vox_physics::detach_unsupported(
                         &mut self.world,
                         &mut self.phys,
                         &self.registry,
                         &consumed_positions,
                     );
-                    for id in &spawned {
-                        self.upload_debris_mesh(*id);
-                        self.debris_order.push_back(*id);
+                }
+                // Body-to-world fire spread: if any debris body carries
+                // ember voxels, check their world-space neighbors for
+                // flammable world cells and ignite them.
+                let s = self.world.cfg.voxel_size_m;
+                let ember_vox = self.registry.id_by_name("ember").map(|m| Voxel(m.0));
+                let mut ignite_targets: Vec<IVec3> = Vec::new();
+                if let Some(ember_vox) = ember_vox {
+                    let body_ids: Vec<vox_physics::BodyId> = self.phys.iter().map(|(id, _)| id).collect();
+                    for bid in &body_ids {
+                        let Some(body) = self.phys.get(*bid) else { continue };
+                        if body.sleep.asleep { continue; }
+                        let dims = body.grid.dims;
+                        for x in 0..dims.x {
+                            for y in 0..dims.y {
+                                for z in 0..dims.z {
+                                    if body.grid.get(IVec3::new(x, y, z)) != ember_vox { continue; }
+                                    let local = (Vec3::new(x as f32, y as f32, z as f32) + 0.5) * s + body.grid_offset;
+                                    let world_pos = body.pos + body.rot * local;
+                                    let world_vox = vox_core::voxel_at(world_pos, s);
+                                    for n in [
+                                        IVec3::X, IVec3::NEG_X, IVec3::Y,
+                                        IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z,
+                                    ] {
+                                        let neighbor = world_vox + n;
+                                        let nv = self.world.get_voxel(neighbor);
+                                        if let Some(def) = self.registry.get(vox_core::MaterialId(nv.0)) {
+                                            if def.flammable && nv != ember_vox {
+                                                ignite_targets.push(neighbor);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
+                for pos in &ignite_targets {
+                    f.ignite(&mut self.world, *pos);
+                }
+            }
+            // Upload meshes for newly spawned debris outside the fire
+            // borrow scope — self.upload_debris_mesh needs &mut self.
+            for id in &spawned_ids {
+                self.upload_debris_mesh(*id);
+                self.debris_order.push_back(*id);
             }
         }
 

@@ -12,7 +12,7 @@ use vox_core::consts::{
     CLUTTER_LIFETIME_MAX_S, CLUTTER_LIFETIME_MIN_S, CLUTTER_MAX_VOXELS, CONTACT_SLOP, GRAVITY,
     SLEEP_FRAMES, SOLVER_ITERS, SUBSTEPS,
 };
-use vox_world::World;
+use vox_world::{Voxel, World};
 
 use crate::body::{Body, BodyId};
 use crate::broadphase::Broadphase;
@@ -106,6 +106,12 @@ const MAX_ANGULAR_SPEED_RAD_S: f32 = 20.0;
 /// purpose: a blast-kicked fragment (`BLAST_SPIN_MAX` = 3 rad/s) still has
 /// most of its tumble after a full second of flight.
 const ANGULAR_DAMPING_AIR: f32 = 0.3;
+/// Water density in kg/m³ for buoyancy calculations. Matches the water
+/// material's density in core.toml.
+const WATER_DENSITY: f32 = 1000.0;
+/// Per-second velocity/angular damping while submerged in water — higher
+/// than air drag to make water feel viscous.
+const WATER_DRAG: f32 = 3.0;
 /// Extra rolling-resistance drag, per second, for a *small* body that had
 /// at least one contact this substep. Small debris has a disproportionately
 /// tiny moment of inertia and only a couple of contact points, so contact
@@ -138,33 +144,31 @@ pub struct PhysicsWorld {
     generations: Vec<u32>,
     free: Vec<usize>,
     warm: FxHashMap<ContactKey, (f32, f32, f32)>,
-    /// Reused scratch state for `candidate_pairs`, across every call in a
-    /// step (see `Broadphase`'s own doc comment for why this is persistent
-    /// rather than built fresh each time).
     broadphase: Broadphase,
-    /// Per-slot "had a contact this substep" scratch, reused across substeps
-    /// (same allocation-reuse reasoning as `broadphase`). Drives
-    /// [`ANGULAR_DAMPING_ROLLING`].
     contact_flags: Vec<bool>,
-    /// Per-slot accumulated positional correction scratch for the
-    /// split-impulse pass (same allocation-reuse reasoning as `broadphase`).
     pos_corr: Vec<Vec3>,
-    /// Live-tunable solver parameters (friction, contact bias, sleep
-    /// thresholds); public so the debug overlay can bind sliders directly.
     pub tunables: Tunables,
-    /// xorshift64* state driving the 35-60s jitter on clutter lifetimes (see
-    /// `spawn`). Not used for anything gameplay-visible or requiring
-    /// reproducibility across runs, so a fixed non-zero seed (xorshift
-    /// stalls forever on zero) is all this needs.
     lifetime_rng: u64,
+    /// The voxel material id treated as water for buoyancy. `None` (default)
+    /// disables buoyancy — bodies fall through water. Set by the app at
+    /// construction from the registry's water material, same pattern as
+    /// `FluidSim::water`.
+    water_voxel: Option<Voxel>,
 }
 
 impl PhysicsWorld {
     pub fn new() -> Self {
         Self {
             lifetime_rng: 0x2545_F491_4F6C_DD1D,
+            water_voxel: None,
             ..Self::default()
         }
+    }
+
+    /// Set the water material id for buoyancy. Called once by the app at
+    /// construction. `None` (the default) disables buoyancy.
+    pub fn set_water_voxel(&mut self, v: Voxel) {
+        self.water_voxel = Some(v);
     }
 
     /// xorshift64* -- deterministic, dependency-free spawn jitter (same
@@ -453,6 +457,38 @@ impl PhysicsWorld {
                 continue;
             }
             body.vel.y -= GRAVITY * h;
+            // Buoyancy: if the body's bottom is submerged in a non-solid,
+            // non-air voxel (water), apply an upward force. Lightweight:
+            // samples the AABB bottom center, not per-voxel.
+            let s = 2.0 * body.half_voxel;
+            let bottom = Vec3::new(
+                (body.aabb_min.x + body.aabb_max.x) * 0.5,
+                body.aabb_min.y,
+                (body.aabb_min.z + body.aabb_max.z) * 0.5,
+            );
+            let bottom_vox = vox_core::voxel_at(bottom, s);
+            if world.in_bounds(bottom_vox) {
+                if let Some(wv) = self.water_voxel {
+                    if world.get_voxel(bottom_vox) == wv {
+                        let body_height = (body.aabb_max.y - body.aabb_min.y).max(1e-6);
+                        let submerge_depth = body_height.min(
+                            body.aabb_max.y - bottom.y + s
+                        );
+                        let fraction = (submerge_depth / body_height).clamp(0.0, 1.0);
+                        let dims = body.grid.dims;
+                        let volume = (dims.x * dims.y * dims.z) as f32 * s * s * s;
+                        let mass = body.mass();
+                        let avg_density = mass / volume.max(1e-6);
+                        let buoy_accel = (WATER_DENSITY / avg_density - 1.0) * GRAVITY * fraction;
+                        if buoy_accel > 0.0 {
+                            body.vel.y += buoy_accel * h;
+                        }
+                        let drag = WATER_DRAG * fraction;
+                        body.vel /= 1.0 + drag * h;
+                        body.omega /= 1.0 + drag * h;
+                    }
+                }
+            }
             if body.vel.length() > MAX_SPEED {
                 body.vel = body.vel.normalize() * MAX_SPEED;
             }

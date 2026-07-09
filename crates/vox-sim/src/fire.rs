@@ -155,6 +155,11 @@ impl FireSim {
         //    becomes char (partial burn residue).
         let mut extinguished: Vec<IVec3> = Vec::new();
         self.burning.retain(|&pos, _| {
+            // Skip stale entries (cell extracted as debris — no longer
+            // ember in the world).
+            if world.get_voxel(pos) != table.ember {
+                return false;
+            }
             let water_adjacent = NEIGHBORS_6.iter().any(|&n| world.get_voxel(pos + n) == table.water);
             if water_adjacent {
                 extinguished.push(pos);
@@ -218,20 +223,30 @@ impl FireSim {
         //    that reached their burn duration. Full burn → ash; original
         //    ember → char. Emit events.
         let mut consumed: Vec<(IVec3, Voxel)> = Vec::new();
+        let mut stale: Vec<IVec3> = Vec::new();
         for (&pos, state) in &mut self.burning {
             state.ticks += 1;
+            // If the cell is no longer ember in the world (e.g. it was
+            // extracted as a debris body by detach_unsupported), drop it
+            // silently — no residue, no event. The burn continues on the
+            // body, not in the world grid.
+            if world.get_voxel(pos) != table.ember {
+                stale.push(pos);
+                continue;
+            }
             let duration = table.burn_ticks(state.original);
             if state.ticks >= duration {
                 consumed.push((pos, state.original));
             } else {
                 if state.ticks % 10 == 0 {
                     self.events.push(FireEvent::Burning(pos, state.ticks));
-                }
+            }
             }
         }
+        for pos in &stale {
+            self.burning.remove(pos);
+        }
         for (pos, original) in &consumed {
-            // Full burn: original ember → char; everything else → ash
-            // (or dark_ash if already water-adjacent).
             if *original == table.ember {
                 world.set_voxel(*pos, table.char);
             } else {
