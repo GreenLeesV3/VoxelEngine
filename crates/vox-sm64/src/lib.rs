@@ -464,24 +464,29 @@ impl Drop for SurfaceObject {
 /// `[pitch, yaw, roll]` — the layout `SM64ObjectTransform.eulerRotation`
 /// expects.
 ///
-/// glam's `EulerRot::ZXY` decomposes a quaternion into the intrinsic
-/// Z-X-Y sequence and returns `(z, x, y)` = (roll, pitch, yaw), which
-/// matches the **order** libsm64's `mtxf_rotate_zxy_and_translate`
-/// applies (roll-Z, pitch-X, yaw-Y). We reorder to `[pitch, yaw, roll]`.
+/// **Order:** `mtxf_rotate_zxy_and_translate` builds the world matrix
+/// `R = Ry(yaw) · Rx(pitch) · Rz(roll)` (verified by expanding the
+/// matrix entries it writes — despite the function's name, the *acting*
+/// rotation is Y·X·Z). glam's `EulerRot::YXZ` decomposes a quaternion
+/// into exactly that product and returns `(yaw, pitch, roll)`, so we
+/// use it directly. (Using `ZXY` would give `Rz·Rx·Ry` — wrong order;
+/// single-axis tests can't tell them apart since a one-axis rotation
+/// is identical under any ordering — only a compound yaw+pitch case
+/// distinguishes them, which is why `compound_rotation_round_trips`
+/// exists below.)
 ///
 /// **Sign:** libsm64 converts each input degree value through
 /// `CONVERT_ANGLE(x) = -x/180*32768` before feeding it to `sins`/`coss`
-/// (plain `sin`/`cos` table lookups). So `sins(CONVERT_ANGLE(θ°))` =
-/// `sin(-θ°)` = `-sin(θ°)`. Tracing `mtxf_rotate_zxy_and_translate`
-/// for a pure yaw `y` shows the resulting matrix is `Ry(-y)`, not
-/// `Ry(+y)`: a local point `(0, 0, 1)` maps to `(-sin(y), 0, cos(y))`.
-/// A glam `Quat::from_rotation_y(+y)` encodes `Ry(+y)`. To make
-/// libsm64 reproduce the glam rotation we must therefore **negate**
-/// every angle before handing it over, so `CONVERT_ANGLE(-θ)` yields
-/// `sin(+θ°)` inside libsm64. Identity → `[0, 0, 0]` (negation of zero
-/// is zero, which is why the identity test alone cannot catch this).
+/// (plain `sin`/`cos` table lookups, math_util.h:28-29). So
+/// `sins(CONVERT_ANGLE(θ°)) = sin(-θ°) = -sin(θ°)`. Tracing the matrix
+/// for a pure yaw `y` shows it computes `Ry(-y)`, not `Ry(+y)`. A glam
+/// `Quat::from_rotation_y(+y)` encodes `Ry(+y)`, so to make libsm64
+/// reproduce the glam rotation we **negate** every angle: feeding `-θ`
+/// makes `CONVERT_ANGLE(-θ) = +θ` internally. Identity → `[0, 0, 0]`
+/// (negation of zero is zero, which is why the identity test alone
+/// cannot catch the sign bug).
 pub fn quat_to_sm64_euler(rot: glam::Quat) -> [f32; 3] {
-    let (roll, pitch, yaw) = rot.to_euler(glam::EulerRot::ZXY);
+    let (yaw, pitch, roll) = rot.to_euler(glam::EulerRot::YXZ);
     let rad_to_deg = 180.0 / std::f32::consts::PI;
     [-pitch * rad_to_deg, -yaw * rad_to_deg, -roll * rad_to_deg]
 }
@@ -581,5 +586,34 @@ mod surface_object_tests {
         assert!((e[0] + 90.0).abs() < 0.05, "pitch = {} (want ~-90)", e[0]);
         assert!(e[1].abs() < 1e-3, "yaw = {} (want ~0)", e[1]);
         assert!(e[2].abs() < 1e-3, "roll = {} (want ~0)", e[2]);
+    }
+
+    /// The decisive test for axis **ordering**: a compound yaw+pitch
+    /// rotation decomposes differently under `ZXY` vs `YXZ`, so only
+    /// the correct order round-trips. We de-negate the output (undo the
+    /// sign fix), reconstruct `Ry(yaw)·Rx(pitch)·Rz(roll)` (the product
+    /// `mtxf_rotate_zxy_and_translate` builds), and assert it equals the
+    /// original quaternion's matrix. Fails with `EulerRot::ZXY`, passes
+    /// with `EulerRot::YXZ`.
+    #[test]
+    fn compound_rotation_round_trips() {
+        let q = glam::Quat::from_rotation_y(0.5) * glam::Quat::from_rotation_x(0.3);
+        let e = quat_to_sm64_euler(q);
+        let deg_to_rad = std::f32::consts::PI / 180.0;
+        // De-negate: the output is [-pitch, -yaw, -roll] degrees.
+        let pitch = -e[0] * deg_to_rad;
+        let yaw = -e[1] * deg_to_rad;
+        let roll = -e[2] * deg_to_rad;
+        let reconstructed = glam::Mat3::from_rotation_y(yaw)
+            * glam::Mat3::from_rotation_x(pitch)
+            * glam::Mat3::from_rotation_z(roll);
+        let expected = glam::Mat3::from_quat(q);
+        // Element-wise compare with tolerance.
+        for i in 0..3 {
+            for j in 0..3 {
+                let diff = (reconstructed.col(i)[j] - expected.col(i)[j]).abs();
+                assert!(diff < 1e-4, "mat[{j}][{i}]: recon={} expected={} diff={}", reconstructed.col(i)[j], expected.col(i)[j], diff);
+            }
+        }
     }
 }

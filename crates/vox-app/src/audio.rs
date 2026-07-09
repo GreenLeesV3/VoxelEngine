@@ -245,7 +245,7 @@ fn build_stream(ring: Arc<RingBuffer>) -> Option<cpal::Stream> {
         None => {
             tracing::warn!(
                 "no 32 kHz stereo output config; falling back to device default \
-                 (audio may be pitch-shifted)"
+                 (audio will be resampled)"
             );
             let default = device.default_output_config().ok()?;
             let sample_format = default.sample_format();
@@ -254,22 +254,51 @@ fn build_stream(ring: Arc<RingBuffer>) -> Option<cpal::Stream> {
         }
     };
 
+    let out_rate = config.sample_rate.0;
     tracing::info!(
         "audio stream: {} Hz, {} ch, {:?}",
-        config.sample_rate.0,
+        out_rate,
         config.channels,
         sample_format
     );
 
     let err_fn = |err| tracing::error!("cpal audio stream error: {err}");
 
+    // Create a resampler that converts 32kHz → device rate.
+    // Wrapped in std::sync::Mutex for interior mutability from the
+    // cpal callback (single-threaded callback, lock is uncontended).
+    let resampler = Arc::new(std::sync::Mutex::new(
+        Resampler::new(SM64_SAMPLE_RATE, out_rate),
+    ));
+
     let stream = match sample_format {
-        SampleFormat::I16 => device
-            .build_output_stream(&config, move |data, _| write_i16(&ring, data), err_fn, None),
-        SampleFormat::F32 => device
-            .build_output_stream(&config, move |data, _| write_f32(&ring, data), err_fn, None),
-        SampleFormat::U16 => device
-            .build_output_stream(&config, move |data, _| write_u16(&ring, data), err_fn, None),
+        SampleFormat::I16 => {
+            let r = resampler.clone();
+            device.build_output_stream(
+                &config,
+                move |data, _| write_i16(&ring, data, &r),
+                err_fn,
+                None,
+            )
+        }
+        SampleFormat::F32 => {
+            let r = resampler.clone();
+            device.build_output_stream(
+                &config,
+                move |data, _| write_f32(&ring, data, &r),
+                err_fn,
+                None,
+            )
+        }
+        SampleFormat::U16 => {
+            let r = resampler.clone();
+            device.build_output_stream(
+                &config,
+                move |data, _| write_u16(&ring, data, &r),
+                err_fn,
+                None,
+            )
+        }
         other => {
             tracing::warn!("unsupported cpal sample format {other:?}; audio disabled");
             return None;
@@ -306,7 +335,6 @@ fn pick_config(
             .with_sample_rate(cpal::SampleRate(SM64_SAMPLE_RATE));
         let fmt = cfg.sample_format();
         let sc: StreamConfig = cfg.into();
-        // Prefer I16 (no conversion), then F32, then anything.
         match fmt {
             SampleFormat::I16 => return Some((sc, fmt)),
             SampleFormat::F32 if best.is_none() => best = Some((sc, fmt)),
@@ -317,23 +345,134 @@ fn pick_config(
     best
 }
 
-/// Drain the ring into an i16 output buffer, zero-filling the tail on
-/// underrun so the device always gets a full frame of valid samples.
-fn write_i16(ring: &RingBuffer, data: &mut [i16]) {
-    let n = ring.pop(data);
+// ── Resampling ─────────────────────────────────────────────────────────
+
+/// Linear-interpolation resampler from SM64's 32 kHz to the device's
+/// output rate. Maintains a fractional read position and interpolates
+/// between adjacent i16 samples. Stereo-interleaved: the fraction applies
+/// to both L and R equally (we advance 2 samples per output frame).
+struct Resampler {
+    /// Position in source samples, fractional. Incremented by `step` each
+    /// output stereo frame (2 i16 values).
+    pos: f64,
+    /// Source samples per output sample = in_rate / out_rate.
+    step: f64,
+    /// Scratch buffer for popped source samples (interleaved L/R i16).
+    scratch: Vec<i16>,
+}
+
+impl Resampler {
+    fn new(in_rate: u32, out_rate: u32) -> Self {
+        Self {
+            pos: 0.0,
+            step: in_rate as f64 / out_rate as f64,
+            scratch: Vec::with_capacity(2048),
+        }
+    }
+
+    /// Fill `out` with resampled stereo samples (interleaved L/R i16).
+    /// Returns the number of output samples written. Reads source samples
+    /// from `ring` as needed.
+    fn process(&mut self, ring: &RingBuffer, out: &mut [i16]) -> usize {
+        let n_frames = out.len() / 2; // stereo frames
+        let mut written = 0;
+
+        for _ in 0..n_frames {
+            // Ensure we have the source frame at floor(pos) available.
+            let src_idx = self.pos as usize;
+
+            // We need frames src_idx and src_idx+1 for interpolation.
+            // Make sure our scratch buffer covers that.
+            let needed = (src_idx + 2) * 2;
+            if self.scratch.len() < needed {
+                // Pop more samples from the ring to fill the gap.
+                let want = needed - self.scratch.len();
+                let mut tmp = [0i16; 256];
+                let mut to_pop = want;
+                while to_pop > 0 {
+                    let chunk = to_pop.min(tmp.len());
+                    let got = ring.pop(&mut tmp[..chunk]);
+                    if got == 0 {
+                        break; // underrun — fill remaining with silence
+                    }
+                    self.scratch.extend_from_slice(&tmp[..got]);
+                    to_pop -= got;
+                }
+                if self.scratch.len() < needed {
+                    // Not enough source data — output silence for this frame.
+                    out[written] = 0;
+                    out[written + 1] = 0;
+                    written += 2;
+                    self.pos += self.step;
+                    // Clamp pos so we don't run away on underrun.
+                    if self.pos > self.scratch.len() as f64 / 2.0 {
+                        self.pos = 0.0;
+                        self.scratch.clear();
+                    }
+                    continue;
+                }
+            }
+
+            // Linear interpolation between frame src_idx and src_idx+1.
+            let frac = self.pos - src_idx as f64;
+            let i0 = src_idx * 2;
+            let i1 = (src_idx + 1) * 2;
+
+            let l0 = self.scratch[i0] as f64;
+            let r0 = self.scratch[i0 + 1] as f64;
+            let l1 = self.scratch[i1] as f64;
+            let r1 = self.scratch[i1 + 1] as f64;
+
+            let l = l0 + (l1 - l0) * frac;
+            let r = r0 + (r1 - r0) * frac;
+
+            out[written] = l.round().clamp(-32768.0, 32767.0) as i16;
+            out[written + 1] = r.round().clamp(-32768.0, 32767.0) as i16;
+            written += 2;
+
+            self.pos += self.step;
+
+            // Drop consumed source frames from scratch and adjust pos.
+            let consumed = self.pos as usize;
+            if consumed > 0 {
+                let drop = consumed * 2;
+                if drop >= self.scratch.len() {
+                    self.scratch.clear();
+                } else {
+                    self.scratch.drain(..drop);
+                }
+                self.pos -= consumed as f64;
+            }
+        }
+
+        written
+    }
+}
+
+/// Resample from the ring into an i16 output buffer, silence-filling the tail.
+fn write_i16(
+    ring: &RingBuffer,
+    data: &mut [i16],
+    resampler: &std::sync::Mutex<Resampler>,
+) {
+    let mut rs = resampler.lock().unwrap();
+    let n = rs.process(ring, data);
     for s in data[n..].iter_mut() {
         *s = 0;
     }
 }
 
-/// Drain the ring, converting i16 → f32, silence-filling the tail.
-fn write_f32(ring: &RingBuffer, data: &mut [f32]) {
-    // Reuse a small stack buffer to batch pops and avoid per-sample work.
-    let mut tmp = [0i16; 256];
+fn write_f32(
+    ring: &RingBuffer,
+    data: &mut [f32],
+    resampler: &std::sync::Mutex<Resampler>,
+) {
+    let mut tmp = [0i16; 1024];
+    let mut rs = resampler.lock().unwrap();
     let mut filled = 0;
     while filled < data.len() {
         let want = (data.len() - filled).min(tmp.len());
-        let got = ring.pop(&mut tmp[..want]);
+        let got = rs.process(ring, &mut tmp[..want]);
         if got == 0 {
             break;
         }
@@ -342,7 +481,7 @@ fn write_f32(ring: &RingBuffer, data: &mut [f32]) {
             filled += 1;
         }
         if got < want {
-            break; // underrun
+            break;
         }
     }
     for s in data[filled..].iter_mut() {
@@ -350,13 +489,17 @@ fn write_f32(ring: &RingBuffer, data: &mut [f32]) {
     }
 }
 
-/// Drain the ring, converting i16 → u16, silence-filling the tail.
-fn write_u16(ring: &RingBuffer, data: &mut [u16]) {
-    let mut tmp = [0i16; 256];
+fn write_u16(
+    ring: &RingBuffer,
+    data: &mut [u16],
+    resampler: &std::sync::Mutex<Resampler>,
+) {
+    let mut tmp = [0i16; 1024];
+    let mut rs = resampler.lock().unwrap();
     let mut filled = 0;
     while filled < data.len() {
         let want = (data.len() - filled).min(tmp.len());
-        let got = ring.pop(&mut tmp[..want]);
+        let got = rs.process(ring, &mut tmp[..want]);
         if got == 0 {
             break;
         }
