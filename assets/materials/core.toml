@@ -75,3 +75,10 @@ density = 1000.0
 strength = 0.0
 solid = false
 fluid = true
+
+[[material]]
+name = "mud"
+color = [0.30, 0.22, 0.16]
+jitter = 0.05
+density = 1700.0
+strength = 1.0
