@@ -40,17 +40,15 @@ const NUM_DESIRED_SAMPLES: u32 = 1100;
 /// `create_next_audio_buffer`). Matches the SDL example's buffer.
 const TICK_BUFFER_LEN: usize = 544 * 2 * 2;
 /// Ring-buffer capacity in i16 samples (power of two → maskable indices).
-/// 65536 samples = 32768 stereo frames ≈ 1.0 s at 32 kHz — large enough
-/// to absorb feeder jitter without overflowing or underrunning.
-const RING_CAPACITY: usize = 65_536;
+/// 32768 samples = 16384 stereo frames ≈ 0.5 s at 32 kHz — comfortably
+/// above the SDL example's 6000-frame queue ceiling, absorbing feeder
+/// jitter without overflowing.
+const RING_CAPACITY: usize = 32_768;
 const RING_MASK: usize = RING_CAPACITY - 1;
 
-/// Target feeder cadence: ~100 Hz (10ms). Faster than SM64's internal
-/// 30 Hz rate so the ring stays full and cpal callbacks don't underrun.
-/// sm64_audio_tick internally tracks its own timing and returns 0 when
-/// no new samples are needed, so calling it faster is harmless.
-const FEEDER_SLEEP: Duration = Duration::from_millis(10);
-
+/// Target feeder cadence: ~30 Hz, matching SM64's internal tick rate and
+/// the upstream SDL example's 33 ms loop.
+const FEEDER_SLEEP: Duration = Duration::from_millis(33);
 // ── SPSC ring buffer ───────────────────────────────────────────────────
 
 /// A single-producer / single-consumer ring buffer of `i16` samples.
