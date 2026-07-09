@@ -993,8 +993,10 @@ impl App for VoxApp {
             }
             if let Some(f) = &mut self.fire {
                 f.tick(&mut self.world);
-                // Emit smoke particles from burning cells.
+                // Collect consumed positions for debris detach, and emit
+                // smoke particles from fire events.
                 let s = self.world.cfg.voxel_size_m;
+                let mut consumed_positions: Vec<IVec3> = Vec::new();
                 for ev in f.drain_events() {
                     match ev {
                         vox_sim::FireEvent::Burning(pos, _) => {
@@ -1002,8 +1004,6 @@ impl App for VoxApp {
                             // not at its center — smoke rises from surfaces.
                             let mut center = vox_core::voxel_center_m(pos, s);
                             center.y += s * 0.5;
-                            // Small horizontal jitter so smoke doesn't
-                            // look like a single column from each cell.
                             center.x += (pos.x as f32 * 0.37).fract() * s * 0.6 - s * 0.3;
                             center.z += (pos.z as f32 * 0.61).fract() * s * 0.6 - s * 0.3;
                             self.particles.burst(Burst {
@@ -1044,7 +1044,26 @@ impl App for VoxApp {
                                 size: 0.18,
                                 buoyant: true,
                             });
+                            consumed_positions.push(pos);
                         }
+                    }
+                }
+                // After consumption, check if any solid neighbors lost
+                // their support — e.g. fire burned through a tree trunk.
+                // The existing detach pipeline extracts the disconnected
+                // section as a tumbling debris body carrying ember (still
+                // visually burning). When/if re-freezing is added, the
+                // fire sim's wake_region will re-ignite those cells.
+                if !consumed_positions.is_empty() {
+                    let spawned = vox_physics::detach_unsupported(
+                        &mut self.world,
+                        &mut self.phys,
+                        &self.registry,
+                        &consumed_positions,
+                    );
+                    for id in &spawned {
+                        self.upload_debris_mesh(*id);
+                        self.debris_order.push_back(*id);
                     }
                 }
             }
