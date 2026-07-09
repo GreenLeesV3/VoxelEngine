@@ -352,10 +352,15 @@ pub fn carve_body_sphere_at(
 /// world terrain. An impact fracture typically removes only a handful of
 /// voxels at a time (unlike a bomb's crater), so the fraction is higher and
 /// the cap much lower.
-const IMPACT_CHIP_FRACTION: f32 = 0.4;
+const IMPACT_CHIP_FRACTION: f32 = 0.5;
 /// Absolute cap on chips per fracture event, regardless of how much was
-/// removed.
-const MAX_IMPACT_CHIPS: usize = 6;
+/// removed. Paired with `vox-app`'s `MAX_FRACTURE_RADIUS_VOX` (which bounds
+/// how much a single fracture can ever remove), so this is no longer the
+/// binding constraint on total debris load the way it was when radius was
+/// unbounded -- raised from an earlier `6` because that read as "a handful
+/// of specks next to a big empty hole" rather than a chunk actually
+/// breaking apart into pieces.
+const MAX_IMPACT_CHIPS: usize = 24;
 /// Chip launch speed as a fraction of the impact speed that caused the
 /// fracture -- a graze barely nudges its chips loose, a violent hit sends
 /// them flying: the same "proportional to what actually happened" idea as

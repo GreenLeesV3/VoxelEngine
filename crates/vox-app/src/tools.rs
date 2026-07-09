@@ -1,14 +1,15 @@
 //! Player tools, selected from a 1-9 hotbar: normal single-voxel dig,
-//! scalable-radius dig, an explosive bomb, and a long-range death laser.
-//! Placing (right-click) is independent of the active tool.
+//! scalable-radius dig, an explosive bomb, a long-range death laser, and
+//! placing water. Placing (right-click) is independent of the active tool.
 
 use glam::{IVec3, Vec3};
 use vox_core::consts::REACH;
 use vox_core::{MaterialRegistry, voxel_center_m};
 use vox_physics::{Aabb, BodyId, PhysicsWorld};
+use vox_sim::FluidSim;
 use vox_world::{AIR, Voxel, World, raycast};
 
-/// The selectable hotbar tools. Slots 5-9 are reserved (not yet assigned to
+/// The selectable hotbar tools. Slots 6-9 are reserved (not yet assigned to
 /// a tool); selecting one of them leaves the previously active tool in
 /// place.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -25,14 +26,18 @@ pub enum Tool {
     /// through everything in its path in one shot -- no impulse, just an
     /// instant, precise cut.
     DeathLaser,
+    /// Slot 5: place a sphere of water at the crosshair target using its own
+    /// adjustable source radius.
+    PlaceWater,
 }
 
 /// Hotbar key (1-9) to tool mapping. Slots past the array select nothing.
-pub const HOTBAR: [(u8, Tool); 4] = [
+pub const HOTBAR: [(u8, Tool); 5] = [
     (1, Tool::Dig),
     (2, Tool::ScalableDig),
     (3, Tool::Bomb),
     (4, Tool::DeathLaser),
+    (5, Tool::PlaceWater),
 ];
 
 /// Radius bounds for [`Tool::ScalableDig`] and [`Tool::Bomb`], adjustable
@@ -42,6 +47,11 @@ const TOOL_RADIUS_MIN: f32 = 0.5;
 const TOOL_RADIUS_MAX: f32 = 4.0;
 /// Per-keypress / per-wheel-notch radius step, in meters.
 const TOOL_RADIUS_STEP: f32 = 0.25;
+/// Water starts as a modest source rather than inheriting Bomb's 1.5 m
+/// radius. At the default 0.1 m voxel scale this is a radius-five blob,
+/// small enough to flow as a pool without immediately becoming a huge
+/// budget-limited avalanche.
+const WATER_RADIUS_DEFAULT: f32 = 0.5;
 /// Beam range for [`Tool::DeathLaser`], in meters -- deliberately far beyond
 /// any reasonable world size ("infinite reach"); [`vox_physics::laser`]
 /// clamps its own search box to the world's actual bounds, so this never
@@ -62,6 +72,13 @@ const DEATH_LASER_RADIUS_M: f32 = 1.5;
 pub struct CarveOutcome {
     pub spawned: Vec<BodyId>,
     pub removed: Vec<BodyId>,
+    /// World-space point the tool actually struck, if it struck anything --
+    /// where destruction feedback (dust/spark particles) should originate.
+    pub impact_m: Option<Vec3>,
+    /// The material at the struck voxel *before* it was carved (AIR when
+    /// nothing was hit) -- lets feedback particles take on the color of the
+    /// material actually being destroyed.
+    pub impact_material: Voxel,
 }
 
 /// What a scene raycast hit: a specific static-world voxel, or an existing
@@ -120,6 +137,18 @@ fn raycast_scene(
     best.map(|t| (t, eye_m + dir * (best_dist + SURFACE_NUDGE_M)))
 }
 
+/// The material a scene hit is about to destroy -- read *before* carving
+/// (afterwards the voxel is air, or the body is despawned entirely).
+fn hit_material(world: &World, phys: &PhysicsWorld, hit: &SceneHit) -> Voxel {
+    match *hit {
+        SceneHit::World(voxel) => world.get_voxel(voxel),
+        SceneHit::Body(id, local_voxel) => phys
+            .get(id)
+            .map(|b| b.grid.get(local_voxel))
+            .unwrap_or(AIR),
+    }
+}
+
 /// Build a [`CarveOutcome`] from one of `vox_physics::carve_body_*_at`'s
 /// results: if `id` still exists afterward, nothing was actually removed
 /// and the (untouched) body needs no mesh update at all -- the default,
@@ -131,6 +160,7 @@ fn body_outcome(phys: &PhysicsWorld, id: BodyId, spawned: Vec<BodyId>) -> CarveO
     CarveOutcome {
         spawned,
         removed: vec![id],
+        ..CarveOutcome::default()
     }
 }
 
@@ -147,11 +177,12 @@ fn carve_body_sphere(
     body_outcome(phys, id, spawned)
 }
 
-/// Tool state: active tool, selected build material, and the shared
-/// dig/bomb radius.
+/// Tool state: active tool, selected build material, and independently
+/// adjustable destructive-tool and water-source radii.
 pub struct Tools {
     pub tool: Tool,
     pub radius_m: f32,
+    water_radius_m: f32,
     /// Index into the registry (skips air).
     material_index: usize,
     material_count: usize,
@@ -162,6 +193,7 @@ impl Tools {
         Self {
             tool: Tool::Dig,
             radius_m: vox_core::consts::BLAST_RADIUS,
+            water_radius_m: WATER_RADIUS_DEFAULT,
             material_index: 1,
             material_count: registry.len(),
         }
@@ -171,7 +203,25 @@ impl Tools {
     /// [`Tool::Bomb`]) -- used to decide whether the mouse wheel resizes the
     /// tool or cycles build material.
     pub fn has_adjustable_radius(&self) -> bool {
-        matches!(self.tool, Tool::ScalableDig | Tool::Bomb)
+        matches!(self.tool, Tool::ScalableDig | Tool::Bomb | Tool::PlaceWater)
+    }
+
+    /// Radius currently controlled by the wheel, bracket keys, HUD, and
+    /// debug overlay. Water intentionally keeps its own source radius so a
+    /// prior large bomb cannot turn it into an enormous voxel avalanche.
+    pub fn active_radius_m(&self) -> f32 {
+        match self.tool {
+            Tool::PlaceWater => self.water_radius_m,
+            _ => self.radius_m,
+        }
+    }
+
+    /// Mutable counterpart to [`Tools::active_radius_m`].
+    pub fn active_radius_mut(&mut self) -> &mut f32 {
+        match self.tool {
+            Tool::PlaceWater => &mut self.water_radius_m,
+            _ => &mut self.radius_m,
+        }
     }
 
     /// Select a hotbar slot (1-9) by key number. Slots not in [`HOTBAR`] do
@@ -184,19 +234,21 @@ impl Tools {
 
     /// Shrink the tool radius by one step, clamped to [`TOOL_RADIUS_MIN`].
     pub fn shrink_radius(&mut self) {
-        self.radius_m = (self.radius_m - TOOL_RADIUS_STEP).max(TOOL_RADIUS_MIN);
+        let radius = self.active_radius_mut();
+        *radius = (*radius - TOOL_RADIUS_STEP).max(TOOL_RADIUS_MIN);
     }
 
     /// Grow the tool radius by one step, clamped to [`TOOL_RADIUS_MAX`].
     pub fn grow_radius(&mut self) {
-        self.radius_m = (self.radius_m + TOOL_RADIUS_STEP).min(TOOL_RADIUS_MAX);
+        let radius = self.active_radius_mut();
+        *radius = (*radius + TOOL_RADIUS_STEP).min(TOOL_RADIUS_MAX);
     }
 
     /// Adjust the tool radius by `steps` notches (e.g. mouse wheel delta),
     /// clamped to [`TOOL_RADIUS_MIN`]/[`TOOL_RADIUS_MAX`].
     pub fn adjust_radius(&mut self, steps: i32) {
-        self.radius_m =
-            (self.radius_m + steps as f32 * TOOL_RADIUS_STEP).clamp(TOOL_RADIUS_MIN, TOOL_RADIUS_MAX);
+        let radius = self.active_radius_mut();
+        *radius = (*radius + steps as f32 * TOOL_RADIUS_STEP).clamp(TOOL_RADIUS_MIN, TOOL_RADIUS_MAX);
     }
 
     /// Currently selected build material.
@@ -243,22 +295,26 @@ impl Tools {
         eye_m: Vec3,
         look: Vec3,
     ) -> CarveOutcome {
-        let Some((hit, _)) = raycast_scene(world, phys, eye_m, look, REACH) else {
+        let Some((hit, hit_point_m)) = raycast_scene(world, phys, eye_m, look, REACH) else {
             return CarveOutcome::default();
         };
-        match hit {
+        let material = hit_material(world, phys, &hit);
+        let mut outcome = match hit {
             SceneHit::World(voxel) => {
                 world.set_voxel(voxel, AIR);
                 CarveOutcome {
                     spawned: vox_physics::detach_unsupported(world, phys, registry, &[voxel]),
-                    removed: Vec::new(),
+                    ..CarveOutcome::default()
                 }
             }
             SceneHit::Body(id, local_voxel) => {
                 let spawned = vox_physics::carve_body_voxel_at(phys, registry, id, local_voxel);
                 body_outcome(phys, id, spawned)
             }
-        }
+        };
+        outcome.impact_m = Some(hit_point_m);
+        outcome.impact_material = material;
+        outcome
     }
 
     /// Blast the crosshair target: carve a jagged explosion shape (a base
@@ -285,7 +341,8 @@ impl Tools {
         let Some((hit, hit_point_m)) = raycast_scene(world, phys, eye_m, look, REACH) else {
             return CarveOutcome::default();
         };
-        match hit {
+        let material = hit_material(world, phys, &hit);
+        let mut outcome = match hit {
             SceneHit::World(_) => CarveOutcome {
                 spawned: vox_physics::blast(
                     world,
@@ -297,7 +354,7 @@ impl Tools {
                     seed,
                 )
                 .spawned,
-                removed: Vec::new(),
+                ..CarveOutcome::default()
             },
             SceneHit::Body(id, _) => {
                 let spawned = vox_physics::carve_body_explosion_at(
@@ -312,7 +369,10 @@ impl Tools {
                 vox_physics::apply_blast_impulse(phys, &outcome.spawned, hit_point_m, power, seed);
                 outcome
             }
-        }
+        };
+        outcome.impact_m = Some(hit_point_m);
+        outcome.impact_material = material;
+        outcome
     }
 
     /// Scalable dig: carve a sphere of [`Tools::radius_m`] at the crosshair
@@ -330,7 +390,8 @@ impl Tools {
         let Some((hit, hit_point_m)) = raycast_scene(world, phys, eye_m, look, REACH) else {
             return CarveOutcome::default();
         };
-        match hit {
+        let material = hit_material(world, phys, &hit);
+        let mut outcome = match hit {
             SceneHit::World(_) => {
                 let mut carve = vox_physics::carve_sphere(world, hit_point_m, self.radius_m);
                 let removed: Vec<IVec3> = carve.removed.iter().map(|&(v, _)| v).collect();
@@ -340,11 +401,14 @@ impl Tools {
                 carve.spawned = ids;
                 CarveOutcome {
                     spawned: carve.spawned,
-                    removed: Vec::new(),
+                    ..CarveOutcome::default()
                 }
             }
             SceneHit::Body(id, _) => carve_body_sphere(phys, registry, id, hit_point_m, self.radius_m),
-        }
+        };
+        outcome.impact_m = Some(hit_point_m);
+        outcome.impact_material = material;
+        outcome
     }
 
     /// Death laser: fire an effectively infinite-range beam from the eye
@@ -361,10 +425,19 @@ impl Tools {
         look: Vec3,
     ) -> CarveOutcome {
         let end_m = eye_m + look * DEATH_LASER_RANGE_M;
+        // The beam itself needs no raycast gate, but destruction feedback
+        // wants the *entry* point -- where the beam first strikes something.
+        let entry = raycast_scene(world, phys, eye_m, look, DEATH_LASER_RANGE_M);
+        let (impact_m, impact_material) = match &entry {
+            Some((hit, point)) => (Some(*point), hit_material(world, phys, hit)),
+            None => (None, AIR),
+        };
         let mut outcome = CarveOutcome {
             spawned: vox_physics::laser(world, phys, registry, eye_m, end_m, DEATH_LASER_RADIUS_M)
                 .spawned,
-            removed: Vec::new(),
+            impact_m,
+            impact_material,
+            ..CarveOutcome::default()
         };
 
         // The beam also tunnels through every body already in its path --
@@ -401,6 +474,38 @@ impl Tools {
             world.set_voxel(target, self.material());
         }
     }
+
+    /// Place Water: fill a sphere of the water-source radius with water at the
+    /// crosshair target and hand the filled cells to `fluid` so they start
+    /// flowing immediately. Unlike every other tool, this never touches
+    /// `PhysicsWorld` -- it can't hit or carve a body, only the static
+    /// world, and only into existing air.
+    pub fn place_water(
+        &self,
+        world: &mut World,
+        fluid: &mut FluidSim,
+        registry: &MaterialRegistry,
+        eye_m: Vec3,
+        look: Vec3,
+    ) {
+        let dir = look.normalize_or_zero();
+        if dir == Vec3::ZERO {
+            return;
+        }
+        let Some(hit) = raycast(world, eye_m, dir, REACH) else {
+            return;
+        };
+        let Some(water_id) = registry.id_by_name("water") else {
+            return; // asset set doesn't define water; nothing to place
+        };
+        let Some(face) = hit.face else {
+            return; // Eye started inside terrain, so there is no empty hit face.
+        };
+        let s = world.cfg.voxel_size_m;
+        let center_vox = hit.voxel + face;
+        let radius_vox = (self.water_radius_m / s).round() as i32;
+        fluid.place_blob(world, center_vox, radius_vox, Voxel(water_id.0));
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +531,28 @@ mod tests {
             "test.toml",
         )
         .expect("registry")
+    }
+
+    #[test]
+    fn hotbar_slot_five_selects_place_water() {
+        let mut tools = Tools::new(&registry());
+
+        assert_eq!(tools.select_hotbar_slot(5), Some(Tool::PlaceWater));
+        assert_eq!(tools.tool, Tool::PlaceWater);
+    }
+
+    #[test]
+    fn water_keeps_a_smaller_radius_than_bomb_tools() {
+        let mut tools = Tools::new(&registry());
+        let destructive_radius = tools.radius_m;
+
+        tools.select_hotbar_slot(5);
+        assert_eq!(tools.active_radius_m(), WATER_RADIUS_DEFAULT);
+        tools.grow_radius();
+        assert!(tools.active_radius_m() > WATER_RADIUS_DEFAULT);
+
+        tools.select_hotbar_slot(3);
+        assert_eq!(tools.active_radius_m(), destructive_radius);
     }
 
     /// A 1-voxel-wide wood pillar at a fixed, known footprint (x,z = 5,5),
@@ -798,5 +925,428 @@ mod tests {
             "detached debris ({total_debris_voxels} voxels) looks far too \
              small to be the whole severed tree (trunk + branches + canopy)"
         );
+    }
+
+    fn registry_with_water() -> MaterialRegistry {
+        MaterialRegistry::from_toml_str(
+            r#"
+            [[material]]
+            name = "stone"
+            color = [0.5, 0.5, 0.5]
+            density = 2000.0
+            strength = 5.0
+
+            [[material]]
+            name = "water"
+            color = [0.1, 0.3, 0.8]
+            density = 1000.0
+            strength = 0.0
+            solid = false
+            fluid = true
+            "#,
+            "test.toml",
+        )
+        .expect("registry")
+    }
+
+    fn solid_table_for(reg: &MaterialRegistry) -> Vec<bool> {
+        (0..reg.len())
+            .map(|i| reg.get(vox_core::MaterialId(i as u16)).is_some_and(|d| d.solid))
+            .collect()
+    }
+
+    fn stone_id(reg: &MaterialRegistry) -> Voxel {
+        Voxel(reg.id_by_name("stone").unwrap().0)
+    }
+
+    fn water_voxel(reg: &MaterialRegistry) -> Voxel {
+        Voxel(reg.id_by_name("water").unwrap().0)
+    }
+
+    #[test]
+    fn place_water_uses_the_empty_voxel_on_the_hit_face() {
+        // With 2 m voxels, Water's 0.5 m default radius rounds to zero
+        // voxels. That makes the test distinguish the face-adjacent target
+        // from the struck solid voxel exactly.
+        let reg = registry_with_water();
+        let water = water_voxel(&reg);
+        let stone = stone_id(&reg);
+        let mut world = World::new(WorldConfig {
+            voxel_size_m: 2.0,
+            extent_m: [32.0, 32.0, 32.0],
+            ..WorldConfig::default()
+        });
+        world.set_solid_table(solid_table_for(&reg));
+        let hit_voxel = IVec3::new(4, 4, 4);
+        let target = hit_voxel + IVec3::NEG_X;
+        world.set_voxel(hit_voxel, stone);
+
+        let mut sim = FluidSim::new(water);
+        let tools = Tools::new(&reg);
+        tools.place_water(
+            &mut world,
+            &mut sim,
+            &reg,
+            Vec3::new(5.0, 9.0, 9.0),
+            Vec3::X,
+        );
+
+        assert_eq!(world.get_voxel(hit_voxel), stone, "water must not overwrite the struck terrain voxel");
+        assert_eq!(world.get_voxel(target), water, "water must begin on the hit face's adjacent air voxel");
+    }
+
+    #[test]
+    fn place_water_fills_a_sphere_at_the_crosshair_and_activates_it() {
+        let reg = registry_with_water();
+        let mut world = World::new(WorldConfig {
+            voxel_size_m: 1.0,
+            extent_m: [32.0, 32.0, 32.0],
+            ..WorldConfig::default()
+        });
+        world.set_solid_table(solid_table_for(&reg));
+        let (_, max) = world.bounds_voxels();
+        world.fill_box(IVec3::ZERO, IVec3::new(max.x, 10, max.z), stone_id(&reg));
+
+        let mut sim = vox_sim::FluidSim::new(water_voxel(&reg));
+        let tools = Tools::new(&reg);
+        tools.place_water(&mut world, &mut sim, &reg, Vec3::new(16.0, 15.0, 16.0), Vec3::new(0.0, -1.0, 0.0));
+
+        assert!(sim.active_count() > 0, "placing water must activate at least one cell");
+    }
+
+    /// True if any voxel in the half-open box `[min, max)` holds `water`.
+    fn any_water_in(world: &World, water: Voxel, min: IVec3, max: IVec3) -> bool {
+        for x in min.x..max.x {
+            for y in min.y..max.y {
+                for z in min.z..max.z {
+                    if world.get_voxel(IVec3::new(x, y, z)) == water {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// End-to-end simulation integration: a water blob settles in a basin,
+    /// a terrain edit is drained through World's real dirty-region API, and
+    /// the resulting wake drives water through the new downhill spillway.
+    /// `Tools::place_water` is covered separately above; this test keeps the
+    /// setup grid-exact while exercising the same headless simulation path
+    /// used by the application frame loop.
+    #[test]
+    fn digging_into_a_settled_lake_lets_it_drain() {
+        let reg = registry_with_water();
+        let water = water_voxel(&reg);
+        let mut world = World::new(WorldConfig {
+            voxel_size_m: 1.0,
+            extent_m: [40.0, 20.0, 40.0],
+            ..WorldConfig::default()
+        });
+        world.set_solid_table(solid_table_for(&reg));
+        let (_, max) = world.bounds_voxels();
+
+        // Global floor under the whole world footprint: `fill_box` is
+        // half-open, so this leaves y=4 as the top solid layer and y=5 as
+        // the open resting surface everywhere, both inside and outside the
+        // basin -- water that escapes through the breach lands on this same
+        // floor instead of free-falling into a void once it clears the
+        // wall.
+        world.fill_box(IVec3::ZERO, IVec3::new(max.x, 5, max.z), stone_id(&reg));
+
+        // Basin: a 12x12 stone box (walls spanning y=5..15, i.e. resting on
+        // the floor) with its interior (x/z 10..20) hollowed back out to
+        // air. The hollow-out must happen *after* the solid walls are
+        // built: `place_blob` (and `fill_box` in general) writes whatever
+        // it's told regardless of what's already there, so building the
+        // walls first and clearing the interior second is what leaves a
+        // 1-voxel-thick wall standing on every side rather than either no
+        // walls or no interior.
+        world.fill_box(IVec3::new(9, 5, 9), IVec3::new(21, 15, 21), stone_id(&reg));
+        world.fill_box(IVec3::new(10, 5, 10), IVec3::new(20, 15, 20), AIR);
+
+        let mut sim = FluidSim::new(water);
+        // A blob comfortably inside the 9-voxel-wide interior (radius 3, so
+        // diameter 7), centered well above the floor so it genuinely falls
+        // and spreads rather than starting already at rest -- and clear of
+        // every wall, so it starts out fully confined by construction, not
+        // by luck.
+        sim.place_blob(&mut world, IVec3::new(15, 10, 15), 3, water);
+        assert!(sim.active_count() > 0, "placing the blob must activate cells");
+
+        let basin_interior = (IVec3::new(10, 5, 10), IVec3::new(20, 15, 20));
+        assert!(
+            any_water_in(&world, water, basin_interior.0, basin_interior.1),
+            "basin must actually contain water right after placement"
+        );
+
+        // Let it settle. Determined empirically (not guessed): this basin's
+        // radius-3 blob (~123 cells) reaches `active_count() == 0` well
+        // before 150 ticks once it has finished falling and spreading
+        // across the 9x9 interior floor; 300 leaves real margin without
+        // masking a genuine convergence problem (a basin that never settles
+        // at all would still fail this at any reasonable budget).
+        const SETTLE_TICK_BUDGET: usize = 300;
+        let mut settled = false;
+        for _ in 0..SETTLE_TICK_BUDGET {
+            sim.tick(&mut world);
+            if sim.active_count() == 0 {
+                settled = true;
+                break;
+            }
+        }
+        assert!(
+            settled,
+            "lake must settle to 0 active cells within {SETTLE_TICK_BUDGET} ticks -- if it \
+             doesn't, either the basin isn't actually confining the water (an unintended \
+             escape route) or convergence is genuinely this slow at this basin size"
+        );
+        assert!(
+            any_water_in(&world, water, basin_interior.0, basin_interior.1),
+            "basin must still hold water once settled (didn't all leak out before the wall \
+             was ever breached)"
+        );
+
+        // No manufactured vertical head needed: the flow rule lets a
+        // blocked cell walk toward any drop within its horizon, so opening
+        // the breach below is enough for the water beside it to find the
+        // way out. Just confirm the settled lake actually reaches the wall
+        // that's about to be breached.
+        let spillway = IVec3::new(10, 5, 15);
+        assert_eq!(world.get_voxel(spillway), water, "the settled lake must cover the spillway floor cell");
+
+        // Model the real frame-loop handoff precisely: discard all old
+        // regions, make the two terrain edits, then wake from exactly the
+        // regions reported by World. The opening is at floor height; the
+        // lowered exterior cell gives the water a diagonal gravity path out
+        // of the basin rather than relying on an unphysical flat random walk.
+        world.drain_dirty_regions();
+        let breach = IVec3::new(9, 5, 15);
+        assert_eq!(world.get_voxel(breach), stone_id(&reg), "sanity: the breach point must start as a real wall");
+        world.set_voxel(breach, AIR);
+        let downhill = IVec3::new(8, 4, 15);
+        assert_eq!(world.get_voxel(downhill), stone_id(&reg), "sanity: the spillway must begin with solid terrain below it");
+        world.set_voxel(downhill, AIR);
+        for (min, max) in world.drain_dirty_regions() {
+            sim.wake_region(&world, min, max);
+        }
+        assert!(
+            sim.active_count() > 0,
+            "digging into the settled lake must reactivate water near the breach"
+        );
+
+        // Tick forward and confirm water reaches *outside* the basin
+        // (x < 9, the wall's outer face) through the breach specifically,
+        // not just "some water somewhere moved".
+        const DRAIN_TICK_BUDGET: usize = 300;
+        let outside = (IVec3::new(0, 0, 0), IVec3::new(9, 15, max.z));
+        let mut escaped = false;
+        for _ in 0..DRAIN_TICK_BUDGET {
+            sim.tick(&mut world);
+            // This is the same post-tick dirty drain that the app uses.
+            // It keeps the test on the real wake-on-edit path instead of
+            // relying on a manually padded wake box.
+            for (min, max) in world.drain_dirty_regions() {
+                sim.wake_region(&world, min, max);
+            }
+            if any_water_in(&world, water, outside.0, outside.1) {
+                escaped = true;
+                break;
+            }
+        }
+        assert!(
+            escaped,
+            "water must flow out through the breach and reach outside the basin within \
+             {DRAIN_TICK_BUDGET} ticks"
+        );
+    }
+
+    /// Registry with the full weathering material set (grass, dirt, mud,
+    /// stone, sand, water) -- mirrors the shipped `core.toml` ids by name
+    /// resolution, the same path `weather_table` in `main.rs` takes.
+    fn registry_with_weathering() -> MaterialRegistry {
+        MaterialRegistry::from_toml_str(
+            r#"
+            [[material]]
+            name = "stone"
+            color = [0.55, 0.55, 0.57]
+            density = 2600.0
+            strength = 8.0
+
+            [[material]]
+            name = "dirt"
+            color = [0.45, 0.32, 0.22]
+            density = 1500.0
+            strength = 2.0
+
+            [[material]]
+            name = "grass"
+            color = [0.33, 0.55, 0.25]
+            density = 1400.0
+            strength = 2.0
+
+            [[material]]
+            name = "sand"
+            color = [0.86, 0.79, 0.58]
+            density = 1600.0
+            strength = 1.0
+            solid = false
+            powder = true
+
+            [[material]]
+            name = "mud"
+            color = [0.30, 0.22, 0.16]
+            density = 1700.0
+            strength = 1.0
+            solid = false
+            powder = true
+
+            [[material]]
+            name = "water"
+            color = [0.16, 0.35, 0.62]
+            density = 1000.0
+            strength = 0.0
+            solid = false
+            fluid = true
+            "#,
+            "test_weathering.toml",
+        )
+        .expect("registry")
+    }
+
+    fn voxel_by_name(reg: &MaterialRegistry, name: &str) -> Voxel {
+        Voxel(reg.id_by_name(name).unwrap().0)
+    }
+
+    /// End-to-end through the real registry: place water on a grass field,
+    /// run the fluid + weathering loop the way the frame loop does, and the
+    /// grass beneath must progress grass -> dirt -> mud. This is the
+    /// integration contract Task 7 pins -- if `main.rs` ever drops the
+    /// `drain_events -> weathering.tick` call, the sim still works but this
+    /// test proves the material transformation is actually wired.
+    #[test]
+    fn a_pool_on_grass_turns_its_bed_to_mud() {
+        let reg = registry_with_weathering();
+        let water = voxel_by_name(&reg, "water");
+        let grass = voxel_by_name(&reg, "grass");
+        let mud = voxel_by_name(&reg, "mud");
+
+        let mut world = World::new(WorldConfig {
+            voxel_size_m: 1.0,
+            extent_m: [24.0, 24.0, 24.0],
+            ..WorldConfig::default()
+        });
+        world.set_solid_table(solid_table_for(&reg));
+        let (_, max) = world.bounds_voxels();
+
+        // Solid stone floor, grass top layer.
+        world.fill_box(IVec3::ZERO, IVec3::new(max.x, 5, max.z), voxel_by_name(&reg, "stone"));
+        world.fill_box(IVec3::new(0, 4, 0), IVec3::new(max.x, 5, max.z), grass);
+
+        // Build the weathering table from the registry exactly like main.rs.
+        let table = vox_sim::WeatherTable {
+            water,
+            stone: voxel_by_name(&reg, "stone"),
+            grass,
+            dirt: voxel_by_name(&reg, "dirt"),
+            mud,
+            sand: voxel_by_name(&reg, "sand"),
+        };
+        let mut sim = FluidSim::with_powders(water, vec![voxel_by_name(&reg, "mud"), voxel_by_name(&reg, "sand")]);
+        let mut weathering = vox_sim::Weathering::new(table);
+
+        // Place a small pool and run the loop the way the frame loop does:
+        // fluid.tick -> drain_events -> weathering.tick -> drain dirty
+        // regions -> wake. The grass beneath must progress to mud.
+        sim.place_blob(&mut world, IVec3::new(12, 8, 12), 2, water);
+
+        let budget = (vox_sim::GRASS_SOAK_TICKS + vox_sim::DIRT_SOAK_TICKS) * 3;
+        let mut found_mud = false;
+        for _ in 0..budget {
+            sim.tick(&mut world);
+            let events = sim.drain_events();
+            weathering.tick(&mut world, &events);
+            for (min, max) in world.drain_dirty_regions() {
+                sim.wake_region(&world, min, max);
+            }
+            // Check for mud under the pool area.
+            for x in 9..16 {
+                for z in 9..16 {
+                    if world.get_voxel(IVec3::new(x, 4, z)) == mud {
+                        found_mud = true;
+                    }
+                }
+            }
+            if found_mud {
+                break;
+            }
+        }
+        assert!(found_mud, "the pool's grass bed must turn to mud within the soak budget");
+    }
+
+    /// Sand placed in midair must fall, pile on the floor, and settle --
+    /// exercising the powder path end-to-end through the real registry and
+    /// `FluidSim::with_powders`, the same wiring `main.rs` uses.
+    #[test]
+    fn sand_falls_and_piles_as_a_powder() {
+        let reg = registry_with_weathering();
+        let water = voxel_by_name(&reg, "water");
+        let sand = voxel_by_name(&reg, "sand");
+        let stone = voxel_by_name(&reg, "stone");
+
+        let mut world = World::new(WorldConfig {
+            voxel_size_m: 1.0,
+            extent_m: [24.0, 24.0, 24.0],
+            ..WorldConfig::default()
+        });
+        world.set_solid_table(solid_table_for(&reg));
+        let (_, max) = world.bounds_voxels();
+        // Stone floor (top at y=4, powder rests at y=5).
+        world.fill_box(IVec3::ZERO, IVec3::new(max.x, 5, max.z), stone);
+
+        let mut sim = FluidSim::with_powders(water, vec![sand, voxel_by_name(&reg, "mud")]);
+
+        // Place a blob of sand in midair and let it fall.
+        sim.place_blob(&mut world, IVec3::new(12, 12, 12), 2, sand);
+        assert!(sim.active_count() > 0, "placing sand must activate cells");
+
+        let before = count_material(&world, sand);
+        for _ in 0..80 {
+            sim.tick(&mut world);
+            for (min, max) in world.drain_dirty_regions() {
+                sim.wake_region(&world, min, max);
+            }
+            if sim.active_count() == 0 {
+                break;
+            }
+        }
+        assert_eq!(sim.active_count(), 0, "sand pile must settle");
+        let after = count_material(&world, sand);
+        assert_eq!(before, after, "sand cell count must be conserved");
+        // Sand must have fallen to near the floor (y=5 is the resting surface).
+        let mut near_floor = false;
+        for x in 8..16 {
+            for z in 8..16 {
+                if world.get_voxel(IVec3::new(x, 5, z)) == sand {
+                    near_floor = true;
+                }
+            }
+        }
+        assert!(near_floor, "sand must pile on the floor, not stay suspended");
+    }
+
+    fn count_material(world: &World, v: Voxel) -> usize {
+        let (min, max) = world.bounds_voxels();
+        let mut n = 0;
+        for x in min.x..max.x {
+            for y in min.y..max.y {
+                for z in min.z..max.z {
+                    if world.get_voxel(IVec3::new(x, y, z)) == v {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
     }
 }

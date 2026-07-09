@@ -35,11 +35,11 @@ world.
 | `Shift` | Fly down (noclip) |
 | `Ctrl` (held, noclip) | 5x fly speed |
 | `F` | Toggle fly / noclip |
-| `1`-`9` | Hotbar: 1 Dig, 2 Scalable Dig, 3 Bomb, 4 Death Laser (5-9 reserved) |
-| Mouse wheel | Adjust tool radius (Scalable Dig / Bomb) or cycle build material (otherwise) |
+| `1`-`9` | Hotbar: 1 Dig, 2 Scalable Dig, 3 Bomb, 4 Death Laser, 5 Place Water (6-9 reserved) |
+| Mouse wheel | Adjust tool radius (Scalable Dig / Bomb / Place Water) or cycle build material (otherwise) |
 | Left click | Use the active hotbar tool |
 | Right click | Place selected material |
-| `[` / `]` | Shrink / grow the Scalable Dig / Bomb radius (0.5-4 m) |
+| `[` / `]` | Shrink / grow the Scalable Dig / Bomb / Place Water radius (0.5-4 m) |
 | `B` | Spawn a wood debris cube in front of the player |
 | `X` | Clear all sleeping (settled) debris |
 | `F3` | Toggle the debug overlay (FPS, timings, tuning sliders) |
@@ -53,8 +53,9 @@ world.
 | 2 | Scalable Dig | Carves a sphere of adjustable radius; severed material falls under gravity alone -- no impulse. |
 | 3 | Bomb | Carves a sphere of adjustable radius and gives the debris an outward blast impulse. |
 | 4 | Death Laser | An effectively infinite-range beam that tunnels straight through everything in its path in one shot -- no raycast gate, no impulse, just an instant, total cut. |
+| 5 | Place Water | Fills a 0.5 m default, adjustable water source on the empty face of the targeted terrain; it starts flowing immediately. |
 
-Slots 5-9 are reserved for future tools.
+Slots 6-9 are reserved for future tools.
 
 ### CLI
 
@@ -180,7 +181,18 @@ the bomb's own chip idea below but launched along the actual contact push
 direction and scaled by impact speed instead of blast power) rather than
 letting it all simply vanish — a graze knocks a couple of chips loose, a
 violent hit sends several flying, matching Teardown's "satisfying mess"
-instead of a clean void.
+instead of a clean void. Two more things had to be reined in to actually
+get that: `MAX_FRACTURE_RADIUS_VOX` puts a hard ceiling on the radius
+regardless of how fragile the material or how violent the impact (the
+per-material growth math could otherwise legitimately reach several
+voxels on something as fragile as leaves, which read as "a chunk of the
+tree's canopy vanished into a smooth spherical void," not a crumble); and
+`MAX_IMPACT_CHIPS` was raised from an initial `6` to `24` so a fracture at
+that radius actually scatters enough visible pieces to read as *something*
+breaking apart, not a handful of specks next to an empty hole. Bodies
+below `MIN_FRACTURE_BODY_VOXELS` are terminal rubble and never fracture
+again — see the performance notes for the runaway cascade that rule
+breaks.
 
 A body resting or settling after a hit still needs a real contact impulse
 every substep just to hold it up against gravity, and that impulse looks
@@ -242,6 +254,106 @@ terrain blast) just to keep ~40 — replaced with a partial selection
 (`select_nth_unstable_by_key`), O(n) instead of O(n log n) over the whole
 removed set.
 
+A small body has a disproportionately tiny moment of inertia, so an
+off-center contact (landing on one corner) can spin it up far harder than
+the same impulse would a large body — and unlike linear velocity (already
+capped by `MAX_SPEED`), angular velocity had no ceiling at all. A 2x2x1
+debris chip landing corner-first would settle into a *stable* 50-60 rad/s
+that never decayed: never quiet enough to sleep (so it cost full
+broadphase/narrowphase/solver/render work forever, directly worsening "lots
+of debris causes lag"), and covering ~50 degrees of rotation *per physics
+step* at 60Hz, well into the range where the render-side slerp between a
+step's start/end orientation reads as visible judder rather than a smooth
+spin — this is what "rotation causing stutters and glitches" on small
+debris specifically turned out to be. Fixed with `MAX_ANGULAR_SPEED_RAD_S`,
+the same idea as `MAX_SPEED`, applied both where gravity/velocity are
+integrated and again after the solver's impulse resolution each substep so
+a spike never persists past the substep it occurred in.
+
+The broadphase (`broadphase::Broadphase::candidate_pairs`, a spatial hash
+over body AABBs) used to allocate a fresh hash map, hash set, and output
+vector on every single call — and it was called three times per physics
+step (once per substep, plus once more for the end-of-step sleep-island
+grouping), so with `MAX_DEBRIS_BODIES` debris around that was real,
+repeated allocation/rehashing overhead for no behavioral benefit. Fixed by
+making `Broadphase` a persistent, reusable piece of `PhysicsWorld` state
+(`.clear()`-and-reuse instead of allocate-fresh) and having the
+sleep-island grouping share the same scratch state instead of rebuilding
+its own from scratch. The narrowphase's per-pair contact staging buffer is
+hoisted and reused the same way.
+
+Three deeper fixes came out of the "small debris rotation looks glitchy,
+and lots of debris still lags" report, each verified headlessly:
+- **The fracture cascade** (`MIN_FRACTURE_BODY_VOXELS` in `vox-app`): a
+  fracture scatters 3-voxel chips; a chip's next bounce trivially clears a
+  fragile material's fracture threshold (leaves need only 0.5 m/s of
+  delta-v — every bounce qualifies); and every fragment of a 3-voxel body
+  is below `DEBRIS_MIN_VOXELS`, so the chip vanished as dust while fresh
+  chips spawned from what was removed — grid clones, component labeling,
+  remeshing, and GPU buffer churn on *every bounce of every chip*,
+  compounding forever. Bodies below the new floor are terminal rubble:
+  they bounce and settle, never re-fracture. This was both the visible
+  popping/vanishing glitches and a large share of the sustained lag.
+- **Angular damping** (`ANGULAR_DAMPING_AIR` + `ANGULAR_DAMPING_ROLLING`):
+  the solver had *no* mechanism that removes rotation except contact
+  friction, which has no leverage when contact points sit near the spin
+  axis — so debris could spin at the sleep threshold indefinitely, keeping
+  its whole contact island awake (lag) and visibly twitching (glitches).
+  Everyone now gets a whisper of air drag; *small* bodies (by surface
+  point count, so a tipping tree is exempt and still falls at full speed)
+  get strong rolling resistance while in contact, so grounded rubble stops
+  tumbling almost immediately, sleeps, and frees its island to sleep too.
+- **World-inertia caching** (`Body::inv_iw`): the impulse loop re-derived
+  the world-space inverse inertia tensor (quaternion→matrix + two mat3
+  multiplies) ~25 times per contact per substep; rotation only changes at
+  substep boundaries, so it's now computed once per body per substep.
+  Measured ~16% off the settling-pile average (A/B, 300 bodies), and the
+  worst single step dropped from ~47ms to ~21ms across this round's
+  changes combined.
+
+For lower-end machines, two engine-wide constant-factor passes (no content
+or behavior change):
+- **`vox_core::fxhash`** (a dependency-free FxHash): Rust's default map
+  hasher is SipHash, which pays for collision-flood resistance a game
+  hashing its own voxel coordinates doesn't need. Every hot collection now
+  uses the fast hasher — above all the world's chunk map, consulted on
+  *every voxel read engine-wide* (contacts, raycasts, carves, floods), plus
+  the broadphase cells/dedup, the solver's warm-start and impact-peak maps,
+  the connectivity flood's visited set, and the render/remesh bookkeeping.
+  Steady-state physics step cost measured roughly **2x faster** across pile
+  sizes (e.g. 100-body settling p50 0.175ms → 0.072ms), and it's also more
+  deterministic (FxHash has no per-process random seed).
+- **Chunk-caching in `world_contacts`**: each surface point costs up to 7
+  solidity queries, each formerly a fresh chunk-map lookup; consecutive
+  points are spatially coherent, so a `SolidLookup` (the same cache the
+  destruction flood already used) amortizes nearly all of them away. A
+  falling tree — thousands of surface points, every substep until it
+  sleeps — is exactly this case.
+
+"Small debris caught under large debris makes the large debris react
+oddly" led to the solver's single deepest fix: **split-impulse penetration
+recovery**. The old Baumgarte term turned penetration depth into a
+*velocity* target inside the impulse solve, and a contact will spend
+however much impulse the touching bodies' masses require to reach a
+velocity target — real momentum injected from nothing. Debris chips spawn
+overlapping the fragment they chipped off of (by up to a voxel — routine,
+not exotic), and a probe reproduced the report exactly: one three-voxel
+chip wedged under a settled 5.6-tonne block gave the solver two
+contradictory demands (floor: "chip up"; block: "chip down relative to the
+block") that it could only satisfy by lifting the block — ramping it to
+~1 m/s and shoving it centimeters. Penetration is now recovered
+*positionally* (bodies moved apart directly, weighted by inverse mass,
+sequentially so hundreds of same-face contacts converge to one correction
+instead of stacking), which by construction cannot add kinetic energy: the
+same probe now shows the block peaking at 0.000 m/s with 0.1 mm of drift,
+and every rest-height/stacking/settling test passes unchanged. Relatedly,
+warm-start keys changed from (body, target *cell*, face) to (body, target,
+*surface-point index*, face): several points can alias into one cell, and
+colliding keys made the warm-start map replay one contact's accumulated
+impulse into every contact sharing the key — plus point identity survives
+sliding across cell boundaries, so warm starting persists where it used to
+reset.
+
 Debris body meshing is threaded (`BodyMeshQueue`, mirroring the chunk
 `RemeshQueue`) for large one-off spawns, but a body has no uploaded mesh
 until its meshing job is collected, so routing *every* spawn through the
@@ -249,10 +361,25 @@ queue meant a body was invisible for the frame or two that took — and
 since splitting a body during destruction always produces several small
 fragments in the very same frame the original is despawned, that read as
 the whole cluster flickering/vanishing on every hit. Fixed by meshing
-small bodies (`INLINE_MESH_VOXEL_BUDGET`, 64,000 voxels) synchronously in
-`upload_debris_mesh` instead: the stress example measures even a 40³ cube
-at ~1.7ms average, cheap enough to eat inline. Only genuinely large spawns
-still defer to the background queue.
+small bodies (`INLINE_MESH_VOXEL_BUDGET`, 200,000 voxels — raised from an
+initial 64,000 once it turned out a felled tree's trunk-plus-canopy is one
+connected mass that easily clears that: a single canopy ellipsoid alone is
+tens of thousands of voxels) synchronously in `upload_debris_mesh`
+instead: the stress example measures even a 40³ cube at ~1.7ms average,
+cheap enough to eat inline, and extrapolates to only ~5ms at the new
+budget — one rare tree-felling hitch, not a per-hit cost.
+
+For whatever still clears even that (raised) budget, `VoxApp::replace_body`
+closes the gap a different way instead of just accepting it: the old
+mesh is kept exactly where it is (frozen, at its last known transform)
+until *every* one of its replacement fragments' async meshes has arrived,
+rather than being removed the instant the old body despawns. This matters
+specifically because a large mass like a tree trunk stays that large
+across *many* subsequent hits, not just the first one — the earlier,
+budget-only fix made the initial felling instant but every later hit on
+the same trunk would still pop it out of existence for a frame, which is
+exactly what "invisible for a solid frame every time damage is applied"
+turned out to mean.
 
 ## Extending the engine
 
@@ -271,11 +398,11 @@ Duplicate names across files are a load error, not a silent override.
 `VoxApp::apply_tools` (in `main.rs`) to wire it to input. `Tool::Bomb` is the
 fullest example: raycast -> `vox_physics::blast` -> done.
 
-**Add a whole new engine system** (e.g. the planned cellular-automata
-fluid/fire sim, or ecosystem/creature life) — add it as a **new sibling
-crate** at the `vox-gen`/`vox-physics` tier: it can depend on `vox-core` and
-`vox-world` (and `vox-physics` if it needs bodies) without any existing
-crate changing. This is deliberate: the layering was chosen so that
+**Add a whole new engine system** (e.g. ecosystem/creature life) — add it as
+a **new sibling crate** at the `vox-gen`/`vox-physics` tier, the way
+`vox-sim` (the cellular-automata fluid sim) already does: it can depend on
+`vox-core` and `vox-world` (and `vox-physics` if it needs bodies) without any
+existing crate changing. This is deliberate: the layering was chosen so that
 "add a concept" means "add a crate," not "thread a new dependency through
 six existing files."
 
@@ -288,7 +415,7 @@ so, it probably shouldn't be a dependency.
 ## Testing
 
 ```
-cargo test              # ~190 tests, everything below vox-render runs headless
+cargo test              # ~242 tests, everything below vox-render runs headless
 cargo clippy --all-targets -- -D warnings
 cargo run -p vox-app --release --example stress   # headless perf probe, not a test
 ```
@@ -310,8 +437,15 @@ pillar's base, confirm the upper section detaches, tumbles, and sleeps.
   (the `HashMap<ChunkPos, Chunk>` storage is already streaming-ready).
 - Palette-compressed chunks and an RLE binary save format (the chunk
   storage's `Uniform`/`Dense` enum already hides this behind `get`/`set`).
-- A cellular-automata simulation crate (`vox-sim`): falling sand, fire,
-  water — a sibling crate at the physics tier.
+- ~~A cellular-automata simulation crate (`vox-sim`): falling sand, fire,
+  water — a sibling crate at the physics tier.~~ **Implemented:** a
+  cellular-automata fluid sim (`vox-sim`) with active-cell sleeping, 8-
+  direction drop-search, momentum memory for cohesive flow, water-driven
+  weathering (grass→dirt→mud, stone→sand erosion with waterfall boost,
+  mud drying), and powder materials (mud and sand fall and pile at an
+  angle of repose). See `docs/plans/2026-07-09-fluid-sim-design.md`,
+  `docs/plans/2026-07-09-water-refinement-design.md`, and
+  `docs/plans/2026-07-09-powder-design.md`.
 - An ecosystem/life crate: creatures, growth, populations.
 - Structural stress (load propagation -> creaking collapses) layered on top
   of the existing connectivity pass.

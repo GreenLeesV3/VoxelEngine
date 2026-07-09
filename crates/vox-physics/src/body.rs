@@ -272,6 +272,25 @@ pub struct Body {
     /// Transform snapshot from the previous full step (render interpolation).
     pub prev_pos: Vec3,
     pub prev_rot: Quat,
+    /// Cached world-space inverse inertia (`R * I_local^-1 * R^T`), refreshed
+    /// by the solver once per substep (rotation only changes at substep
+    /// boundaries, so it's constant across a substep's whole contact solve).
+    /// Reading this instead of calling [`Self::inv_inertia_world`] matters
+    /// because the solver's impulse loop otherwise re-derives it -- a
+    /// quaternion-to-matrix conversion plus two mat3 multiplies -- roughly
+    /// 25 times per contact per substep (warm start + iterations x three
+    /// impulse applications), which made it the hottest single operation in
+    /// a many-contact debris pile. May be stale between a spawn that then
+    /// hand-edits `rot` (e.g. fragment placement) and the next substep, but
+    /// nothing reads it in that window.
+    pub inv_iw: Mat3,
+    /// Seconds remaining before this body is auto-despawned, or `None` for
+    /// bodies that persist until something else removes them (the debris
+    /// budget, a carve, going to sleep and getting cleared). Set once at
+    /// spawn time for small "clutter" chips -- see
+    /// `vox_core::consts::CLUTTER_MAX_VOXELS` -- and ticked down by
+    /// `PhysicsWorld::tick_lifetimes`.
+    pub lifetime_s: Option<f32>,
 }
 
 impl Body {
@@ -306,8 +325,11 @@ impl Body {
             aabb_max: Vec3::ZERO,
             prev_pos: com_world,
             prev_rot: Quat::IDENTITY,
+            inv_iw: Mat3::IDENTITY,
+            lifetime_s: None,
         };
         body.refresh_aabb();
+        body.inv_iw = body.inv_inertia_world();
         Some(body)
     }
 

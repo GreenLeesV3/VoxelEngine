@@ -2287,6 +2287,7 @@ dependencies = [
  "vox-physics",
  "vox-platform",
  "vox-render",
+ "vox-sim",
  "vox-sm64",
  "vox-world",
  "wgpu",
@@ -2370,6 +2371,15 @@ dependencies = [
  "vox-mesh",
  "vox-sm64",
  "wgpu",
+]
+
+[[package]]
+name = "vox-sim"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "vox-core",
+ "vox-world",
 ]
 
 [[package]]

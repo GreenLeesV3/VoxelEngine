@@ -15,6 +15,7 @@ vox-render = { workspace = true }
 vox-platform = { workspace = true }
 vox-sm64 = { workspace = true }
 vox-debug = { workspace = true }
+vox-sim = { workspace = true }
 glam = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

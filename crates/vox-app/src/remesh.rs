@@ -7,7 +7,6 @@
 //! dropped and the chunk re-queued, so an upload can never clobber a newer
 //! edit.
 
-use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use glam::{IVec3, Vec3};
@@ -25,9 +24,9 @@ type MeshResult = (IVec3, u64, MeshData);
 /// Book-keeping for background remeshing.
 pub struct RemeshQueue {
     /// Chunks awaiting dispatch, with the generation that queued them.
-    pending: HashMap<IVec3, u64>,
+    pending: vox_core::FxHashMap<IVec3, u64>,
     /// Latest known generation per chunk; only matching results upload.
-    latest: HashMap<IVec3, u64>,
+    latest: vox_core::FxHashMap<IVec3, u64>,
     counter: u64,
     tx: Sender<MeshResult>,
     rx: Receiver<MeshResult>,
@@ -45,8 +44,8 @@ impl RemeshQueue {
     pub fn new() -> Self {
         let (tx, rx) = channel();
         Self {
-            pending: HashMap::new(),
-            latest: HashMap::new(),
+            pending: Default::default(),
+            latest: Default::default(),
             counter: 0,
             tx,
             rx,

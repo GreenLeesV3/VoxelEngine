@@ -5,11 +5,12 @@
 //! MVP enforces a finite extent from [`WorldConfig`]: reads outside are air,
 //! writes outside are ignored.
 
-use std::collections::{HashMap, HashSet};
-
 use glam::{IVec3, UVec3};
 use vox_core::coords::{CHUNK, chunk_of, local_of};
-use vox_core::{WorldConfig, chunk_origin};
+// FxHashMap over the std default: the chunk map is consulted on *every*
+// voxel read engine-wide (contacts, raycasts, carves, floods), where
+// SipHash's collision-flood hardening buys nothing and costs plenty.
+use vox_core::{FxHashMap, FxHashSet, WorldConfig, chunk_origin};
 
 use crate::chunk::{AIR, Chunk, Voxel};
 
@@ -46,7 +47,13 @@ impl<'w> SolidLookup<'w> {
                 c
             }
         };
-        chunk.is_some_and(|c| c.get(local_of(v)) != AIR)
+        match chunk.and_then(|c| {
+            let voxel = c.get(local_of(v));
+            (voxel != AIR).then_some(voxel)
+        }) {
+            Some(voxel) => self.world.material_is_solid(voxel.0),
+            None => false,
+        }
     }
 }
 
@@ -57,12 +64,21 @@ pub type DirtyRegion = (IVec3, IVec3);
 pub struct World {
     /// Per-world configuration (voxel scale, extent, seed).
     pub cfg: WorldConfig,
-    chunks: HashMap<IVec3, Chunk>,
-    dirty: HashSet<IVec3>,
+    chunks: FxHashMap<IVec3, Chunk>,
+    dirty: FxHashSet<IVec3>,
     dirty_regions: Vec<DirtyRegion>,
     /// Half-open world bounds in voxels, `[min, max)`.
     bounds_voxels: (IVec3, IVec3),
     warned_out_of_bounds: bool,
+    /// Per-material-id solidity, indexed by `Voxel.0`. `None` (the default)
+    /// means "any non-air voxel is solid" -- today's behavior, preserved for
+    /// every caller that never attaches a real table. `Some(table)` is set
+    /// once, in production, from the actual `MaterialRegistry` (see
+    /// `set_solid_table`) so a non-solid, non-air material (water) reads
+    /// correctly everywhere solidity is checked: raycasts, the character
+    /// controller, rigidbody-vs-world contacts, and the destruction
+    /// connectivity flood all key off `World::solid`/`SolidLookup::solid`.
+    solid_table: Option<Vec<bool>>,
 }
 
 impl World {
@@ -71,11 +87,12 @@ impl World {
         let bounds_voxels = (IVec3::ZERO, cfg.extent_voxels());
         Self {
             cfg,
-            chunks: HashMap::new(),
-            dirty: HashSet::new(),
+            chunks: FxHashMap::default(),
+            dirty: FxHashSet::default(),
             dirty_regions: Vec::new(),
             bounds_voxels,
             warned_out_of_bounds: false,
+            solid_table: None,
         }
     }
 
@@ -102,13 +119,31 @@ impl World {
         }
     }
 
-    /// True when the voxel at `v` is solid (non-air).
-    ///
-    /// NOTE: this is material-id-based (id != 0). Materials with
-    /// `solid = false` other than air don't exist in the MVP asset set; when
-    /// they do, solidity queries must consult the registry instead.
+    /// True when the voxel at `v` is solid: non-air, and (if a solidity
+    /// table is attached) not a material marked non-solid in that table.
     pub fn solid(&self, v: IVec3) -> bool {
-        self.get_voxel(v) != AIR
+        let voxel = self.get_voxel(v);
+        voxel != AIR && self.material_is_solid(voxel.0)
+    }
+
+    /// Attach a per-material-id solidity table (index = `Voxel.0`; build it
+    /// from `MaterialRegistry` by mapping each id to its `MaterialDef.solid`).
+    /// An id past the end of `table` reads as solid -- an out-of-range id
+    /// should never happen in practice, and defaulting to *solid* is the
+    /// safe failure direction (a stray id blocks movement/collision rather
+    /// than silently letting the player walk through undefined material).
+    pub fn set_solid_table(&mut self, table: Vec<bool>) {
+        self.solid_table = Some(table);
+    }
+
+    /// True when material id `id` counts as solid, consulting the attached
+    /// table if there is one. Shared by `solid()` and `SolidLookup::solid()`
+    /// so the two can never disagree.
+    fn material_is_solid(&self, id: u16) -> bool {
+        match &self.solid_table {
+            Some(table) => table.get(id as usize).copied().unwrap_or(true),
+            None => true, // legacy fallback: any non-air voxel is solid
+        }
     }
 
     /// Write voxel `v` at world position `pos`. Writes outside the world
@@ -286,6 +321,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     const STONE: Voxel = Voxel(1);
     const DIRT: Voxel = Voxel(2);
@@ -439,5 +475,42 @@ mod tests {
         assert!(dirty.contains(&IVec3::new(1, 1, 1)));
         assert!(dirty.contains(&IVec3::new(2, 1, 1)));
         assert!(dirty.contains(&IVec3::new(1, 0, 1)));
+    }
+
+    #[test]
+    fn solid_defaults_to_legacy_non_air_behavior_with_no_registry_attached() {
+        let mut w = World::new(WorldConfig::default());
+        w.set_voxel(IVec3::new(1, 1, 1), Voxel(1));
+        assert!(
+            w.solid(IVec3::new(1, 1, 1)),
+            "any non-air voxel is solid by default"
+        );
+    }
+
+    #[test]
+    fn solid_consults_the_registry_once_attached() {
+        let mut w = World::new(WorldConfig::default());
+        // Material id 1 = solid, id 2 = non-solid (mirrors a real registry's
+        // shape without depending on vox-core's MaterialRegistry type, which
+        // vox-world does not otherwise need at runtime for this).
+        w.set_solid_table(vec![false, true, false]); // [air, solid_mat, water_mat]
+        w.set_voxel(IVec3::new(1, 1, 1), Voxel(1));
+        w.set_voxel(IVec3::new(2, 2, 2), Voxel(2));
+        assert!(w.solid(IVec3::new(1, 1, 1)), "material id 1 is marked solid");
+        assert!(
+            !w.solid(IVec3::new(2, 2, 2)),
+            "material id 2 is marked non-solid"
+        );
+    }
+
+    #[test]
+    fn solid_table_out_of_range_material_id_falls_back_to_solid() {
+        let mut w = World::new(WorldConfig::default());
+        w.set_solid_table(vec![false, true]); // only ids 0..=1 known
+        w.set_voxel(IVec3::new(1, 1, 1), Voxel(5)); // id 5 has no table entry
+        assert!(
+            w.solid(IVec3::new(1, 1, 1)),
+            "unknown material ids default solid, never silently pass through"
+        );
     }
 }

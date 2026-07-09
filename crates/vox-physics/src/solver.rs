@@ -5,15 +5,17 @@
 //! face) so stacks converge across frames; settled bodies sleep at ~zero
 //! cost until an impulse or a nearby world edit wakes them.
 
-use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
-use vox_core::Tunables;
-use vox_core::consts::{CONTACT_SLOP, GRAVITY, SLEEP_FRAMES, SOLVER_ITERS, SUBSTEPS};
+use vox_core::{FxHashMap, Tunables};
+use vox_core::consts::{
+    CLUTTER_LIFETIME_MAX_S, CLUTTER_LIFETIME_MIN_S, CLUTTER_MAX_VOXELS, CONTACT_SLOP, GRAVITY,
+    SLEEP_FRAMES, SOLVER_ITERS, SUBSTEPS,
+};
 use vox_world::World;
 
 use crate::body::{Body, BodyId};
-use crate::broadphase::candidate_pairs;
+use crate::broadphase::Broadphase;
 use crate::contact::{Contact, ContactKey, pair_contacts, world_contacts};
 
 /// Relative contact speed above which a sleeping body is woken by an impact,
@@ -79,6 +81,55 @@ fn two_mut(slots: &mut [Option<Body>], a: usize, b: usize) -> (&mut Body, &mut B
 
 /// Hard velocity ceiling (m/s): a diverging body is clamped, not propagated.
 const MAX_SPEED: f32 = 120.0;
+/// Hard angular velocity ceiling (rad/s). Small bodies have a
+/// disproportionately tiny moment of inertia, so an off-center contact
+/// impulse (landing on one corner, say) can spin one up far harder than the
+/// same impulse would a large body -- a probe against a 2x2x1 chip (the
+/// same shape real debris chips use) landing corner-first measured a
+/// *stable* 50-60 rad/s that never decayed, instead of settling. That's
+/// bad on its own (a body spinning ~9 full rotations a second at 60Hz
+/// covers ~50 degrees *per step*, so the render-side slerp between this
+/// step's start/end orientation increasingly aliases into visible
+/// judder -- "stutters and glitches," worse the smaller/faster the body)
+/// and compounds into real lag too: `sleep_ang` (0.2 rad/s) is never met,
+/// so a body stuck like this never sleeps and keeps costing full
+/// broadphase/narrowphase/solver/render work forever. Comfortably above
+/// every intentional spin kick this engine hands out (`BLAST_SPIN_MAX` is
+/// the largest, at 3.0), comfortably below the runaway values observed.
+const MAX_ANGULAR_SPEED_RAD_S: f32 = 20.0;
+
+/// Baseline angular drag applied to every awake body, per second -- the
+/// solver otherwise has *no* mechanism that removes rotation except contact
+/// friction, and friction only has leverage when the contact points sit
+/// off the spin axis, so debris tumbling in flight (or spinning on a
+/// near-degenerate axis) held its spin literally forever. Small on
+/// purpose: a blast-kicked fragment (`BLAST_SPIN_MAX` = 3 rad/s) still has
+/// most of its tumble after a full second of flight.
+const ANGULAR_DAMPING_AIR: f32 = 0.3;
+/// Extra rolling-resistance drag, per second, for a *small* body that had
+/// at least one contact this substep. Small debris has a disproportionately
+/// tiny moment of inertia and only a couple of contact points, so contact
+/// friction alone can leave it rattling/spinning right at the sleep
+/// thresholds indefinitely -- never asleep (its whole contact island stays
+/// awake with it, feeding "lots of debris causes lag"), and visibly
+/// twitching the whole time. Real rubble stops tumbling almost immediately
+/// once it's on the ground; this makes ours do the same. Deliberately not
+/// applied to large bodies: a tree tipping over *is* rotation sustained
+/// through a ground contact, and damping that would make felled trees fall
+/// in slow motion.
+const ANGULAR_DAMPING_ROLLING: f32 = 6.0;
+/// A body at or below this many surface sample points counts as "small"
+/// for [`ANGULAR_DAMPING_ROLLING`]. Debris chips have 3-8, a 3^3 rubble
+/// cube has 26, a 4^3 fragment already has 56, a tree trunk has thousands.
+const SMALL_BODY_MAX_SURFACE_POINTS: usize = 32;
+
+/// Iterations of the positional (split-impulse) penetration-recovery pass.
+const POSITION_ITERS: usize = 2;
+/// Ceiling on how far one contact may move a body per position iteration,
+/// in meters -- keeps a deeply-buried body (a freshly-spawned debris chip
+/// overlaps the fragment it chipped off of by up to a voxel) easing out
+/// over a few frames instead of teleporting.
+const MAX_POSITION_CORRECTION_M: f32 = 0.05;
 
 /// The dynamic side of the engine: all rigid bodies plus solver state.
 #[derive(Default)]
@@ -86,19 +137,57 @@ pub struct PhysicsWorld {
     slots: Vec<Option<Body>>,
     generations: Vec<u32>,
     free: Vec<usize>,
-    warm: HashMap<ContactKey, (f32, f32, f32)>,
+    warm: FxHashMap<ContactKey, (f32, f32, f32)>,
+    /// Reused scratch state for `candidate_pairs`, across every call in a
+    /// step (see `Broadphase`'s own doc comment for why this is persistent
+    /// rather than built fresh each time).
+    broadphase: Broadphase,
+    /// Per-slot "had a contact this substep" scratch, reused across substeps
+    /// (same allocation-reuse reasoning as `broadphase`). Drives
+    /// [`ANGULAR_DAMPING_ROLLING`].
+    contact_flags: Vec<bool>,
+    /// Per-slot accumulated positional correction scratch for the
+    /// split-impulse pass (same allocation-reuse reasoning as `broadphase`).
+    pos_corr: Vec<Vec3>,
     /// Live-tunable solver parameters (friction, contact bias, sleep
     /// thresholds); public so the debug overlay can bind sliders directly.
     pub tunables: Tunables,
+    /// xorshift64* state driving the 35-60s jitter on clutter lifetimes (see
+    /// `spawn`). Not used for anything gameplay-visible or requiring
+    /// reproducibility across runs, so a fixed non-zero seed (xorshift
+    /// stalls forever on zero) is all this needs.
+    lifetime_rng: u64,
 }
 
 impl PhysicsWorld {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            lifetime_rng: 0x2545_F491_4F6C_DD1D,
+            ..Self::default()
+        }
     }
 
-    /// Insert a body, waking it. Returns its handle.
-    pub fn spawn(&mut self, body: Body) -> BodyId {
+    /// xorshift64* -- deterministic, dependency-free spawn jitter (same
+    /// algorithm as `vox_app::particles::ParticleSystem::next_f32`).
+    fn next_lifetime_jitter(&mut self) -> f32 {
+        self.lifetime_rng ^= self.lifetime_rng << 13;
+        self.lifetime_rng ^= self.lifetime_rng >> 7;
+        self.lifetime_rng ^= self.lifetime_rng << 17;
+        ((self.lifetime_rng >> 40) as f32) / ((1u64 << 24) as f32)
+    }
+
+    /// Insert a body, waking it. Returns its handle. Small "clutter" bodies
+    /// (see `vox_core::consts::CLUTTER_MAX_VOXELS`) are given a randomized
+    /// 35-60s lifetime here, at the single choke point every body passes
+    /// through on the way into the world -- see `tick_lifetimes` for where
+    /// that countdown is spent.
+    pub fn spawn(&mut self, mut body: Body) -> BodyId {
+        if body.lifetime_s.is_none() && body.grid.solid_count() <= CLUTTER_MAX_VOXELS {
+            let jitter = self.next_lifetime_jitter();
+            body.lifetime_s = Some(
+                CLUTTER_LIFETIME_MIN_S + jitter * (CLUTTER_LIFETIME_MAX_S - CLUTTER_LIFETIME_MIN_S),
+            );
+        }
         let slot = if let Some(slot) = self.free.pop() {
             self.slots[slot] = Some(body);
             slot
@@ -111,6 +200,32 @@ impl PhysicsWorld {
             slot: slot as u32,
             generation: self.generations[slot],
         }
+    }
+
+    /// Tick every timed body's countdown (see `spawn`) by `dt` seconds and
+    /// despawn any that reach zero, returning their ids so the caller can
+    /// drop associated GPU meshes -- same contract as `clear_sleeping`. A
+    /// cheap no-op scan for the overwhelming majority of bodies, which carry
+    /// no lifetime at all.
+    pub fn tick_lifetimes(&mut self, dt: f32) -> Vec<BodyId> {
+        let mut expired = Vec::new();
+        for (slot, body) in self.slots.iter_mut().enumerate() {
+            let Some(body) = body else { continue };
+            let Some(remaining) = body.lifetime_s.as_mut() else {
+                continue;
+            };
+            *remaining -= dt;
+            if *remaining <= 0.0 {
+                expired.push(BodyId {
+                    slot: slot as u32,
+                    generation: self.generations[slot],
+                });
+            }
+        }
+        for &id in &expired {
+            self.despawn(id);
+        }
+        expired
     }
 
     /// Remove a body if the handle is current.
@@ -218,7 +333,7 @@ impl PhysicsWorld {
 
         // Peak impulse (point, and push direction) per body slot, across
         // every substep.
-        let mut peaks: HashMap<usize, (f32, Vec3, Vec3)> = HashMap::new();
+        let mut peaks: FxHashMap<usize, (f32, Vec3, Vec3)> = FxHashMap::default();
         let h = dt / SUBSTEPS as f32;
         for _ in 0..SUBSTEPS {
             self.substep(world, h, &mut peaks);
@@ -253,7 +368,7 @@ impl PhysicsWorld {
         // warm-start contact key and re-injects a small impulse discontinuity
         // — exactly the kind of disturbance that kept resetting quiet
         // counters stack-wide before this fix.
-        let islands = Self::islands(&self.slots);
+        let islands = self.islands();
         for island in islands {
             if island.len() < 2 {
                 // Isolated body: the simple per-body rule already works (it
@@ -296,22 +411,22 @@ impl PhysicsWorld {
 
     /// Group bodies into connected components via broadphase contact.
     /// Every live slot appears in exactly one island (singletons included).
-    fn islands(slots: &[Option<Body>]) -> Vec<Vec<usize>> {
-        let mut parent: Vec<usize> = (0..slots.len()).collect();
+    fn islands(&mut self) -> Vec<Vec<usize>> {
+        let mut parent: Vec<usize> = (0..self.slots.len()).collect();
         fn find(parent: &mut [usize], x: usize) -> usize {
             if parent[x] != x {
                 parent[x] = find(parent, parent[x]);
             }
             parent[x]
         }
-        for (a, b) in candidate_pairs(slots) {
+        for &(a, b) in self.broadphase.candidate_pairs(&self.slots) {
             let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
             if ra != rb {
                 parent[ra] = rb;
             }
         }
-        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
-        for (slot, entry) in slots.iter().enumerate() {
+        let mut groups: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+        for (slot, entry) in self.slots.iter().enumerate() {
             if entry.is_some() {
                 let root = find(&mut parent, slot);
                 groups.entry(root).or_default().push(slot);
@@ -320,7 +435,16 @@ impl PhysicsWorld {
         groups.into_values().collect()
     }
 
-    fn substep(&mut self, world: &World, h: f32, peaks: &mut HashMap<usize, (f32, Vec3, Vec3)>) {
+    fn substep(&mut self, world: &World, h: f32, peaks: &mut FxHashMap<usize, (f32, Vec3, Vec3)>) {
+        // Refresh every live body's cached world inverse inertia -- rotation
+        // only changes at the end of a substep, so this is constant across
+        // the whole contact solve below (see `Body::inv_iw`'s docs).
+        // Sleeping bodies included: a sleeping pair target still contributes
+        // its inertia to `pair_contacts`' effective-mass terms.
+        for body in self.slots.iter_mut().flatten() {
+            body.inv_iw = body.inv_inertia_world();
+        }
+
         // Integrate velocities and collect contacts.
         let mut contacts: Vec<Contact> = Vec::new();
         for (slot, entry) in self.slots.iter_mut().enumerate() {
@@ -332,12 +456,19 @@ impl PhysicsWorld {
             if body.vel.length() > MAX_SPEED {
                 body.vel = body.vel.normalize() * MAX_SPEED;
             }
+            if body.omega.length() > MAX_ANGULAR_SPEED_RAD_S {
+                body.omega = body.omega.normalize() * MAX_ANGULAR_SPEED_RAD_S;
+            }
             debug_assert!(body.vel.is_finite() && body.pos.is_finite());
             world_contacts(body, slot, world, &mut contacts);
         }
 
-        // Body-body narrowphase over broadphase candidates.
-        for (a, b) in candidate_pairs(&self.slots) {
+        // Body-body narrowphase over broadphase candidates. One staging
+        // buffer reused across every pair (`Vec::append` drains it but
+        // keeps its capacity) instead of a fresh allocation per touching
+        // pair per substep.
+        let mut staged: Vec<Contact> = Vec::new();
+        for &(a, b) in self.broadphase.candidate_pairs(&self.slots) {
             let (asleep_a, asleep_b) = {
                 let ba = self.slots[a].as_ref().expect("pair body alive");
                 let bb = self.slots[b].as_ref().expect("pair body alive");
@@ -363,7 +494,7 @@ impl PhysicsWorld {
                 target_asleep = true;
             }
 
-            let mut staged: Vec<Contact> = Vec::new();
+            staged.clear();
             let result = {
                 let sb = self.slots[sampler].as_ref().expect("alive");
                 let tb = self.slots[target].as_ref().expect("alive");
@@ -396,13 +527,25 @@ impl PhysicsWorld {
             }
         }
 
-        // Velocity iterations: normal impulse with Baumgarte bias, then
-        // friction clamped to the Coulomb cone.
+        // Velocity iterations: normal impulse stopping approach only, then
+        // friction clamped to the Coulomb cone. Deliberately *no* Baumgarte
+        // bias here: bias turns penetration depth into a velocity target,
+        // and a contact will spend however much impulse the touching
+        // bodies' masses require to reach it -- real momentum injected from
+        // nothing. The measured failure: a debris chip wedged under a
+        // settled 5.6 t block (chips spawn overlapping their parent
+        // fragment by up to a voxel, so this is routine, not exotic) had
+        // its floor contact demanding "chip up" while its block contact
+        // demanded "chip down relative to block"; the only way the solver
+        // could satisfy both was to lift the block, which it did --
+        // block-scale impulses ramping it to ~1 m/s and shoving it
+        // centimeters off its resting spot. Penetration is instead
+        // recovered *positionally* (split impulse, below), which by
+        // construction cannot add kinetic energy to anything.
         for _ in 0..SOLVER_ITERS {
             for c in &mut contacts {
                 let vn = Self::relative_velocity(&self.slots, c).dot(c.normal);
-                let bias = (self.tunables.contact_beta / h) * (c.depth - CONTACT_SLOP).max(0.0);
-                let lambda = (bias - vn) / c.kn;
+                let lambda = -vn / c.kn;
                 let new_acc = (c.acc_n + lambda).max(0.0);
                 let applied = new_acc - c.acc_n;
                 c.acc_n = new_acc;
@@ -451,12 +594,41 @@ impl PhysicsWorld {
             }
         }
 
-        // Integrate positions and orientations.
-        for body in self.slots.iter_mut().flatten() {
+        // Which bodies touched anything this substep, for rolling
+        // resistance below.
+        self.contact_flags.clear();
+        self.contact_flags.resize(self.slots.len(), false);
+        for c in &contacts {
+            self.contact_flags[c.body] = true;
+            if let Some(b) = c.body_b {
+                self.contact_flags[b] = true;
+            }
+        }
+
+        // Integrate positions and orientations. Angular velocity is
+        // clamped again here (not just at the top of the substep, before
+        // this substep's own contact impulses were applied) so a spike from
+        // *this* substep's impulse resolution never gets integrated into
+        // the rotation at full strength, and never persists past this
+        // substep's boundary either -- see `MAX_ANGULAR_SPEED_RAD_S`.
+        // Angular damping also lives here, after the solve, so it acts on
+        // the final post-impulse spin: baseline air drag for everyone, plus
+        // rolling resistance for small grounded debris (see the constants'
+        // docs for why each exists).
+        for (slot, entry) in self.slots.iter_mut().enumerate() {
+            let Some(body) = entry else { continue };
             if body.sleep.asleep {
                 continue;
             }
             body.pos += body.vel * h;
+            let mut damping = ANGULAR_DAMPING_AIR;
+            if self.contact_flags[slot] && body.surface.len() <= SMALL_BODY_MAX_SURFACE_POINTS {
+                damping += ANGULAR_DAMPING_ROLLING;
+            }
+            body.omega /= 1.0 + h * damping;
+            if body.omega.length() > MAX_ANGULAR_SPEED_RAD_S {
+                body.omega = body.omega.normalize() * MAX_ANGULAR_SPEED_RAD_S;
+            }
             let om = body.omega;
             let dq = Quat::from_xyzw(om.x, om.y, om.z, 0.0) * body.rot;
             body.rot = Quat::from_xyzw(
@@ -469,6 +641,50 @@ impl PhysicsWorld {
             body.refresh_aabb();
         }
 
+        // Split-impulse penetration recovery: resolve overlap by *moving*
+        // bodies apart, weighted by inverse mass, never by changing their
+        // velocities (see the velocity-iterations comment above for the
+        // energy-injection failure this replaces). Sequential with a
+        // per-body running total so a slab resting on hundreds of similar
+        // contacts converges to one correction, not hundreds stacked; the
+        // inverse-mass split means a chip pinched under a heavy block eases
+        // itself out while the block, thousands of times its mass, stays
+        // put to within micrometers.
+        self.pos_corr.clear();
+        self.pos_corr.resize(self.slots.len(), Vec3::ZERO);
+        for _ in 0..POSITION_ITERS {
+            for c in &contacts {
+                let corr_b = c.body_b.map_or(Vec3::ZERO, |b| self.pos_corr[b]);
+                let already = (self.pos_corr[c.body] - corr_b).dot(c.normal);
+                let remaining = (c.depth - CONTACT_SLOP) - already;
+                if remaining <= 0.0 {
+                    continue;
+                }
+                let push = (self.tunables.contact_beta * remaining).min(MAX_POSITION_CORRECTION_M);
+                match c.body_b {
+                    Some(b) => {
+                        let ia = self.slots[c.body].as_ref().map_or(0.0, |x| x.inv_mass);
+                        let ib = self.slots[b].as_ref().map_or(0.0, |x| x.inv_mass);
+                        let w = ia + ib;
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        self.pos_corr[c.body] += c.normal * (push * ia / w);
+                        self.pos_corr[b] -= c.normal * (push * ib / w);
+                    }
+                    None => self.pos_corr[c.body] += c.normal * push,
+                }
+            }
+        }
+        for (slot, entry) in self.slots.iter_mut().enumerate() {
+            let Some(body) = entry else { continue };
+            let corr = self.pos_corr[slot];
+            if corr != Vec3::ZERO && !body.sleep.asleep {
+                body.pos += corr;
+                body.refresh_aabb();
+            }
+        }
+
         // Persist accumulated impulses for the next substep's warm start.
         self.warm.clear();
         for c in &contacts {
@@ -479,19 +695,20 @@ impl PhysicsWorld {
     /// Apply impulse `p` (already signed for `body`) to a contact's body,
     /// and the equal-and-opposite reaction to `body_b` if present.
     fn apply_contact_impulse(slots: &mut [Option<Body>], c: &Contact, p: Vec3) {
+        // `inv_iw` is the substep-refreshed cache (see its field docs) --
+        // this function runs ~25x per contact per substep, and re-deriving
+        // the world inertia from the quaternion here was the hottest single
+        // operation in a many-contact debris pile.
         if let Some(b) = c.body_b {
             let (ba, bb) = two_mut(slots, c.body, b);
-            let inv_iw_a = ba.inv_inertia_world();
             ba.vel += p * ba.inv_mass;
-            ba.omega += inv_iw_a * c.r_arm.cross(p);
-            let inv_iw_b = bb.inv_inertia_world();
+            ba.omega += ba.inv_iw * c.r_arm.cross(p);
             bb.vel -= p * bb.inv_mass;
-            bb.omega -= inv_iw_b * c.r_arm_b.cross(p);
+            bb.omega -= bb.inv_iw * c.r_arm_b.cross(p);
         } else {
             let body = slots[c.body].as_mut().expect("contact body alive");
-            let inv_iw = body.inv_inertia_world();
             body.vel += p * body.inv_mass;
-            body.omega += inv_iw * c.r_arm.cross(p);
+            body.omega += body.inv_iw * c.r_arm.cross(p);
         }
     }
 
@@ -855,6 +1072,195 @@ mod tests {
         assert!(
             !saw_impact_after_landing,
             "settling under steady contact must not keep reporting fresh impacts"
+        );
+    }
+
+    /// A small body's tiny moment of inertia means an off-center contact
+    /// (landing on one corner) can spin it up far harder than the same
+    /// impulse would a large body -- an earlier version of this had no
+    /// ceiling on angular velocity at all (unlike linear, which already had
+    /// `MAX_SPEED`), and a 2x2x1 chip landing corner-first would settle
+    /// into a *stable* 50-60 rad/s that never decayed: never quiet enough
+    /// to sleep (costing broadphase/narrowphase/render work forever), and
+    /// covering ~50 degrees of rotation *per physics step* at 60Hz, which
+    /// is well into the range where the render-side slerp between a step's
+    /// start/end orientation reads as visible judder rather than a smooth
+    /// spin. `MAX_ANGULAR_SPEED_RAD_S` bounds it the same way `MAX_SPEED`
+    /// already bounds linear velocity.
+    #[test]
+    fn a_small_chip_landing_corner_first_settles_instead_of_spinning_forever() {
+        let reg = registry();
+        let world = floored_world();
+        let mut phys = PhysicsWorld::new();
+        let grid = VoxelGrid::new(IVec3::new(2, 2, 1), vec![Voxel(1); 4]);
+        let mut body = Body::from_grid(grid, &reg, 0.1, Vec3::new(16.0, 10.0, 16.0)).unwrap();
+        body.rot = Quat::from_euler(glam::EulerRot::XYZ, 0.4, 0.3, 0.2);
+        body.prev_rot = body.rot;
+        body.vel = Vec3::new(3.0, -2.0, 1.5);
+        let id = phys.spawn(body);
+
+        let mut slept = false;
+        for _ in 0..600 {
+            phys.step(&world, PHYSICS_DT);
+            let b = phys.get(id).expect("alive");
+            assert!(
+                b.omega.length() <= MAX_ANGULAR_SPEED_RAD_S + 1e-3,
+                "angular velocity must never exceed the hard ceiling: {}",
+                b.omega.length()
+            );
+            if b.sleep.asleep {
+                slept = true;
+                break;
+            }
+        }
+        assert!(slept, "a small chip must eventually settle and sleep, not spin forever");
+    }
+
+    /// A small chip already on the ground, spun hard around the vertical
+    /// axis (where friction has the least leverage on a flat-bottomed
+    /// shape), must stop and sleep quickly -- rolling resistance
+    /// (`ANGULAR_DAMPING_ROLLING`) exists precisely so grounded rubble
+    /// can't sit there spinning/rattling at the sleep threshold forever,
+    /// keeping its whole contact island awake with it.
+    #[test]
+    fn a_grounded_spinning_chip_stops_and_sleeps_quickly() {
+        let reg = registry();
+        let world = floored_world();
+        let mut phys = PhysicsWorld::new();
+        let grid = VoxelGrid::new(IVec3::new(2, 2, 1), vec![Voxel(1); 4]);
+        let mut body = Body::from_grid(grid, &reg, 0.1, Vec3::new(16.0, 4.2, 16.0)).unwrap();
+        body.omega = Vec3::new(0.0, 10.0, 0.0);
+        let id = phys.spawn(body);
+        let mut slept_at = None;
+        for i in 0..600 {
+            phys.step(&world, PHYSICS_DT);
+            if phys.get(id).unwrap().sleep.asleep {
+                slept_at = Some(i);
+                break;
+            }
+        }
+        let slept_at = slept_at.expect("a grounded spinning chip must sleep within 10 s");
+        assert!(
+            slept_at < 180,
+            "rolling resistance should stop it in ~1 s, not {slept_at} steps"
+        );
+    }
+
+    /// Air drag on rotation is a floor, not a brake: a body tumbling in
+    /// free flight (no contacts) must keep the large majority of its spin
+    /// over half a second -- blast-kicked debris visibly tumbling as it
+    /// flies is a feature, and rolling resistance must not apply mid-air.
+    #[test]
+    fn free_flight_tumble_is_barely_damped() {
+        let reg = registry();
+        let world = floored_world();
+        let mut phys = PhysicsWorld::new();
+        let grid = VoxelGrid::new(IVec3::new(2, 2, 1), vec![Voxel(1); 4]);
+        let mut body = Body::from_grid(grid, &reg, 0.1, Vec3::new(16.0, 20.0, 16.0)).unwrap();
+        body.omega = Vec3::new(0.0, 3.0, 0.0);
+        let id = phys.spawn(body);
+        for _ in 0..30 {
+            phys.step(&world, PHYSICS_DT); // 0.5 s of free fall, ~1.2 m -- nowhere near the floor
+        }
+        let om = phys.get(id).unwrap().omega.length();
+        assert!(
+            om > 2.5,
+            "half a second of air drag must leave most of a 3 rad/s tumble: {om}"
+        );
+        assert!(om < 3.0, "but *some* drag must exist: {om}");
+    }
+
+    /// A debris chip spawned half-buried under a settled heavy block --
+    /// exactly what fracture chips do routinely (they spawn at
+    /// removed-voxel centers, overlapping surviving material by up to a
+    /// voxel) -- must not disturb the block. Under the old Baumgarte
+    /// velocity bias, the solver could only satisfy the trapped chip's two
+    /// contradictory contacts (floor: "chip up"; block: "chip down,
+    /// relative to the block") by *lifting the block*, and it did: ~1 m/s
+    /// of ramping velocity and centimeters of drift on a 5.6 t block, from
+    /// one three-voxel chip. Split-impulse (positional) penetration
+    /// recovery cannot inject momentum by construction; this pins that.
+    #[test]
+    fn a_chip_pinched_under_a_heavy_block_does_not_move_the_block() {
+        let reg = registry();
+        let world = floored_world();
+        let mut phys = PhysicsWorld::new();
+        let big = phys.spawn(cube_body(&reg, 20, Vec3::new(16.0, 5.2, 16.0)));
+        for _ in 0..300 {
+            phys.step(&world, PHYSICS_DT);
+        }
+        assert!(phys.get(big).unwrap().sleep.asleep, "big cube must settle first");
+        let rest_pos = phys.get(big).unwrap().pos;
+
+        let corner = rest_pos - Vec3::new(0.95, 0.95, 0.95);
+        let grid = VoxelGrid::new(IVec3::new(2, 2, 1), vec![Voxel(1); 4]);
+        let chip = phys.spawn(Body::from_grid(grid, &reg, 0.1, corner).unwrap());
+
+        let mut max_big_vel = 0.0f32;
+        let mut max_chip_vel = 0.0f32;
+        for _ in 0..240 {
+            phys.step(&world, PHYSICS_DT);
+            max_big_vel = max_big_vel.max(phys.get(big).unwrap().vel.length());
+            if let Some(c) = phys.get(chip) {
+                max_chip_vel = max_chip_vel.max(c.vel.length());
+            }
+        }
+        assert!(
+            max_big_vel < 0.05,
+            "the block must stay put, not get hurled: peaked at {max_big_vel} m/s"
+        );
+        assert!(
+            max_chip_vel < 2.0,
+            "the chip must ease out, not launch: peaked at {max_chip_vel} m/s"
+        );
+        let drift = (phys.get(big).unwrap().pos - rest_pos).length();
+        assert!(drift < 0.01, "the block must not creep: drifted {drift} m");
+    }
+
+    #[test]
+    fn clutter_sized_bodies_get_a_lifetime_and_larger_ones_dont() {
+        let reg = registry();
+        let mut phys = PhysicsWorld::new();
+
+        let clutter = cube_body(&reg, 1, Vec3::ZERO); // 1 voxel <= CLUTTER_MAX_VOXELS
+        let clutter_id = phys.spawn(clutter);
+        assert!(
+            phys.get(clutter_id).unwrap().lifetime_s.is_some(),
+            "a 1-voxel body must be timed"
+        );
+        let life = phys.get(clutter_id).unwrap().lifetime_s.unwrap();
+        assert!(
+            (CLUTTER_LIFETIME_MIN_S..=CLUTTER_LIFETIME_MAX_S).contains(&life),
+            "lifetime {life} must land in the configured 35-60s window"
+        );
+
+        let permanent = cube_body(&reg, 2, Vec3::splat(10.0)); // 8 voxels
+        let permanent_id = phys.spawn(permanent);
+        assert!(
+            phys.get(permanent_id).unwrap().lifetime_s.is_none(),
+            "an 8-voxel body must not be timed"
+        );
+    }
+
+    #[test]
+    fn tick_lifetimes_despawns_expired_clutter_and_leaves_others() {
+        let reg = registry();
+        let mut phys = PhysicsWorld::new();
+        let clutter_id = phys.spawn(cube_body(&reg, 1, Vec3::ZERO));
+        let permanent_id = phys.spawn(cube_body(&reg, 2, Vec3::splat(10.0)));
+
+        // Nowhere near expiry yet.
+        let expired = phys.tick_lifetimes(1.0);
+        assert!(expired.is_empty());
+        assert!(phys.get(clutter_id).is_some());
+
+        // Push it past even the longest possible lifetime.
+        let expired = phys.tick_lifetimes(CLUTTER_LIFETIME_MAX_S + 1.0);
+        assert_eq!(expired, vec![clutter_id]);
+        assert!(phys.get(clutter_id).is_none(), "expired clutter must be despawned");
+        assert!(
+            phys.get(permanent_id).is_some(),
+            "an untimed body must survive any number of ticks"
         );
     }
 }
