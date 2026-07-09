@@ -14,6 +14,14 @@ const NEIGHBORS_6: [IVec3; 6] = [
     IVec3::new(0, 0, -1),
 ];
 
+/// Hard ceiling on active cells processed in one `tick` call -- mirrors
+/// `MAX_DEBRIS_BODIES`'s budget pattern. A tick given more active cells than
+/// this processes exactly this many (in randomized order, so it's not
+/// always the same subset stalling) and leaves the rest active for the next
+/// tick, spreading a huge flood event (a blasted-open reservoir) over a few
+/// extra ticks instead of spiking one frame.
+const FLUID_TICK_BUDGET: usize = 4096;
+
 /// Tracks which water cells are still moving. A cell not in this set is
 /// settled and costs nothing to tick -- the entire performance story of
 /// this crate (mirrors `PhysicsWorld`'s sleep bookkeeping).
@@ -90,7 +98,7 @@ impl FluidSim {
     /// drop it from the active set if it has settled. A cell that moves
     /// reactivates itself, its destination, and the destination's neighbors
     /// -- the entire wake cascade, no separate propagation pass needed.
-    pub fn tick(&mut self, world: &mut World) {
+    pub fn tick(&mut self, world: &mut World) -> usize {
         // NOTE: `self.active` also holds the 6 air neighbors woken by last
         // tick's movers (see below), so a plain `.next()` over the set can
         // land on one of those placeholder entries and misinfer `water` as
@@ -107,7 +115,7 @@ impl FluidSim {
             .find(|&v| v != AIR)
             .unwrap_or(AIR);
         if water == AIR {
-            return; // nothing active, or (shouldn't happen) it already drained
+            return 0; // nothing active, or (shouldn't happen) it already drained
         }
 
         // Snapshot exactly the positions that hold real water *before* any
@@ -123,13 +131,35 @@ impl FluidSim {
         // mover's (a mover can never target a cell that already holds
         // water -- `is_open` only accepts AIR), so each snapshot position
         // is guaranteed to still be valid when its turn comes.
-        let cells: Vec<IVec3> = self
+        let mut cells: Vec<IVec3> = self
             .active
             .iter()
             .copied()
             .filter(|&p| world.get_voxel(p) == water)
             .collect();
+
         let mut next_active = FxHashSet::default();
+
+        // Budget: if there are more active (real-water) cells than we're
+        // willing to process this call, shuffle so the overflow isn't
+        // always the same tail of whatever order the hash set happened to
+        // yield, then carry the overflow straight into `next_active`
+        // untouched. Each carried-over position still holds real water (it
+        // was filtered above and nothing this tick has mutated it yet), so
+        // it is exactly as scan-safe for next tick's `water` inference at
+        // the top of this function as any settled/woken cell already in
+        // `next_active` -- it's simply processed on a later call instead of
+        // this one.
+        if cells.len() > FLUID_TICK_BUDGET {
+            for i in (1..cells.len()).rev() {
+                let j = (self.next_u64() as usize) % (i + 1);
+                cells.swap(i, j);
+            }
+            let overflow = cells.split_off(FLUID_TICK_BUDGET);
+            next_active.extend(overflow);
+        }
+        let processed = cells.len();
+
         for pos in cells {
             let coin = self.next_u64() & 1 == 0;
             let coin2 = self.next_u64() & 1 == 0;
@@ -156,6 +186,7 @@ impl FluidSim {
             } // else: settled -- not re-added
         }
         self.active = next_active;
+        processed
     }
 }
 
@@ -363,6 +394,35 @@ mod tests {
         }
         let after = count_water(&world);
         assert_eq!(before, after, "moving water must never create or destroy cells");
+    }
+
+    #[test]
+    fn tick_never_processes_more_than_the_budget_in_one_call() {
+        // `test_world()` is only 16 voxels per axis, far too small to hold a
+        // sphere wide enough to clear `FLUID_TICK_BUDGET` (4096) cells --
+        // volume of a radius-r sphere is ~(4/3)*pi*r^3, so r must exceed
+        // ~9.93 (since (4/3)*pi*9.93^3 ~= 4096); r=12 gives ~7238 cells,
+        // comfortably over budget without being enormous. That needs a
+        // world spanning at least 2*12+1 = 25 voxels per axis around the
+        // blob's center, so this test builds its own larger, self-contained
+        // world rather than changing the shared `test_world()` helper (used
+        // by other tests that may depend on its current 16-voxel extent).
+        let mut world = World::new(WorldConfig {
+            voxel_size_m: 1.0,
+            extent_m: [40.0, 40.0, 40.0],
+            ..WorldConfig::default()
+        });
+        world.set_solid_table(vec![false, false, true]); // [air, water, floor]
+        let mut sim = FluidSim::new();
+        sim.place_blob(&mut world, IVec3::new(20, 20, 20), 12, WATER);
+        assert!(
+            sim.active_count() > FLUID_TICK_BUDGET,
+            "test needs more active cells than the budget to be meaningful: got {}",
+            sim.active_count()
+        );
+
+        let processed = sim.tick(&mut world);
+        assert!(processed <= FLUID_TICK_BUDGET, "must not process more than the budget in one tick: {processed}");
     }
 
     fn count_water(world: &World) -> usize {
