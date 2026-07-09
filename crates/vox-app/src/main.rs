@@ -200,6 +200,9 @@ struct VoxApp {
     /// `Some` with `is_active() == false` = initialized but Mario not
     /// spawned. `Some` with `is_active() == true` = Mario is running.
     mario_mode: Option<mario::MarioMode>,
+    /// SM64 units per meter for Mario mode. Higher = smaller Mario.
+    /// Set once from CLI, read when initializing MarioMode.
+    mario_units_per_meter: f32,
     /// Old debris meshes kept alive past their body's despawn, each waiting
     /// on the set of its replacement fragments' async mesh jobs still in
     /// flight -- see `replace_body`'s doc comment for why this exists (a
@@ -240,6 +243,7 @@ impl VoxApp {
     fn new(
         window: Arc<Window>,
         cfg: WorldConfig,
+        mario_units_per_meter: f32,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let assets = assets_dir();
         let registry = MaterialRegistry::load_dir(&assets.join("materials"))?;
@@ -309,6 +313,7 @@ impl VoxApp {
             last_draw_stats: vox_render::DrawStats::default(),
             debris_order: VecDeque::new(),
             mario_mode: None,
+            mario_units_per_meter,
             pending_body_removal: HashMap::new(),
             particles: ParticleSystem::new(),
             particle_pipeline,
@@ -853,7 +858,7 @@ impl VoxApp {
                         return;
                     }
                 };
-            match mario::MarioMode::init(&self.gpu, &rom_path, &mario_shader) {
+            match mario::MarioMode::init(&self.gpu, &rom_path, &mario_shader, self.mario_units_per_meter) {
                 Ok(mode) => self.mario_mode = Some(mode),
                 Err(e) => {
                     tracing::error!("Mario mode init failed: {e}");
@@ -1213,13 +1218,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", args::usage());
         return Ok(());
     }
-    let cfg = match args::parse(cli_args.iter().map(String::as_str)) {
-        Ok(cfg) => cfg,
+    let cli = match args::parse(cli_args.iter().map(String::as_str)) {
+        Ok(cli) => cli,
         Err(msg) => {
             eprintln!("error: {msg}\n\n{}", args::usage());
             std::process::exit(1);
         }
     };
+    let cfg = cli.world;
+    let mario_units_per_meter = cli.mario_units_per_meter;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1231,11 +1238,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         voxel_size_m = cfg.voxel_size_m,
         seed = cfg.seed,
         extent_m = ?cfg.extent_m,
+        mario_units_per_meter,
         "world config"
     );
 
     run_app(vox_core::consts::PHYSICS_DT, |window| {
-        Ok(Box::new(VoxApp::new(window, cfg)?))
+        Ok(Box::new(VoxApp::new(window, cfg, mario_units_per_meter)?))
     })?;
     Ok(())
 }

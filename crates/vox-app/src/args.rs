@@ -4,13 +4,14 @@
 
 use vox_core::WorldConfig;
 
-/// `voxelengine [--scale 0.1|1.0] [--seed N] [--extent X,Y,Z] [--help]`
+/// `voxelengine [--scale 0.1|1.0] [--mario-scale N] [--seed N] [--extent X,Y,Z] [--help]`
 pub fn usage() -> String {
-    "voxelengine [--scale 0.1|1.0] [--seed N] [--extent X,Y,Z] [--help]\n\n\
-     --scale   voxel edge length in meters (default 0.1)\n\
-     --seed    world generation seed (default 1337)\n\
-     --extent  world size in meters, comma-separated X,Y,Z (default 128,48,128)\n\
-     --help    show this message"
+    "voxelengine [--scale 0.1|1.0] [--mario-scale N] [--seed N] [--extent X,Y,Z] [--help]\n\n\
+     --scale       voxel edge length in meters (default 0.1)\n\
+     --mario-scale SM64 units per meter — higher = smaller Mario (default 60, Mario ~2.7m)\n\
+     --seed        world generation seed (default 1337)\n\
+     --extent      world size in meters, comma-separated X,Y,Z (default 128,48,128)\n\
+     --help        show this message"
         .to_string()
 }
 
@@ -19,13 +20,22 @@ pub fn usage() -> String {
 pub fn wants_help<'a>(args: impl Iterator<Item = &'a str>) -> bool {
     args.into_iter().any(|a| a == "--help" || a == "-h")
 }
+/// Parsed CLI configuration: world config plus Mario-specific options
+/// that don't belong in `WorldConfig`.
+pub struct CliConfig {
+    pub world: WorldConfig,
+    /// SM64 units per meter for Mario mode. Higher = smaller Mario.
+    /// Default 60 → Mario is ~2.67m tall (160 SM64 units / 60).
+    pub mario_units_per_meter: f32,
+}
 
 /// Parse CLI overrides on top of [`WorldConfig::default`]. Returns a
 /// human-readable message (not including usage text) on any failure —
 /// unknown flag, missing value, unparseable number, or a value that fails
 /// [`WorldConfig::validate`].
-pub fn parse<'a>(args: impl Iterator<Item = &'a str>) -> Result<WorldConfig, String> {
+pub fn parse<'a>(args: impl Iterator<Item = &'a str>) -> Result<CliConfig, String> {
     let mut cfg = WorldConfig::default();
+    let mut mario_units_per_meter: f32 = 60.0;
     let args: Vec<&str> = args.collect();
     let mut i = 0;
     while i < args.len() {
@@ -35,6 +45,17 @@ pub fn parse<'a>(args: impl Iterator<Item = &'a str>) -> Result<WorldConfig, Str
                 cfg.voxel_size_m = v
                     .parse()
                     .map_err(|_| format!("--scale: invalid number '{v}'"))?;
+            }
+            "--mario-scale" => {
+                let v = next_value(&args, &mut i, "--mario-scale")?;
+                mario_units_per_meter = v
+                    .parse()
+                    .map_err(|_| format!("--mario-scale: invalid number '{v}'"))?;
+                if mario_units_per_meter <= 0.0 || !mario_units_per_meter.is_finite() {
+                    return Err(format!(
+                        "--mario-scale: must be positive and finite, got {mario_units_per_meter}"
+                    ));
+                }
             }
             "--seed" => {
                 let v = next_value(&args, &mut i, "--seed")?;
@@ -62,7 +83,10 @@ pub fn parse<'a>(args: impl Iterator<Item = &'a str>) -> Result<WorldConfig, Str
         i += 1;
     }
     cfg.validate().map_err(|e| e.to_string())?;
-    Ok(cfg)
+    Ok(CliConfig {
+        world: cfg,
+        mario_units_per_meter,
+    })
 }
 
 fn next_value(args: &[&str], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -76,28 +100,41 @@ fn next_value(args: &[&str], i: &mut usize, flag: &str) -> Result<String, String
 mod tests {
     use super::*;
 
-    fn parse_str(s: &str) -> Result<WorldConfig, String> {
+    fn parse_str(s: &str) -> Result<CliConfig, String> {
         parse(s.split_whitespace())
     }
 
     #[test]
     fn no_args_yields_default() {
         let cfg = parse_str("").expect("empty args must parse");
-        assert_eq!(cfg.seed, WorldConfig::default().seed);
-        assert_eq!(cfg.voxel_size_m, WorldConfig::default().voxel_size_m);
+        assert_eq!(cfg.world.seed, WorldConfig::default().seed);
+        assert_eq!(cfg.world.voxel_size_m, WorldConfig::default().voxel_size_m);
+        assert_eq!(cfg.mario_units_per_meter, 60.0);
     }
 
     #[test]
     fn scale_and_seed_are_parsed() {
         let cfg = parse_str("--scale 1.0 --seed 42").expect("must parse");
-        assert_eq!(cfg.voxel_size_m, 1.0);
-        assert_eq!(cfg.seed, 42);
+        assert_eq!(cfg.world.voxel_size_m, 1.0);
+        assert_eq!(cfg.world.seed, 42);
+    }
+
+    #[test]
+    fn mario_scale_is_parsed() {
+        let cfg = parse_str("--mario-scale 90").expect("must parse");
+        assert_eq!(cfg.mario_units_per_meter, 90.0);
+    }
+
+    #[test]
+    fn mario_scale_rejects_zero() {
+        let err = parse_str("--mario-scale 0").expect_err("must reject zero");
+        assert!(err.contains("--mario-scale"));
     }
 
     #[test]
     fn extent_is_parsed() {
         let cfg = parse_str("--extent 64,32,64").expect("must parse");
-        assert_eq!(cfg.extent_m, [64.0, 32.0, 64.0]);
+        assert_eq!(cfg.world.extent_m, [64.0, 32.0, 64.0]);
     }
 
     #[test]

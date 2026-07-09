@@ -17,10 +17,11 @@ use vox_sm64::{MarioInputs, Sm64, SurfaceProvider};
 use vox_world::World;
 use winit::keyboard::KeyCode;
 
-/// Third-person camera distance behind Mario, in meters.
-const CAM_DISTANCE: f32 = 10.0;
-/// Third-person camera height above Mario, in meters.
-const CAM_HEIGHT: f32 = 5.0;
+/// Base third-person camera distance behind Mario, in meters.
+/// Scaled by Mario's world-space height relative to the original 30 units/m.
+const CAM_DISTANCE_BASE: f32 = 10.0;
+/// Base third-person camera height above Mario, in meters.
+const CAM_HEIGHT_BASE: f32 = 5.0;
 
 /// State for Mario mode. Created on first toggle, reused on subsequent
 /// toggles (so we don't reload the ROM every time).
@@ -45,6 +46,11 @@ pub struct MarioMode {
     last_pos_sm64: [f32; 3],
     /// Model scale: shrinks Mario's mesh around his center.
     model_scale: f32,
+    /// SM64 units per meter — controls Mario's size relative to the world.
+    /// Higher = smaller Mario (160 SM64 units / units_per_meter = height in meters).
+    /// Default 60 → Mario ~2.67m. Animations and physics are unaffected;
+    /// only the world-space scale changes.
+    units_per_meter: f32,
     /// Previous tick's Mario position (SM64 units) for position
     /// interpolation — translate the whole mesh by the delta,
     /// smooth 120 FPS movement without per-vertex interpolation.
@@ -67,6 +73,7 @@ impl MarioMode {
         gpu: &vox_render::Gpu,
         rom_path: &Path,
         mario_shader: &str,
+        units_per_meter: f32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         tracing::info!(rom = %rom_path.display(), "loading SM64 ROM");
 
@@ -90,12 +97,13 @@ impl MarioMode {
             sm64,
             mario: None,
             pipeline,
-            surfaces: SurfaceProvider::new(),
+            surfaces: SurfaceProvider::new(units_per_meter),
             prev_tick_pos: [0.0; 3],
             cam_yaw: 0.0,
             cam_pitch: 0.2,
             tick_accumulator: 0.0,
             model_scale: 1.0,
+            units_per_meter,
             prev_positions: vec![[0.0; 3]; vox_sm64::ffi::SM64_GEO_MAX_TRIANGLES as usize * 3],
             prev_vertex_count: 0,
             tick_rate: 30.0, // SM64 native rate
@@ -108,8 +116,8 @@ impl MarioMode {
     /// if the position isn't above a surface — but since we load
     /// surfaces around the spawn point first, this should succeed.
     pub fn spawn(&mut self, pos_m: Vec3, world: &World) -> Result<(), vox_sm64::Sm64Error> {
-        let pos_sm64 = pos_m * vox_sm64::SM64_UNITS_PER_METER;
-        let surfaces = vox_sm64::voxel_surfaces_near(world, pos_m, vox_sm64::SURFACE_RADIUS_M);
+        let pos_sm64 = pos_m * self.units_per_meter;
+        let surfaces = vox_sm64::voxel_surfaces_near(world, pos_m, vox_sm64::SURFACE_RADIUS_M, self.units_per_meter);
         tracing::info!(
             surfaces = surfaces.len(),
             pos_m = ?pos_m,
@@ -210,7 +218,7 @@ impl MarioMode {
             self.prev_tick_pos[1] + (self.last_pos_sm64[1] - self.prev_tick_pos[1]) * self.tick_alpha,
             self.prev_tick_pos[2] + (self.last_pos_sm64[2] - self.prev_tick_pos[2]) * self.tick_alpha,
         ];
-        let pos_m = Vec3::from(interp_sm64) / vox_sm64::SM64_UNITS_PER_METER;
+        let pos_m = Vec3::from(interp_sm64) / self.units_per_meter;
 
         // Stream collision surfaces if Mario moved enough
         if self.surfaces.update(pos_m, world) {
@@ -233,7 +241,11 @@ impl MarioMode {
     /// comfortable over-the-shoulder view.
     pub fn camera_pos(&self, mario_pos_m: Vec3) -> Vec3 {
         let dir = self.camera_look_dir();
-        mario_pos_m - dir * CAM_DISTANCE + Vec3::new(0.0, CAM_HEIGHT * 0.5, 0.0)
+        // Scale camera distance/height by Mario's world-space size.
+        // At 30 units/m (original), Mario is 5.3m and cam is 10m/5m.
+        // At 60 units/m, Mario is 2.67m and cam scales to 5m/2.5m.
+        let scale = 30.0 / self.units_per_meter;
+        mario_pos_m - dir * (CAM_DISTANCE_BASE * scale) + Vec3::new(0.0, CAM_HEIGHT_BASE * scale * 0.5, 0.0)
     }
 
     /// Camera look direction (from camera toward Mario). Matches the
@@ -298,7 +310,7 @@ impl MarioMode {
             view_proj,
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
-            fog: [fog_start, fog_end, 0.0, 0.0],
+            fog: [fog_start, fog_end, self.units_per_meter, 0.0],
         };
         self.pipeline.update_camera(queue, &cam);
 

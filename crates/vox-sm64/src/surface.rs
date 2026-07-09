@@ -27,7 +27,6 @@
 //! chunks (the bulk of any world) are skipped entirely.
 
 use crate::ffi::SM64Surface;
-use crate::meters_to_sm64;
 use glam::{IVec3, UVec3, Vec3};
 use vox_core::consts::CHUNK_SIZE;
 use vox_core::chunk_origin;
@@ -49,13 +48,15 @@ const RESURFACE_THRESHOLD_M: f32 = 4.0;
 pub struct SurfaceProvider {
     last_center: Vec3,
     surfaces: Vec<SM64Surface>,
+    units_per_meter: f32,
 }
 
 impl SurfaceProvider {
-    pub fn new() -> Self {
+    pub fn new(units_per_meter: f32) -> Self {
         Self {
             last_center: Vec3::splat(f32::MAX),
             surfaces: Vec::new(),
+            units_per_meter,
         }
     }
 
@@ -65,8 +66,7 @@ impl SurfaceProvider {
         {
             return false;
         }
-        self.last_center = mario_pos_m;
-        self.surfaces = voxel_surfaces_near(world, mario_pos_m, SURFACE_RADIUS_M);
+        self.surfaces = voxel_surfaces_near(world, mario_pos_m, SURFACE_RADIUS_M, self.units_per_meter);
         tracing::debug!(
             surfaces = self.surfaces.len(),
             pos = ?mario_pos_m,
@@ -80,21 +80,13 @@ impl SurfaceProvider {
     }
 }
 
-impl Default for SurfaceProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Generate SM64 collision surfaces for all exposed voxel faces within
 /// `radius_m` meters of `center_m`, using greedy face merging.
-///
-/// Vertices are in SM64 integer units (meters × [`crate::SM64_UNITS_PER_METER`]).
-pub fn voxel_surfaces_near(world: &World, center_m: Vec3, radius_m: f32) -> Vec<SM64Surface> {
+/// Vertices are in SM64 integer units (meters × `units_per_meter`).
+pub fn voxel_surfaces_near(world: &World, center_m: Vec3, radius_m: f32, units_per_meter: f32) -> Vec<SM64Surface> {
     let voxel_size = world.cfg.voxel_size_m;
     let chunk_size_m = CHUNK_SIZE as f32 * voxel_size;
-
-
     let mut surfaces = Vec::new();
 
     for (chunk_key, chunk) in world.chunks() {
@@ -115,7 +107,7 @@ pub fn voxel_surfaces_near(world: &World, center_m: Vec3, radius_m: f32) -> Vec<
         if chunk.solid_count() == 0 {
             continue;
         }
-        greedy_faces_for_chunk(world, chunk_key, chunk, voxel_size, &mut surfaces);
+        greedy_faces_for_chunk(world, chunk_key, chunk, voxel_size, &mut surfaces, units_per_meter);
     }
 
     surfaces
@@ -140,6 +132,7 @@ fn greedy_faces_for_chunk(
     chunk: &vox_world::Chunk,
     voxel_size: f32,
     surfaces: &mut Vec<SM64Surface>,
+    units_per_meter: f32,
 ) {
     let cs = CHUNK_SIZE as i32;
 
@@ -169,7 +162,7 @@ fn greedy_faces_for_chunk(
             }
 
             // Greedy merge the 2D grid into rectangles
-            merge_grid(grid, axis, sign, slice, chunk_key, voxel_size, surfaces);
+            merge_grid(grid, axis, sign, slice, chunk_key, voxel_size, surfaces, units_per_meter);
         }
     }
 }
@@ -231,6 +224,7 @@ fn merge_grid(
     chunk_key: IVec3,
     voxel_size: f32,
     surfaces: &mut Vec<SM64Surface>,
+    units_per_meter: f32,
 ) {
     let cs = CHUNK_SIZE as usize;
     // Visited marks cells already consumed by a merged rectangle
@@ -271,7 +265,7 @@ fn merge_grid(
 
             // Emit 2 triangles for this merged rectangle
             emit_merged_face(
-                axis, sign, slice, u, v, max_u, max_v, chunk_key, voxel_size, surfaces,
+                axis, sign, slice, u, v, max_u, max_v, chunk_key, voxel_size, surfaces, units_per_meter,
             );
         }
     }
@@ -293,6 +287,7 @@ fn emit_merged_face(
     chunk_key: IVec3,
     voxel_size: f32,
     surfaces: &mut Vec<SM64Surface>,
+    units_per_meter: f32,
 ) {
 
     // The face is at the boundary between slice and slice+sign.
@@ -313,7 +308,7 @@ fn emit_merged_face(
 
     // Convert to SM64 integer units
     let c = |p: Vec3| -> (i32, i32, i32) {
-        (meters_to_sm64(p.x), meters_to_sm64(p.y), meters_to_sm64(p.z))
+        ((p.x * units_per_meter) as i32, (p.y * units_per_meter) as i32, (p.z * units_per_meter) as i32)
     };
     let (ax, ay, az) = c(p0);
     let (bx, by, bz) = c(p1);
@@ -445,7 +440,7 @@ mod tests {
     #[test]
     fn single_voxel_produces_2_faces_4_triangles() {
         let world = test_world();
-        let surfaces = voxel_surfaces_near(&world, Vec3::new(5.5, 5.5, 5.5), 10.0);
+        let surfaces = voxel_surfaces_near(&world, Vec3::new(5.5, 5.5, 5.5), 10.0, 30.0);
         // Floor-only: top + bottom = 2 faces × 2 tris = 4
         assert_eq!(surfaces.len(), 4);
     }
@@ -462,7 +457,7 @@ mod tests {
                 world.set_voxel(IVec3::new(x, 5, z), Voxel(1));
             }
         }
-        let surfaces = voxel_surfaces_near(&world, Vec3::new(5.0, 5.5, 5.0), 10.0);
+        let surfaces = voxel_surfaces_near(&world, Vec3::new(5.0, 5.5, 5.0), 10.0, 30.0);
         // Floor-only: top 3×3 merged = 2 tris, bottom 3×3 merged = 2 tris = 4
         assert_eq!(surfaces.len(), 4);
     }
@@ -481,7 +476,7 @@ mod tests {
                 }
             }
         }
-        let surfaces = voxel_surfaces_near(&world, Vec3::new(5.0, 5.0, 5.0), 10.0);
+        let surfaces = voxel_surfaces_near(&world, Vec3::new(5.0, 5.0, 5.0), 10.0, 30.0);
         // Floor-only: top 3×3 = 2 tris, bottom 3×3 = 2 tris = 4 total
         assert_eq!(surfaces.len(), 4);
     }
@@ -493,14 +488,14 @@ mod tests {
             extent_m: [32.0, 32.0, 32.0],
             seed: 1,
         });
-        let surfaces = voxel_surfaces_near(&world, Vec3::new(16.0, 16.0, 16.0), 10.0);
+        let surfaces = voxel_surfaces_near(&world, Vec3::new(16.0, 16.0, 16.0), 10.0, 30.0);
         assert_eq!(surfaces.len(), 0);
     }
 
     #[test]
     fn surface_provider_skips_until_threshold() {
         let world = test_world();
-        let mut provider = SurfaceProvider::new();
+        let mut provider = SurfaceProvider::new(30.0);
         let pos = Vec3::new(5.5, 5.5, 5.5);
 
         assert!(provider.update(pos, &world));

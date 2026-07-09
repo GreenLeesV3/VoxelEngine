@@ -9,7 +9,7 @@ struct Camera {
     view_proj: mat4x4f,
     cam_pos: vec4f,
     sun_dir: vec4f,          // xyz = direction the sun shines toward (unit)
-    fog: vec4f,              // x = start (m), y = end (m), z = model_scale, w = unused
+    fog: vec4f,              // x = fog start (m), y = fog end (m), z = SM64 units per meter, w = unused
 };
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -39,35 +39,15 @@ const SUN_COLOR = vec3f(1.0, 0.95, 0.85);
 const SUN_STRENGTH = 0.45;
 const FOG_COLOR = vec3f(0.45, 0.66, 0.90);
 
-// SM64 units per meter (must match vox_sm64::SM64_UNITS_PER_METER)
-const SM64_SCALE = 30.0;
+// SM64 units per meter is passed via cam.fog.z (set by the CPU each frame).
+// Mario's vertex positions are in SM64 units; divide by this to get meters.
 
 @vertex
 fn vs_main(in: VIn) -> VOut {
     var out: VOut;
     // libsm64 outputs absolute positions in SM64 integer units.
-    // We need to: (1) convert world position to meters, (2) scale the
-    // model so Mario is a reasonable size relative to the voxel terrain.
-    //
-    // Mario's native model is ~160 SM64 units tall. At 30 units/meter
-    // that's 5.3m — too big. We use cam.fog.z as a model_scale uniform
-    // to shrink the model while keeping the world position correct.
-    //
-    // The trick: the vertex position is absolute (world + model offset).
-    // We extract the world position by rounding to the surface grid,
-    // then scale only the sub-voxel model offset. Simpler approach:
-    // just scale the entire position by model_scale/SM64_SCALE, which
-    // makes Mario smaller but also moves him closer to origin. Instead,
-    // we scale around Mario's position: world_pos = mario_world_pos +
-    // (vertex_pos - mario_world_pos) * model_scale.
-    //
-    // But we don't have mario_world_pos in the shader. Alternative:
-    // the CPU pre-scales the vertices before upload. The caller
-    // extracts Mario's center position and scales the offsets.
-    // For now, just divide by SM64_SCALE — Mario will be big but
-    // positioned correctly. The CPU-side fix in MarioPipeline::draw
-    // handles the model scaling.
-    let world_pos = in.position / SM64_SCALE;
+    // Convert to meters using the uniform scale (cam.fog.z).
+    let world_pos = in.position / cam.fog.z;
     out.clip = cam.view_proj * vec4f(world_pos, 1.0);
     out.color = in.color;
     out.world_normal = normalize(in.normal);
