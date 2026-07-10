@@ -9,7 +9,7 @@ use vox_physics::{Aabb, BodyId, PhysicsWorld};
 use vox_sim::FluidSim;
 use vox_world::{AIR, Voxel, World, raycast};
 
-/// The selectable hotbar tools. Slots 6-9 are reserved (not yet assigned to
+/// The selectable hotbar tools. Slots 7-9 are reserved (not yet assigned to
 /// a tool); selecting one of them leaves the previously active tool in
 /// place.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -29,15 +29,19 @@ pub enum Tool {
     /// Slot 5: place a sphere of water at the crosshair target using its own
     /// adjustable source radius.
     PlaceWater,
+    /// Slot 6: place a single ember block that ignites nearby flammable
+    /// materials and starts a fire.
+    Ember,
 }
 
 /// Hotbar key (1-9) to tool mapping. Slots past the array select nothing.
-pub const HOTBAR: [(u8, Tool); 5] = [
+pub const HOTBAR: [(u8, Tool); 6] = [
     (1, Tool::Dig),
     (2, Tool::ScalableDig),
     (3, Tool::Bomb),
     (4, Tool::DeathLaser),
     (5, Tool::PlaceWater),
+    (6, Tool::Ember),
 ];
 
 /// Radius bounds for [`Tool::ScalableDig`] and [`Tool::Bomb`], adjustable
@@ -79,12 +83,6 @@ pub struct CarveOutcome {
     /// nothing was hit) -- lets feedback particles take on the color of the
     /// material actually being destroyed.
     pub impact_material: Voxel,
-    /// Voxel diff for undo: (position, old_voxel) pairs of every world voxel
-    /// that was changed by this operation. Empty for body-only carves.
-    /// NOTE: only safe to undo when `spawned` is empty — destruction tools
-    /// that spawn debris bodies leave holes from detach_unsupported and
-    /// flying bodies that aren't captured in this diff.
-    pub voxel_diff: Vec<(IVec3, Voxel)>,
 }
 
 /// What a scene raycast hit: a specific static-world voxel, or an existing
@@ -168,37 +166,6 @@ fn body_outcome(phys: &PhysicsWorld, id: BodyId, spawned: Vec<BodyId>) -> CarveO
         removed: vec![id],
         ..CarveOutcome::default()
     }
-}
-
-/// Fill a voxel sphere of `radius_vox` centered at `center` with `material`,
-/// recording the (pos, old_voxel) diff of every voxel that actually changed
-/// (same-value writes are no-ops in `World::set_voxel` and skipped here).
-/// Voxels outside the world bounds are silently skipped by `set_voxel`.
-/// Used by the editor brush — a simple, safe, fully-undoable world edit with
-/// no physics body carving or debris spawning.
-fn sphere_edit(world: &mut World, center: IVec3, radius_vox: i32, material: Voxel) -> Vec<(IVec3, Voxel)> {
-    let mut diff = Vec::new();
-    let r2 = (radius_vox as f32).powi(2);
-    for dz in -radius_vox..=radius_vox {
-        for dy in -radius_vox..=radius_vox {
-            for dx in -radius_vox..=radius_vox {
-                if (dx * dx + dy * dy + dz * dz) as f32 > r2 {
-                    continue;
-                }
-                let pos = center + IVec3::new(dx, dy, dz);
-                if !world.in_bounds(pos) {
-                    continue;
-                }
-                let old = world.get_voxel(pos);
-                if old == material {
-                    continue;
-                }
-                world.set_voxel(pos, material);
-                diff.push((pos, old));
-            }
-        }
-    }
-    diff
 }
 
 /// Carve a sphere out of body `id` and report the outcome (see
@@ -338,11 +305,9 @@ impl Tools {
         let material = hit_material(world, phys, &hit);
         let mut outcome = match hit {
             SceneHit::World(voxel) => {
-                let old_voxel = world.get_voxel(voxel);
                 world.set_voxel(voxel, AIR);
                 CarveOutcome {
                     spawned: vox_physics::detach_unsupported(world, phys, registry, &[voxel]),
-                    voxel_diff: vec![(voxel, old_voxel)],
                     ..CarveOutcome::default()
                 }
             }
@@ -382,8 +347,8 @@ impl Tools {
         };
         let material = hit_material(world, phys, &hit);
         let mut outcome = match hit {
-            SceneHit::World(_) => {
-                let result = vox_physics::blast(
+            SceneHit::World(_) => CarveOutcome {
+                spawned: vox_physics::blast(
                     world,
                     phys,
                     registry,
@@ -391,13 +356,10 @@ impl Tools {
                     self.radius_m,
                     power,
                     seed,
-                );
-                CarveOutcome {
-                    spawned: result.spawned,
-                    voxel_diff: result.removed,
-                    ..CarveOutcome::default()
-                }
-            }
+                )
+                .spawned,
+                ..CarveOutcome::default()
+            },
             SceneHit::Body(id, _) => {
                 let spawned = vox_physics::carve_body_explosion_at(
                     phys,
@@ -435,14 +397,14 @@ impl Tools {
         let material = hit_material(world, phys, &hit);
         let mut outcome = match hit {
             SceneHit::World(_) => {
-                let carve = vox_physics::carve_sphere(world, hit_point_m, self.radius_m);
+                let mut carve = vox_physics::carve_sphere(world, hit_point_m, self.radius_m);
                 let removed: Vec<IVec3> = carve.removed.iter().map(|&(v, _)| v).collect();
                 let ids = vox_physics::detach_unsupported(world, phys, registry, &removed);
                 let s = world.cfg.voxel_size_m;
                 phys.wake_region(carve.region.0.as_vec3() * s, carve.region.1.as_vec3() * s);
+                carve.spawned = ids;
                 CarveOutcome {
-                    spawned: ids,
-                    voxel_diff: carve.removed,
+                    spawned: carve.spawned,
                     ..CarveOutcome::default()
                 }
             }
@@ -474,10 +436,9 @@ impl Tools {
             Some((hit, point)) => (Some(*point), hit_material(world, phys, hit)),
             None => (None, AIR),
         };
-        let laser_result = vox_physics::laser(world, phys, registry, eye_m, end_m, DEATH_LASER_RADIUS_M);
         let mut outcome = CarveOutcome {
-            spawned: laser_result.spawned,
-            voxel_diff: laser_result.removed,
+            spawned: vox_physics::laser(world, phys, registry, eye_m, end_m, DEATH_LASER_RADIUS_M)
+                .spawned,
             impact_m,
             impact_material,
             ..CarveOutcome::default()
@@ -498,14 +459,13 @@ impl Tools {
     }
 
     /// Place the selected material against the hit face, unless it would
-    /// intersect the player. Returns the (pos, old_voxel) diff if a voxel
-    /// was placed, for undo support.
-    pub fn place_voxel(&self, world: &mut World, eye_m: Vec3, look: Vec3, player: Aabb) -> Option<(IVec3, Voxel)> {
+    /// intersect the player.
+    pub fn place_voxel(&self, world: &mut World, eye_m: Vec3, look: Vec3, player: Aabb) {
         let Some(hit) = raycast(world, eye_m, look, REACH) else {
-            return None;
+            return;
         };
         let Some(face) = hit.face else {
-            return None; // Eye inside a solid voxel; nowhere to place.
+            return; // Eye inside a solid voxel; nowhere to place.
         };
         let target = hit.voxel + face;
         let s = world.cfg.voxel_size_m;
@@ -515,11 +475,7 @@ impl Tools {
             && (c.y + half > player.min.y && c.y - half < player.max.y)
             && (c.z + half > player.min.z && c.z - half < player.max.z);
         if !overlaps {
-            let old = world.get_voxel(target);
             world.set_voxel(target, self.material());
-            Some((target, old))
-        } else {
-            None
         }
     }
 
@@ -555,39 +511,41 @@ impl Tools {
         fluid.place_blob(world, center_vox, radius_vox, Voxel(water_id.0));
     }
 
-    /// Editor paint brush: fill a sphere of `radius_m` centered at the
-    /// crosshair target with `material`, returning the (pos, old_voxel) diff
-    /// of every changed voxel for undo. Only touches the static world (no
-    /// body carving, no debris) — the editor is a safe, undoable overlay on
-    /// the existing FPS controls.
-    pub fn editor_brush(
+    /// Place Ember: put a single ember block at the crosshair target.
+    /// Like `place_voxel` but always places ember, regardless of the
+    /// selected build material. The fire sim will pick it up and ignite
+    /// nearby flammable materials.
+    pub fn place_ember(
         &self,
         world: &mut World,
+        registry: &MaterialRegistry,
         eye_m: Vec3,
         look: Vec3,
-        radius_m: f32,
-        material: Voxel,
-    ) -> Vec<(IVec3, Voxel)> {
+        player: Aabb,
+    ) {
         let dir = look.normalize_or_zero();
         if dir == Vec3::ZERO {
-            return Vec::new();
+            return;
         }
         let Some(hit) = raycast(world, eye_m, dir, REACH) else {
-            return Vec::new();
+            return;
         };
+        let Some(ember_id) = registry.id_by_name("ember") else {
+            return; // asset set doesn't define ember; nothing to place
+        };
+        let Some(face) = hit.face else {
+            return;
+        };
+        let target = hit.voxel + face;
         let s = world.cfg.voxel_size_m;
-        // Erase centers on the solid voxel the crosshair actually hit;
-        // paint centers on the empty face in front of it (same as
-        // place_voxel), so building out from a surface lands on the surface,
-        // not buried inside it. When the eye starts inside solid (no face),
-        // both fall back to the hit voxel itself.
-        let center_vox = if material == AIR {
-            hit.voxel
-        } else {
-            hit.voxel + hit.face.unwrap_or(IVec3::ZERO)
-        };
-        let radius_vox = (radius_m / s).round() as i32;
-        sphere_edit(world, center_vox, radius_vox, material)
+        let c = voxel_center_m(target, s);
+        let half = s * 0.5;
+        let overlaps = (c.x + half > player.min.x && c.x - half < player.max.x)
+            && (c.y + half > player.min.y && c.y - half < player.max.y)
+            && (c.z + half > player.min.z && c.z - half < player.max.z);
+        if !overlaps {
+            world.set_voxel(target, Voxel(ember_id.0));
+        }
     }
 }
 
@@ -622,6 +580,13 @@ mod tests {
 
         assert_eq!(tools.select_hotbar_slot(5), Some(Tool::PlaceWater));
         assert_eq!(tools.tool, Tool::PlaceWater);
+    }
+
+    #[test]
+    fn hotbar_slot_six_selects_ember() {
+        let mut tools = Tools::new(&registry());
+        assert_eq!(tools.select_hotbar_slot(6), Some(Tool::Ember));
+        assert_eq!(tools.tool, Tool::Ember);
     }
 
     #[test]

@@ -6,20 +6,15 @@
 pub mod camera;
 pub mod frustum;
 pub mod gpu;
-pub mod mario_pipeline;
 pub mod particles;
-pub mod post_pipeline;
-pub mod grass_pipeline;
+pub mod postprocess;
 pub mod voxel_pipeline;
 
 pub use camera::Camera;
 pub use frustum::Frustum;
-pub use gpu::{DEPTH_FORMAT, Frame, Gpu, HDR_FORMAT};
-pub use mario_pipeline::{MarioCameraUniform, MarioPipeline, MarioVertex};
+pub use gpu::{DEPTH_FORMAT, Frame, Gpu};
 pub use particles::{MAX_PARTICLES, ParticleInstance, ParticlePipeline};
-pub use grass_pipeline::{GrassPipeline, GrassVertex, MAX_GRASS_BLADES};
-pub use post_pipeline::PostPipeline;
-pub use voxel_pipeline::{BodyMeshKey, DrawStats, ShadowPipeline, VoxelPipeline};
+pub use voxel_pipeline::{BodyMeshKey, DrawStats, VoxelPipeline};
 
 /// Errors from GPU initialization and per-frame surface operations.
 #[derive(Debug, thiserror::Error)]

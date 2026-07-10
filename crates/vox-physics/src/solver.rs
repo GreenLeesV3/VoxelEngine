@@ -12,7 +12,7 @@ use vox_core::consts::{
     CLUTTER_LIFETIME_MAX_S, CLUTTER_LIFETIME_MIN_S, CLUTTER_MAX_VOXELS, CONTACT_SLOP, GRAVITY,
     SLEEP_FRAMES, SOLVER_ITERS, SUBSTEPS,
 };
-use vox_world::{SolidLookup, World};
+use vox_world::{Voxel, World};
 
 use crate::body::{Body, BodyId};
 use crate::broadphase::Broadphase;
@@ -106,6 +106,12 @@ const MAX_ANGULAR_SPEED_RAD_S: f32 = 20.0;
 /// purpose: a blast-kicked fragment (`BLAST_SPIN_MAX` = 3 rad/s) still has
 /// most of its tumble after a full second of flight.
 const ANGULAR_DAMPING_AIR: f32 = 0.3;
+/// Water density in kg/m³ for buoyancy calculations. Matches the water
+/// material's density in core.toml.
+const WATER_DENSITY: f32 = 1000.0;
+/// Per-second velocity/angular damping while submerged in water — higher
+/// than air drag to make water feel viscous.
+const WATER_DRAG: f32 = 3.0;
 /// Extra rolling-resistance drag, per second, for a *small* body that had
 /// at least one contact this substep. Small debris has a disproportionately
 /// tiny moment of inertia and only a couple of contact points, so contact
@@ -138,33 +144,31 @@ pub struct PhysicsWorld {
     generations: Vec<u32>,
     free: Vec<usize>,
     warm: FxHashMap<ContactKey, (f32, f32, f32)>,
-    /// Reused scratch state for `candidate_pairs`, across every call in a
-    /// step (see `Broadphase`'s own doc comment for why this is persistent
-    /// rather than built fresh each time).
     broadphase: Broadphase,
-    /// Per-slot "had a contact this substep" scratch, reused across substeps
-    /// (same allocation-reuse reasoning as `broadphase`). Drives
-    /// [`ANGULAR_DAMPING_ROLLING`].
     contact_flags: Vec<bool>,
-    /// Per-slot accumulated positional correction scratch for the
-    /// split-impulse pass (same allocation-reuse reasoning as `broadphase`).
     pos_corr: Vec<Vec3>,
-    /// Live-tunable solver parameters (friction, contact bias, sleep
-    /// thresholds); public so the debug overlay can bind sliders directly.
     pub tunables: Tunables,
-    /// xorshift64* state driving the 35-60s jitter on clutter lifetimes (see
-    /// `spawn`). Not used for anything gameplay-visible or requiring
-    /// reproducibility across runs, so a fixed non-zero seed (xorshift
-    /// stalls forever on zero) is all this needs.
     lifetime_rng: u64,
+    /// The voxel material id treated as water for buoyancy. `None` (default)
+    /// disables buoyancy — bodies fall through water. Set by the app at
+    /// construction from the registry's water material, same pattern as
+    /// `FluidSim::water`.
+    water_voxel: Option<Voxel>,
 }
 
 impl PhysicsWorld {
     pub fn new() -> Self {
         Self {
             lifetime_rng: 0x2545_F491_4F6C_DD1D,
+            water_voxel: None,
             ..Self::default()
         }
+    }
+
+    /// Set the water material id for buoyancy. Called once by the app at
+    /// construction. `None` (the default) disables buoyancy.
+    pub fn set_water_voxel(&mut self, v: Voxel) {
+        self.water_voxel = Some(v);
     }
 
     /// xorshift64* -- deterministic, dependency-free spawn jitter (same
@@ -247,7 +251,7 @@ impl PhysicsWorld {
         }
     }
 
-    /// Mutable counterpart to [`get`](Self::get).
+    /// Mutable reference to a live body, if it exists.
     pub fn get_mut(&mut self, id: BodyId) -> Option<&mut Body> {
         let slot = id.slot as usize;
         if self.generations.get(slot) == Some(&id.generation) {
@@ -344,22 +348,9 @@ impl PhysicsWorld {
         // Peak impulse (point, and push direction) per body slot, across
         // every substep.
         let mut peaks: FxHashMap<usize, (f32, Vec3, Vec3)> = FxHashMap::default();
-        // Reused scratch buffers for the contact solve, hoisted out of
-        // `substep` so a full step allocates them once instead of once per
-        // substep (Contact is ~100+ bytes; a debris pile easily grows this
-        // into thousands of entries). `.clear()` below retains capacity.
-        let mut contacts: Vec<Contact> = Vec::new();
-        let mut staged: Vec<Contact> = Vec::new();
         let h = dt / SUBSTEPS as f32;
-        // Build the broadphase candidate pairs once for the whole step and
-        // reuse them for every substep's narrowphase and the end-of-step
-        // island grouping. The grid is coarse (2 m cells) and a body moves
-        // at most `MAX_SPEED * h` (~1 m) per substep, so the pair set cannot
-        // change between substeps -- one build instead of three. See
-        // `Broadphase`'s doc comment for the capacity-reuse details.
-        self.broadphase.build(&self.slots);
         for _ in 0..SUBSTEPS {
-            self.substep(world, h, &mut peaks, &mut contacts, &mut staged);
+            self.substep(world, h, &mut peaks);
         }
         let impacts = peaks
             .into_iter()
@@ -442,7 +433,7 @@ impl PhysicsWorld {
             }
             parent[x]
         }
-        for &(a, b) in self.broadphase.pairs() {
+        for &(a, b) in self.broadphase.candidate_pairs(&self.slots) {
             let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
             if ra != rb {
                 parent[ra] = rb;
@@ -458,7 +449,7 @@ impl PhysicsWorld {
         groups.into_values().collect()
     }
 
-    fn substep(&mut self, world: &World, h: f32, peaks: &mut FxHashMap<usize, (f32, Vec3, Vec3)>, contacts: &mut Vec<Contact>, staged: &mut Vec<Contact>) {
+    fn substep(&mut self, world: &World, h: f32, peaks: &mut FxHashMap<usize, (f32, Vec3, Vec3)>) {
         // Refresh every live body's cached world inverse inertia -- rotation
         // only changes at the end of a substep, so this is constant across
         // the whole contact solve below (see `Body::inv_iw`'s docs).
@@ -468,21 +459,46 @@ impl PhysicsWorld {
             body.inv_iw = body.inv_inertia_world();
         }
 
-        // Integrate velocities and collect contacts. `contacts` is hoisted
-        // to `step` and reused across substeps (`.clear()` retains capacity).
-        // One chunk-caching lookup per substep, reused across every awake
-        // body: consecutive awake bodies are often spatially coherent (a
-        // stack, a chain of debris), so carrying the cached chunk from one
-        // body's last query into the next turns most of those bodies' first
-        // solidity probes into array bounds checks instead of hash lookups.
-        let mut lookup = SolidLookup::new(world);
-        contacts.clear();
+        // Integrate velocities and collect contacts.
+        let mut contacts: Vec<Contact> = Vec::new();
         for (slot, entry) in self.slots.iter_mut().enumerate() {
             let Some(body) = entry else { continue };
             if body.sleep.asleep {
                 continue;
             }
             body.vel.y -= GRAVITY * h;
+            // Buoyancy: if the body's bottom is submerged in a non-solid,
+            // non-air voxel (water), apply an upward force. Lightweight:
+            // samples the AABB bottom center, not per-voxel.
+            let s = 2.0 * body.half_voxel;
+            let bottom = Vec3::new(
+                (body.aabb_min.x + body.aabb_max.x) * 0.5,
+                body.aabb_min.y,
+                (body.aabb_min.z + body.aabb_max.z) * 0.5,
+            );
+            let bottom_vox = vox_core::voxel_at(bottom, s);
+            if world.in_bounds(bottom_vox) {
+                if let Some(wv) = self.water_voxel {
+                    if world.get_voxel(bottom_vox) == wv {
+                        let body_height = (body.aabb_max.y - body.aabb_min.y).max(1e-6);
+                        let submerge_depth = body_height.min(
+                            body.aabb_max.y - bottom.y + s
+                        );
+                        let fraction = (submerge_depth / body_height).clamp(0.0, 1.0);
+                        let dims = body.grid.dims;
+                        let volume = (dims.x * dims.y * dims.z) as f32 * s * s * s;
+                        let mass = body.mass();
+                        let avg_density = mass / volume.max(1e-6);
+                        let buoy_accel = (WATER_DENSITY / avg_density - 1.0) * GRAVITY * fraction;
+                        if buoy_accel > 0.0 {
+                            body.vel.y += buoy_accel * h;
+                        }
+                        let drag = WATER_DRAG * fraction;
+                        body.vel /= 1.0 + drag * h;
+                        body.omega /= 1.0 + drag * h;
+                    }
+                }
+            }
             if body.vel.length() > MAX_SPEED {
                 body.vel = body.vel.normalize() * MAX_SPEED;
             }
@@ -490,15 +506,15 @@ impl PhysicsWorld {
                 body.omega = body.omega.normalize() * MAX_ANGULAR_SPEED_RAD_S;
             }
             debug_assert!(body.vel.is_finite() && body.pos.is_finite());
-            world_contacts(body, slot, &mut *contacts, &mut lookup);
+            world_contacts(body, slot, world, &mut contacts);
         }
 
         // Body-body narrowphase over broadphase candidates. One staging
         // buffer reused across every pair (`Vec::append` drains it but
         // keeps its capacity) instead of a fresh allocation per touching
-        // pair per substep. `staged` is also hoisted to `step` so it
-        // persists across substeps with the same capacity-reuse reasoning.
-        for &(a, b) in self.broadphase.pairs() {
+        // pair per substep.
+        let mut staged: Vec<Contact> = Vec::new();
+        for &(a, b) in self.broadphase.candidate_pairs(&self.slots) {
             let (asleep_a, asleep_b) = {
                 let ba = self.slots[a].as_ref().expect("pair body alive");
                 let bb = self.slots[b].as_ref().expect("pair body alive");
@@ -528,7 +544,7 @@ impl PhysicsWorld {
             let result = {
                 let sb = self.slots[sampler].as_ref().expect("alive");
                 let tb = self.slots[target].as_ref().expect("alive");
-                pair_contacts(sb, sampler, tb, target, target_asleep, &mut *staged)
+                pair_contacts(sb, sampler, tb, target, target_asleep, &mut staged)
             };
             if result.contact_count == 0 {
                 continue;
@@ -541,13 +557,13 @@ impl PhysicsWorld {
                 staged.clear();
                 let sb_ref = self.slots[sampler].as_ref().expect("alive");
                 let tb_ref = self.slots[target].as_ref().expect("alive");
-                pair_contacts(sb_ref, sampler, tb_ref, target, false, &mut *staged);
+                pair_contacts(sb_ref, sampler, tb_ref, target, false, &mut staged);
             }
-            contacts.append(&mut *staged);
+            contacts.append(&mut staged);
         }
 
         // Warm start from the previous substep's accumulated impulses.
-        for c in &mut *contacts {
+        for c in &mut contacts {
             if let Some(&(n0, t10, t20)) = self.warm.get(&c.key) {
                 c.acc_n = n0;
                 c.acc_t1 = t10;
@@ -573,7 +589,7 @@ impl PhysicsWorld {
         // recovered *positionally* (split impulse, below), which by
         // construction cannot add kinetic energy to anything.
         for _ in 0..SOLVER_ITERS {
-            for c in &mut *contacts {
+            for c in &mut contacts {
                 let vn = Self::relative_velocity(&self.slots, c).dot(c.normal);
                 let lambda = -vn / c.kn;
                 let new_acc = (c.acc_n + lambda).max(0.0);
@@ -599,7 +615,7 @@ impl PhysicsWorld {
         // material-based impact fracture (see `ImpactEvent`). Positions
         // here are pre-integration, matching the frame `c.r_arm`/`r_arm_b`
         // were computed in when this substep's contacts were generated.
-        for c in &*contacts {
+        for c in &contacts {
             if c.acc_n <= 0.0 || c.approach_speed < MIN_IMPACT_APPROACH_SPEED_M_S {
                 continue;
             }
@@ -628,7 +644,7 @@ impl PhysicsWorld {
         // resistance below.
         self.contact_flags.clear();
         self.contact_flags.resize(self.slots.len(), false);
-        for c in &*contacts {
+        for c in &contacts {
             self.contact_flags[c.body] = true;
             if let Some(b) = c.body_b {
                 self.contact_flags[b] = true;
@@ -683,7 +699,7 @@ impl PhysicsWorld {
         self.pos_corr.clear();
         self.pos_corr.resize(self.slots.len(), Vec3::ZERO);
         for _ in 0..POSITION_ITERS {
-            for c in &*contacts {
+            for c in &contacts {
                 let corr_b = c.body_b.map_or(Vec3::ZERO, |b| self.pos_corr[b]);
                 let already = (self.pos_corr[c.body] - corr_b).dot(c.normal);
                 let remaining = (c.depth - CONTACT_SLOP) - already;
@@ -717,7 +733,7 @@ impl PhysicsWorld {
 
         // Persist accumulated impulses for the next substep's warm start.
         self.warm.clear();
-        for c in &*contacts {
+        for c in &contacts {
             self.warm.insert(c.key, (c.acc_n, c.acc_t1, c.acc_t2));
         }
     }

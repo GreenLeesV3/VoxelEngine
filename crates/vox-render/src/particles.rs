@@ -15,9 +15,10 @@ use wgpu::util::DeviceExt;
 use crate::gpu::{DEPTH_FORMAT, Gpu};
 
 /// Hard cap on live particles, mirrored by the app-side simulation. Sized
-/// so even a low-end GPU shrugs at the worst case: 4096 quads is ~25k
-/// vertices of trivially cheap fragment work.
-pub const MAX_PARTICLES: usize = 4096;
+/// for rich smoke that fills rooms: 16384 quads is ~98k vertices of trivially
+/// cheap fragment work, well within any modern GPU's budget. The app-side
+/// spatial hash and world-collision checks stay cheap at this count.
+pub const MAX_PARTICLES: usize = 16384;
 
 /// One particle, as the GPU sees it. The app's simulation state (velocity,
 /// age, ...) never crosses the boundary; only where/how-big/what-color.
@@ -119,7 +120,7 @@ impl ParticlePipeline {
                 entry_point: "fs",
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
+                    format: crate::postprocess::COLOR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

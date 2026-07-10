@@ -1,20 +1,33 @@
 //! CPU particle simulation: dust, sparks, and smoke for destruction
-//! feedback. Deliberately simple -- position/velocity integration, gravity,
-//! drag, and an age-driven fade -- because a few thousand of these are
-//! visual seasoning, not gameplay state: nothing collides with them and
-//! nothing reads them back.
+//! feedback. Particles collide with the voxel world (wall deflection,
+//! ceiling stop, floor settle, enclosure-aware drag) and repel each other
+//! via a per-frame spatial hash -- the Teardown approach to smoke that
+//! fills rooms instead of drifting through walls. Still visual-only: no
+//! gameplay state reads them and nothing reads them back.
 //!
 //! The GPU side (`vox_render::ParticlePipeline`) only ever sees the flat
 //! [`ParticleInstance`] list produced by [`ParticleSystem::instances`].
 
-use glam::Vec3;
+use glam::{IVec3, Vec3};
+use vox_core::voxel_at;
 use vox_render::{MAX_PARTICLES, ParticleInstance};
+use vox_world::World;
 
 /// Fraction of world gravity particles feel -- dust and smoke are light and
 /// drag-dominated, so full gravity reads as "gravel", not "dust".
 const GRAVITY_FACTOR: f32 = 0.35;
-/// Per-second velocity damping (air drag).
+/// Per-second velocity damping (air drag) in open air.
 const DRAG: f32 = 1.6;
+/// Drag multiplier when a particle is enclosed (4+ solid neighbors).
+const ENCLOSURE_DRAG_MULT: f32 = 2.5;
+/// Repulsion strength between nearby particles (m/s²).
+const REPEL_STRENGTH: f32 = 3.0;
+/// Minimum distance squared for repulsion (prevents singularity).
+const REPEL_MIN_DIST2: f32 = 0.01;
+/// Spatial hash cell size in meters (~max smoke particle diameter).
+const HASH_CELL_M: f32 = 0.3;
+/// Velocity retention after hitting a floor (friction).
+const FLOOR_FRICTION: f32 = 0.5;
 
 /// One simulated particle.
 #[derive(Copy, Clone, Debug)]
@@ -120,19 +133,76 @@ impl ParticleSystem {
         }
     }
 
-    /// Advance every particle by `dt` seconds and drop the expired.
-    pub fn update(&mut self, dt: f32) {
-        for p in &mut self.particles {
+    /// Advance every particle by `dt` seconds, colliding with the voxel
+    /// world and repelling nearby particles, then drop the expired.
+    /// `voxel_size_m` converts world-space positions to voxel coordinates
+    /// for `world.solid()` lookups.
+    pub fn update(&mut self, dt: f32, world: &World, voxel_size_m: f32) {
+        // --- Spatial hash for inter-particle repulsion ---
+        let hash = SpatialHash::build(&self.particles);
+
+        for i in 0..self.particles.len() {
+            // Compute repulsion BEFORE the mutable borrow (it needs &self.particles).
+            let repel = hash.repulsion(i, &self.particles);
+            let p = &mut self.particles[i];
             p.age += dt;
+
+            // Buoyancy / gravity.
             if p.buoyant {
-                // Smoke: rises gently, swells as it ages.
-                p.vel.y += 1.2 * dt;
-                p.size += 0.35 * p.size * dt;
+                p.vel.y += 0.6 * dt; // slower rise than before
+                p.size += 0.15 * p.size * dt; // slower swell
             } else {
                 p.vel.y -= vox_core::consts::GRAVITY * GRAVITY_FACTOR * dt;
             }
-            p.vel /= 1.0 + DRAG * dt;
+
+            // Inter-particle repulsion: push away from nearby particles.
+            p.vel += repel * dt;
+
+            // Enclosure-aware drag: sample 6 neighbors, more solids = more drag.
+            let solid_count = count_solid_neighbors(world, p.pos, voxel_size_m);
+            let drag = if solid_count >= 4 { DRAG * ENCLOSURE_DRAG_MULT } else { DRAG };
+            p.vel /= 1.0 + drag * dt;
+
+            // World collision: check the proposed next position component-wise
+            // and deflect along walls instead of passing through.
+            let next = p.pos + p.vel * dt;
+
+            // X axis: if blocked, zero X velocity (slide along wall).
+            let x_probe = voxel_at(Vec3::new(next.x, p.pos.y, p.pos.z), voxel_size_m);
+            if world.in_bounds(x_probe) && world.solid(x_probe) {
+                p.vel.x = 0.0;
+            }
+            // Z axis: same.
+            let z_probe = voxel_at(Vec3::new(p.pos.x, p.pos.y, next.z), voxel_size_m);
+            if world.in_bounds(z_probe) && world.solid(z_probe) {
+                p.vel.z = 0.0;
+            }
+            // Y axis: ceiling stop (buoyant) or floor settle (non-buoyant).
+            let y_probe = voxel_at(Vec3::new(p.pos.x, next.y, p.pos.z), voxel_size_m);
+            if world.in_bounds(y_probe) && world.solid(y_probe) {
+                if p.buoyant && p.vel.y > 0.0 {
+                    // Hit a ceiling: stop rising, spread sideways.
+                    p.vel.y = 0.0;
+                    p.vel.x += (hash.repulsion_seed(i) as f32 % 2.0 - 1.0) * 0.5;
+                    p.vel.z += (hash.repulsion_seed(i).wrapping_shr(8) as f32 % 2.0 - 1.0) * 0.5;
+                } else if !p.buoyant && p.vel.y < 0.0 {
+                    // Hit the floor: lose vertical velocity, friction on horizontal.
+                    p.vel.y = 0.0;
+                    p.vel.x *= FLOOR_FRICTION;
+                    p.vel.z *= FLOOR_FRICTION;
+                } else {
+                    p.vel.y = 0.0;
+                }
+            }
+
+            // Integrate position with the corrected velocity.
             p.pos += p.vel * dt;
+
+            // Keep the particle in bounds (don't let it escape the world).
+            let (bmin, bmax) = world.bounds_voxels();
+            let min_m = bmin.as_vec3() * voxel_size_m;
+            let max_m = bmax.as_vec3() * voxel_size_m;
+            p.pos = p.pos.clamp(min_m + voxel_size_m * 0.5, max_m - voxel_size_m * 0.5);
         }
         self.particles.retain(|p| p.age < p.life);
     }
@@ -159,10 +229,131 @@ impl ParticleSystem {
     }
 }
 
+// --- Spatial hash for inter-particle repulsion ---
+
+/// Uniform-grid spatial hash for O(1) neighbor queries. Cell size is
+/// `HASH_CELL_M` in world meters. Rebuilt per frame from the live particle
+/// list.
+struct SpatialHash {
+    /// Grid cell → particle indices in that cell.
+    cells: vox_core::FxHashMap<IVec3, Vec<usize>>,
+}
+
+impl SpatialHash {
+    fn build(particles: &[Particle]) -> Self {
+        let mut cells: vox_core::FxHashMap<IVec3, Vec<usize>> = vox_core::FxHashMap::default();
+        for (i, p) in particles.iter().enumerate() {
+            let cell = (p.pos / HASH_CELL_M).floor().as_ivec3();
+            cells.entry(cell).or_default().push(i);
+        }
+        Self { cells }
+    }
+
+    /// Repulsion force on particle `i` from its neighbors.
+    fn repulsion(&self, i: usize, particles: &[Particle]) -> Vec3 {
+        let p = &particles[i];
+        let cell = (p.pos / HASH_CELL_M).floor().as_ivec3();
+        let mut force = Vec3::ZERO;
+        // Check the 3x3x3 block of cells around the particle's cell.
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let key = cell + IVec3::new(dx, dy, dz);
+                    if let Some(indices) = self.cells.get(&key) {
+                        for &j in indices {
+                            if j == i {
+                                continue;
+                            }
+                            let diff = p.pos - particles[j].pos;
+                            let dist2 = diff.length_squared();
+                            if dist2 > HASH_CELL_M * HASH_CELL_M * 4.0 {
+                                continue;
+                            }
+                            if dist2 < 1e-8 {
+                                // Co-located: deterministic push so they separate.
+                                force += Vec3::new(
+                                    (j as f32 * 0.137).fract() - 0.5,
+                                    (i as f32 * 0.379).fract() - 0.5,
+                                    ((j ^ i) as f32 * 0.617).fract() - 0.5,
+                                ) * REPEL_STRENGTH;
+                            } else {
+                                let dist = dist2.sqrt();
+                                force += diff / dist / dist2.max(REPEL_MIN_DIST2) * REPEL_STRENGTH;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        force
+    }
+
+    /// A per-particle seed for randomized ceiling-spread direction (uses
+    /// the particle index as a deterministic but varied source).
+    fn repulsion_seed(&self, i: usize) -> u64 {
+        (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    }
+}
+
+/// Count how many of the 6 face-neighbors of the voxel at `pos_m` are solid.
+/// Used for enclosure-aware drag: more solid neighbors = more drag = smoke
+/// lingers in rooms instead of streaming through.
+fn count_solid_neighbors(world: &World, pos_m: Vec3, voxel_size_m: f32) -> u32 {
+    let v = voxel_at(pos_m, voxel_size_m);
+    let mut count = 0;
+    for d in [
+        IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z,
+    ] {
+        let n = v + d;
+        if world.in_bounds(n) && world.solid(n) {
+            count += 1;
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vox_core::WorldConfig;
+    use vox_world::{AIR, Voxel, World};
 
+    /// An empty world with air everywhere (no solids except walls for
+    /// collision tests). Large enough that particles spawned near the
+    /// center never hit the world bounds during a test.
+    fn empty_world() -> World {
+        let mut w = World::new(WorldConfig {
+            voxel_size_m: 1.0,
+            extent_m: [64.0, 64.0, 64.0],
+            ..WorldConfig::default()
+        });
+        w.set_solid_table(vec![false, true]); // [air, solid]
+        w
+    }
+
+    /// A world with a solid floor at y=0 and solid ceiling at y=10.
+    fn room_world() -> World {
+        let mut w = World::new(WorldConfig {
+            voxel_size_m: 1.0,
+            extent_m: [64.0, 64.0, 64.0],
+            ..WorldConfig::default()
+        });
+        w.set_solid_table(vec![false, true]);
+        let (_, max) = w.bounds_voxels();
+        // Floor: y=0, ceiling: y=10 (voxels), walls around a 20x20 room.
+        w.fill_box(IVec3::new(0, 0, 0), IVec3::new(max.x, 1, max.z), Voxel(1));
+        w.fill_box(IVec3::new(0, 10, 0), IVec3::new(max.x, 11, max.z), Voxel(1));
+        // Walls.
+        w.fill_box(IVec3::new(20, 0, 20), IVec3::new(44, 11, 21), Voxel(1));
+        w.fill_box(IVec3::new(20, 0, 43), IVec3::new(44, 11, 44), Voxel(1));
+        w.fill_box(IVec3::new(20, 0, 20), IVec3::new(21, 11, 44), Voxel(1));
+        w.fill_box(IVec3::new(43, 0, 20), IVec3::new(44, 11, 44), Voxel(1));
+        w
+    }
+
+    fn dt() -> f32 {
+        1.0 / 60.0
+    }
     fn dust(center: Vec3, count: usize) -> Burst {
         Burst {
             center,
@@ -178,37 +369,40 @@ mod tests {
 
     #[test]
     fn particles_age_out_and_are_removed() {
+        let world = empty_world();
         let mut sys = ParticleSystem::new();
-        sys.burst(dust(Vec3::ZERO, 50));
+        sys.burst(dust(Vec3::new(32.0, 32.0, 32.0), 50));
         assert_eq!(sys.len(), 50);
         // Max per-particle life is 1.0 * (0.6 + 0.8) = 1.4 s.
         for _ in 0..100 {
-            sys.update(1.0 / 60.0);
+            sys.update(dt(), &world, 1.0);
         }
         assert_eq!(sys.len(), 0, "all particles must expire: {} left", sys.len());
     }
 
     #[test]
     fn the_cap_drops_oldest_first_and_never_exceeds_max() {
+        let world = empty_world();
         let mut sys = ParticleSystem::new();
-        sys.burst(dust(Vec3::ZERO, MAX_PARTICLES));
+        sys.burst(dust(Vec3::new(32.0, 32.0, 32.0), MAX_PARTICLES));
         assert_eq!(sys.len(), MAX_PARTICLES);
-        sys.burst(dust(Vec3::splat(10.0), 100));
+        sys.burst(dust(Vec3::new(42.0, 32.0, 32.0), 100));
         assert_eq!(sys.len(), MAX_PARTICLES, "cap must hold");
-        // The newest burst must have survived (it was spawned at x=10).
+        // The newest burst must have survived (spawned at x=42).
         let inst = sys.instances();
         assert!(
-            inst.iter().rev().take(100).all(|i| i.center_size[0] > 5.0),
+            inst.iter().rev().take(100).all(|i| i.center_size[0] > 37.0),
             "the fresh burst must not be the part that was dropped"
         );
     }
 
     #[test]
     fn gravity_pulls_dust_down_and_fade_reaches_zero_at_end_of_life() {
+        let world = empty_world();
         let mut sys = ParticleSystem::new();
-        sys.burst(dust(Vec3::new(0.0, 10.0, 0.0), 1));
+        sys.burst(dust(Vec3::new(32.0, 40.0, 32.0), 1));
         for _ in 0..30 {
-            sys.update(1.0 / 60.0);
+            sys.update(dt(), &world, 1.0);
         }
         let inst = sys.instances();
         assert_eq!(inst.len(), 1);
@@ -218,9 +412,10 @@ mod tests {
 
     #[test]
     fn smoke_rises_and_grows_instead_of_falling() {
+        let world = empty_world();
         let mut sys = ParticleSystem::new();
         sys.burst(Burst {
-            center: Vec3::new(0.0, 5.0, 0.0),
+            center: Vec3::new(32.0, 32.0, 32.0),
             count: 1,
             color: [0.4, 0.4, 0.4],
             speed: 0.0,
@@ -231,10 +426,95 @@ mod tests {
         });
         let size0 = sys.instances()[0].center_size[3];
         for _ in 0..60 {
-            sys.update(1.0 / 60.0);
+            sys.update(dt(), &world, 1.0);
         }
         let i = &sys.instances()[0];
-        assert!(i.center_size[1] > 5.0, "smoke must rise: y = {}", i.center_size[1]);
+        assert!(i.center_size[1] > 32.0, "smoke must rise: y = {}", i.center_size[1]);
         assert!(i.center_size[3] > size0, "smoke must swell as it ages");
+    }
+
+    // --- World collision tests ---
+
+    #[test]
+    fn smoke_stops_at_a_ceiling() {
+        // Buoyant smoke under a solid ceiling (y=10) must stop rising
+        // and not pass through.
+        let world = room_world();
+        let mut sys = ParticleSystem::new();
+        sys.burst(Burst {
+            center: Vec3::new(32.0, 9.0, 32.0),
+            count: 1,
+            color: [0.4, 0.4, 0.4],
+            speed: 0.0,
+            upward: 0.0,
+            life: 15.0,
+            size: 0.2,
+            buoyant: true,
+        });
+        // Run enough ticks for the smoke to reach the ceiling at y=10.
+        // At 0.6 m/s² from y=9, it takes ~2-3s (~180 ticks) to reach y=10.
+        for _ in 0..300 {
+            sys.update(dt(), &world, 1.0);
+        }
+        let y = sys.instances()[0].center_size[1];
+        assert!(y < 10.0, "smoke must not pass through the ceiling: y = {y}");
+        // And it must actually have reached near the ceiling (not just
+        // drifted harmlessly at y=9).
+        assert!(y > 9.0, "smoke must have risen toward the ceiling: y = {y}");
+    }
+
+    #[test]
+    fn dust_settles_on_a_floor() {
+        // Non-buoyant dust falling onto a solid floor (y=0) must stop
+        // falling and not pass through.
+        let world = room_world();
+        let mut sys = ParticleSystem::new();
+        sys.burst(Burst {
+            center: Vec3::new(32.0, 8.0, 32.0),
+            count: 1,
+            color: [0.5, 0.4, 0.3],
+            speed: 0.0,
+            upward: 0.0,
+            life: 15.0,
+            size: 0.05,
+            buoyant: false,
+        });
+        for _ in 0..600 {
+            sys.update(dt(), &world, 1.0);
+        }
+        let y = sys.instances()[0].center_size[1];
+        assert!(y < 2.5, "dust must settle near the floor: y = {y}");
+    }
+
+    #[test]
+    fn particles_repel_each_other() {
+        // Two particles at the same position must push apart over time.
+        let world = empty_world();
+        let mut sys = ParticleSystem::new();
+        let center = Vec3::new(32.0, 32.0, 32.0);
+        // Spawn two particles at the same spot with zero velocity.
+        sys.burst(Burst {
+            center,
+            count: 2,
+            color: [0.4, 0.4, 0.4],
+            speed: 0.0,
+            upward: 0.0,
+            life: 5.0,
+            size: 0.2,
+            buoyant: false,
+        });
+        // Both start at the same position.
+        let inst0 = sys.instances();
+        let p0 = Vec3::from_array([inst0[0].center_size[0], inst0[0].center_size[1], inst0[0].center_size[2]]);
+        let p1 = Vec3::from_array([inst0[1].center_size[0], inst0[1].center_size[1], inst0[1].center_size[2]]);
+        assert!((p0 - p1).length() < 0.01, "particles must start at the same position");
+        // After several steps, repulsion pushes them apart.
+        for _ in 0..30 {
+            sys.update(dt(), &world, 1.0);
+        }
+        let inst1 = sys.instances();
+        let q0 = Vec3::from_array([inst1[0].center_size[0], inst1[0].center_size[1], inst1[0].center_size[2]]);
+        let q1 = Vec3::from_array([inst1[1].center_size[0], inst1[1].center_size[1], inst1[1].center_size[2]]);
+        assert!((q0 - q1).length() > 0.05, "repulsion must push particles apart: dist = {}", (q0 - q1).length());
     }
 }

@@ -415,7 +415,7 @@ so, it probably shouldn't be a dependency.
 ## Testing
 
 ```
-cargo test              # ~242 tests, everything below vox-render runs headless
+cargo test              # ~253 tests, everything below vox-render runs headless
 cargo clippy --all-targets -- -D warnings
 cargo run -p vox-app --release --example stress   # headless perf probe, not a test
 ```
@@ -446,6 +446,18 @@ pillar's base, confirm the upper section detaches, tumbles, and sleeps.
   angle of repose). See `docs/plans/2026-07-09-fluid-sim-design.md`,
   `docs/plans/2026-07-09-water-refinement-design.md`, and
   `docs/plans/2026-07-09-powder-design.md`.
+- ~~Rich gas/smoke particles.~~ **Implemented:** world-colliding billboard
+  particles with inter-particle repulsion via spatial hash, enclosure-aware
+  drag, ceiling stop, floor settle, and 16k particle budget. Smoke fills
+  rooms instead of drifting through walls. See
+  `docs/plans/2026-07-09-gas-particles-design.md`.
+- ~~Fire system.~~ **Implemented:** ember ignition (placeable block, hotbar
+  slot 6), fire spreading through flammable materials (wood, leaves, planks,
+  grass) via 6-neighbor CA. Burning cells show orange ember glow that spreads
+  visually, then transition to ash (full burn) or char (water extinguished).
+  Ash wetted by water darkens to dark_ash. Smoke particle emission from
+  burning/consumed/extinguished cells with longer-lasting smoke. See
+  `docs/plans/2026-07-09-fire-system-design.md`.
 - An ecosystem/life crate: creatures, growth, populations.
 - Structural stress (load propagation -> creaking collapses) layered on top
   of the existing connectivity pass.
