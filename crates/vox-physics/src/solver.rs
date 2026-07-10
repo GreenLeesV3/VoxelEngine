@@ -148,26 +148,31 @@ pub struct PhysicsWorld {
     pos_corr: Vec<Vec3>,
     pub tunables: Tunables,
     lifetime_rng: u64,
-    /// The voxel material id treated as water for buoyancy. `None` (default)
-    /// disables buoyancy — bodies fall through water. Set by the app at
-    /// construction from the registry's water material, same pattern as
-    /// `FluidSim::water`.
-    water_voxel: Option<Voxel>,
+    /// Fluid materials for buoyancy (water, muddy_water, ...). Empty (default)
+    /// disables buoyancy — bodies fall through fluids. Set by the app at
+    /// construction from the registry's fluid materials.
+    fluid_voxels: Vec<Voxel>,
 }
 
 impl PhysicsWorld {
     pub fn new() -> Self {
         Self {
             lifetime_rng: 0x2545_F491_4F6C_DD1D,
-            water_voxel: None,
             ..Self::default()
         }
     }
 
-    /// Set the water material id for buoyancy. Called once by the app at
-    /// construction. `None` (the default) disables buoyancy.
+    /// Set a single water material id for buoyancy (backward compat). Called
+    /// once by the app at construction. Replaces any prior fluid set with a
+    /// single-element vec.
     pub fn set_water_voxel(&mut self, v: Voxel) {
-        self.water_voxel = Some(v);
+        self.fluid_voxels = vec![v];
+    }
+
+    /// Set the fluid materials for buoyancy (water, muddy_water, ...).
+    /// Called once by the app at construction. Replaces any prior fluid set.
+    pub fn set_fluid_voxels(&mut self, fluids: Vec<Voxel>) {
+        self.fluid_voxels = fluids;
     }
 
     /// xorshift64* -- deterministic, dependency-free spawn jitter (same
@@ -467,9 +472,9 @@ impl PhysicsWorld {
                 continue;
             }
             body.vel.y -= GRAVITY * h;
-            // Buoyancy: if the body's bottom is submerged in a non-solid,
-            // non-air voxel (water), apply an upward force. Lightweight:
-            // samples the AABB bottom center, not per-voxel.
+            // Buoyancy: if the body's bottom is submerged in a fluid voxel
+            // (water or any registered fluid), apply an upward force.
+            // Lightweight: samples the AABB bottom center, not per-voxel.
             let s = 2.0 * body.half_voxel;
             let bottom = Vec3::new(
                 (body.aabb_min.x + body.aabb_max.x) * 0.5,
@@ -478,23 +483,21 @@ impl PhysicsWorld {
             );
             let bottom_vox = vox_core::voxel_at(bottom, s);
             if world.in_bounds(bottom_vox) {
-                if let Some(wv) = self.water_voxel {
-                    if world.get_voxel(bottom_vox) == wv {
-                        let body_height = (body.aabb_max.y - body.aabb_min.y).max(1e-6);
-                        let submerge_depth = body_height.min(body.aabb_max.y - bottom.y + s);
-                        let fraction = (submerge_depth / body_height).clamp(0.0, 1.0);
-                        let dims = body.grid.dims;
-                        let volume = (dims.x * dims.y * dims.z) as f32 * s * s * s;
-                        let mass = body.mass();
-                        let avg_density = mass / volume.max(1e-6);
-                        let buoy_accel = (WATER_DENSITY / avg_density - 1.0) * GRAVITY * fraction;
-                        if buoy_accel > 0.0 {
-                            body.vel.y += buoy_accel * h;
-                        }
-                        let drag = WATER_DRAG * fraction;
-                        body.vel /= 1.0 + drag * h;
-                        body.omega /= 1.0 + drag * h;
+                if self.fluid_voxels.contains(&world.get_voxel(bottom_vox)) {
+                    let body_height = (body.aabb_max.y - body.aabb_min.y).max(1e-6);
+                    let submerge_depth = body_height.min(body.aabb_max.y - bottom.y + s);
+                    let fraction = (submerge_depth / body_height).clamp(0.0, 1.0);
+                    let dims = body.grid.dims;
+                    let volume = (dims.x * dims.y * dims.z) as f32 * s * s * s;
+                    let mass = body.mass();
+                    let avg_density = mass / volume.max(1e-6);
+                    let buoy_accel = (WATER_DENSITY / avg_density - 1.0) * GRAVITY * fraction;
+                    if buoy_accel > 0.0 {
+                        body.vel.y += buoy_accel * h;
                     }
+                    let drag = WATER_DRAG * fraction;
+                    body.vel /= 1.0 + drag * h;
+                    body.omega /= 1.0 + drag * h;
                 }
             }
             if body.vel.length() > MAX_SPEED {
@@ -1323,6 +1326,47 @@ mod tests {
         assert!(
             phys.get(permanent_id).is_some(),
             "an untimed body must survive any number of ticks"
+        );
+    }
+    /// A body less dense than water (wood, 700 kg/m³) must float when its
+    /// bottom voxel is a *second* registered fluid (muddy_water), not just
+    /// when it's plain water. Before generalizing `water_voxel` to
+    /// `fluid_voxels`, only the single configured water material triggered
+    /// buoyancy, so a body sitting in muddy_water sank straight through it.
+    #[test]
+    fn body_floats_in_a_second_fluid_muddy_water() {
+        let reg = registry();
+        let mut world = floored_world();
+        // Carve a pool on top of the stone floor (floor top at 4 m) and fill
+        // it with muddy_water (material id 2) instead of water.
+        const MUDDY_WATER: Voxel = Voxel(2);
+        let s = 0.1;
+        let floor_top = 40; // 4.0 m in voxel coords
+        let pool_top = 70; // 7.0 m — 3 m deep pool
+        world.fill_box(
+            IVec3::new(140, floor_top, 140),
+            IVec3::new(180, pool_top, 180),
+            MUDDY_WATER,
+        );
+
+        let mut phys = PhysicsWorld::new();
+        // Register both water and muddy_water as buoyancy fluids.
+        const WATER: Voxel = Voxel(3);
+        phys.set_fluid_voxels(vec![WATER, MUDDY_WATER]);
+
+        // Wood (density 700) is lighter than water (1000), so it must float.
+        let id = phys.spawn(cube_body(&reg, 4, Vec3::new(16.0, 5.0, 16.0)));
+
+        for _ in 0..300 {
+            phys.step(&world, PHYSICS_DT);
+        }
+        let b = phys.get(id).expect("alive");
+        // Floating means it did NOT sink to the stone floor (aabb_min.y 4.0).
+        // If buoyancy never fired it would rest on the floor at ~4.0 m.
+        assert!(
+            b.aabb_min.y > 4.5,
+            "wood must float in muddy_water, not sink to the floor: aabb_min.y = {}",
+            b.aabb_min.y
         );
     }
 }
