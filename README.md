@@ -172,8 +172,14 @@ works fully without Mario mode.
   momentum memory for cohesive flow. Weathering: grass→dirt→mud,
   stone→sand erosion with waterfall boost, mud drying. Powders (mud,
   sand) fall and pile at an angle of repose.
+- **Water pollution**: Mud adjacent to water dissolves into muddy_water
+  (a murky fluid that flows like water). Pollution diffuses by contact
+  to adjacent clean water. Still muddy_water settles after ~10s,
+  clarifying to clean water and depositing sand on the floor below.
+  Muddy water also extinguishes fire and provides buoyancy for floating
+  debris.
 - **Buoyancy**: Debris bodies float or sink based on material density
-  vs water density. Wood floats, stone sinks.
+  vs fluid density. Wood floats, stone sinks.
 
 ## Editor & Tools
 
