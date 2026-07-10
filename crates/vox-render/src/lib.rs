@@ -11,6 +11,7 @@ pub mod particles;
 pub mod postprocess;
 pub mod grass_pipeline;
 pub mod voxel_pipeline;
+pub mod sky_pipeline;
 
 pub use camera::Camera;
 pub use frustum::Frustum;
@@ -20,6 +21,7 @@ pub use particles::{MAX_PARTICLES, ParticleInstance, ParticlePipeline};
 pub use grass_pipeline::{GrassPipeline, GrassVertex, MAX_GRASS_BLADES};
 pub use postprocess::{COLOR_FORMAT, PostProcessPipeline};
 pub use voxel_pipeline::{BodyMeshKey, DrawStats, ShadowPipeline, VoxelPipeline};
+pub use sky_pipeline::{SkyPipeline, SkyUniform};
 
 /// Errors from GPU initialization and per-frame surface operations.
 #[derive(Debug, thiserror::Error)]

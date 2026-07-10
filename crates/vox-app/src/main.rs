@@ -37,7 +37,7 @@ use vox_gen::{TerrainGen, TerrainMaterials, TreeMaterials, generate_trees};
 use vox_mesh::{VoxelSlab, mesh_slab};
 use vox_physics::{Body, BodyId, ImpactEvent, PhysicsWorld, VoxelGrid};
 use vox_platform::{App, FrameControl, FrameTiming, InputState, run_app};
-use vox_render::{BodyMeshKey, Camera, Frustum, Gpu, ParticlePipeline, ShadowPipeline, VoxelPipeline};
+use vox_render::{BodyMeshKey, Camera, Frustum, Gpu, ParticlePipeline, ShadowPipeline, SkyPipeline, SkyUniform, VoxelPipeline};
 use vox_world::{AIR, Voxel, World};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
@@ -247,6 +247,8 @@ struct VoxApp {
     /// textures, fullscreen edge-detection/saturation/grading pass that
     /// composites the scene to the swapchain.
     postprocess: vox_render::PostProcessPipeline,
+    /// Procedural sky dome pipeline (#66).
+    sky_pipeline: SkyPipeline,
     /// Grass blade render pipeline.
     grass_pipeline: vox_render::GrassPipeline,
     /// Cached grass blade vertices (throttled regeneration).
@@ -312,6 +314,7 @@ impl VoxApp {
         let particle_shader = std::fs::read_to_string(assets.join("shaders/particle.wgsl"))?;
         let post_shader = std::fs::read_to_string(assets.join("shaders/postprocess.wgsl"))?;
         let grass_shader = std::fs::read_to_string(assets.join("shaders/grass.wgsl"))?;
+        let sky_shader = std::fs::read_to_string(assets.join("shaders/sky.wgsl"))?;
 
         let build_start = Instant::now();
         let world = build_terrain_world(cfg, &registry)?;
@@ -339,6 +342,7 @@ impl VoxApp {
         let postprocess = vox_render::PostProcessPipeline::new(&gpu, &post_shader, surf_w, surf_h);
         // Bind the scene depth texture for soft-particle surface fade (#70).
         particle_pipeline.set_depth_view(gpu.device(), postprocess.depth_view());
+        let sky_pipeline = SkyPipeline::new(&gpu, &sky_shader);
         let grass_pipeline = vox_render::GrassPipeline::new(&gpu, &grass_shader);
         let debug_overlay = DebugOverlay::new(
             gpu.device(),
@@ -408,6 +412,7 @@ impl VoxApp {
             particles: ParticleSystem::new(),
             particle_pipeline,
             postprocess,
+            sky_pipeline,
             grass_pipeline,
             grass_cache: grass::GrassCache::new(),
         };
@@ -1597,6 +1602,25 @@ impl App for VoxApp {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            let fwd = self.camera.forward();
+            let right = self.camera.right();
+            let up = right.cross(fwd).normalize();
+            // Procedural sky dome (#66): draw fullscreen sky as the first
+            // thing in the scene pass, replacing the flat clear color.
+            self.sky_pipeline.write_uniform(
+                self.gpu.queue(),
+                &SkyUniform {
+                    view_proj: view_proj.to_cols_array_2d(),
+                    cam_pos: [self.camera.pos.x, self.camera.pos.y, self.camera.pos.z, 0.0],
+                    sun_dir: [dn.sun_dir.x, dn.sun_dir.y, dn.sun_dir.z, dn.sun_strength],
+                    sky_color: [dn.sky_color.x, dn.sky_color.y, dn.sky_color.z, 0.0],
+                    sun_color: [dn.sun_color.x, dn.sun_color.y, dn.sun_color.z, self.game_time],
+                    cam_forward: [fwd.x, fwd.y, fwd.z, 0.0],
+                    cam_right: [right.x, right.y, right.z, 0.0],
+                    cam_up: [up.x, up.y, up.z, 0.0],
+                },
+            );
+            self.sky_pipeline.draw(&mut pass);
             pass.set_bind_group(1, self.shadow_pipeline.sample_bind_group(), &[]);
             let chunk_stats = self.pipeline.draw_chunks_opaque(&mut pass, &frustum);
             let body_stats = self.pipeline.draw_bodies(&mut pass, &frustum, self.camera.pos, FOG_END_M);
