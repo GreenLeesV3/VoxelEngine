@@ -10,7 +10,6 @@
 //! spin at its own offset from the old center of mass, matching ordinary
 //! rigid-body kinematics (`v_point = v_com + omega x r`).
 
-use std::collections::VecDeque;
 
 use glam::{IVec3, Quat, Vec3};
 use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
@@ -180,6 +179,10 @@ pub fn carve_body_capsule(
 /// placement.
 pub fn split_components(grid: &VoxelGrid) -> Vec<(VoxelGrid, IVec3)> {
     let mut visited = vec![false; grid.voxels.len()];
+    // #78: Use a flat Vec as a ring buffer instead of VecDeque (which uses
+    // heap-linked blocks with poor cache locality). The ring buffer is
+    // reused across all components — just reset head to 0 each time.
+    let mut ring_buf: Vec<IVec3> = Vec::with_capacity(grid.voxels.len());
     let mut out = Vec::new();
     for z in 0..grid.dims.z {
         for y in 0..grid.dims.y {
@@ -190,10 +193,14 @@ pub fn split_components(grid: &VoxelGrid) -> Vec<(VoxelGrid, IVec3)> {
                     continue;
                 }
                 let mut comp = Vec::new();
-                let mut queue = VecDeque::new();
-                queue.push_back(start);
+                // Ring buffer BFS: head advances, tail is comp.len().
+                ring_buf.clear();
+                ring_buf.push(start);
                 visited[start_idx] = true;
-                while let Some(v) = queue.pop_front() {
+                let mut head = 0;
+                while head < ring_buf.len() {
+                    let v = ring_buf[head];
+                    head += 1;
                     comp.push(v);
                     for d in DIRS {
                         let n = v + d;
@@ -203,7 +210,7 @@ pub fn split_components(grid: &VoxelGrid) -> Vec<(VoxelGrid, IVec3)> {
                         let nidx = grid_index(grid.dims, n);
                         if !visited[nidx] && grid.solid(n) {
                             visited[nidx] = true;
-                            queue.push_back(n);
+                            ring_buf.push(n);
                         }
                     }
                 }
