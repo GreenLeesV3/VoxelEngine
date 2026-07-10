@@ -463,3 +463,57 @@ redundant wake_region calls. Fix: batch dirty regions into one wake_region call.
 File: vox-render/src/mario_pipeline.rs, draw (lines 300-326).
 queue.write_buffer every frame, even when Mario is idle and geometry hasn't changed.
 Fix: version-stamp the geometry, skip upload when unchanged.
+
+---
+
+## Weapons & First-Person Combat (Round 3)
+
+### 58. First-Person Weapon Viewmodel — Static Mesh
+Add a first-person weapon viewmodel rendered in a separate pass with a tighter
+FOV (~55° vs world's 70°). New WeaponPipeline in vox-render mirroring MarioPipeline
+(camera uniform + texture + vertex/index buffers). New weapon.wgsl shader reusing
+cel-shading lighting from voxel.wgsl. WeaponVertex: [pos, normal, uv] (28 bytes).
+Render after water in the scene pass so it receives post-processing. Add gltf crate
+dep for GLB loading. ~500 LOC, ~2 days. Foundation for all weapon features.
+
+### 59. Skeletal Animation System for Weapon Viewmodels
+Build a skeletal animation pipeline: SkinnedVertex (adds joint_indices + joint_weights,
+56 bytes), bone hierarchy from GLTF skins, per-frame keyframe interpolation
+(Quat::slerp for rotation, Vec3::lerp for translation), GPU vertex-shader skinning
+(upload array<mat4x4<f32>, 256> uniform, 4-bone blend per vertex). Adapt Bevy's
+skinning.wgsl skin_model() function. ~2000-3000 LOC, ~5-7 days on top of #58.
+Unlocks animated reload/fire/aim/sprint.
+
+### 60. Weapon Animation State Machine
+Lightweight state machine: Idle → AimDownSight → Firing → Reloading → Inspect.
+Cross-fade blending between states (slerp/lerp per-joint by blend factor). Wire to
+input (RMB = ADS, LMB = fire, R = reload). Procedural recoil kick (pitch impulse),
+weapon sway (lagged mouse_delta), view bob (sinusoidal from movement velocity).
+~500-800 LOC on top of #59. glam provides all the math (Quat::slerp, Vec3::lerp).
+
+### 61. Weapon Asset Pipeline — Bring Your Own (COD local / CC0 public)
+Two-tier asset strategy mirroring the SM64 ROM approach:
+**Local/personal**: Download pre-extracted COD weapon packs from Open3DLab (Blender
+.blend with rigs + PBR textures), Steam Workshop GMod SWEPs (Source .mdl with full
+FPS viewmodel + animation sets), or GitHub (Lohkas/IW4-Modeldump — all MW2
+viewmodels + animations). Convert via Blender to GLB. Keep in .gitignore — never
+commit (Activision actively DMCA-takedowns public repos with COD assets).
+**Public repo**: Quaternius Ultimate Guns (CC0, stylized, voxel-friendly) + Mixamo
+rifle animations (free mocap, bake to engine format). Both are legal to redistribute.
+GLB is the runtime format (self-contained: mesh + skin + animations + textures).
+
+### 62. Firearm Gameplay — Hitscan + Voxel Destruction
+Left-click fires: raycast from player eye along look direction (reuse existing
+Tools::raycast_scene). Hit point triggers voxel carve (small radius, like Scalable
+Dig) or debris body fracture (reuse impact fracture system). Ammo + fire rate
+cooldown on VoxApp. Muzzle flash particle (reuse ParticleSystem). Weapon switch
+via hotbar (slots 7-9). Recoil applied as camera pitch kick + viewmodel animation.
+Reuses 100% of existing destruction/physics infrastructure — no new simulation.
+
+### 63. Weapon Variety — Attachments & Materials
+Data-driven weapon definitions (TOML, like material defs): damage, fire rate, ammo
+capacity, recoil pattern, reload time, projectile type (hitscan vs projectile),
+carve radius. Attachment system: scope (changes FOV/zoom), suppressor (no muzzle
+flash, reduced recoil), extended mag. Voxel-material interaction: bullets penetrate
+weak materials (leaves, glass) but stop on stone. Pairs with #16 chain-reaction
+explosives for explosive ammo types.
