@@ -15,14 +15,24 @@ use crate::frustum::Frustum;
 use crate::gpu::{DEPTH_FORMAT, Gpu};
 
 /// Camera + environment uniform, must match `voxel.wgsl`.
+/// All lighting is driven by uniforms for day/night cycle support.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     pub cam_pos: [f32; 4],
+    /// xyz = sun direction (unit), w = sun strength.
     pub sun_dir: [f32; 4],
-    /// x = fog start (m), y = fog end (m), z = voxel size (m), w = unused.
+    /// x = fog start (m), y = fog end (m), z = voxel size (m), w = ambient strength.
     pub fog: [f32; 4],
+    /// xyz = sky/fog color (linear RGB), w = fill light strength.
+    pub sky_color: [f32; 4],
+    /// xyz = sun color (linear RGB), w = unused.
+    pub sun_color: [f32; 4],
+    /// xyz = ambient sky tint, w = unused.
+    pub ambient_sky: [f32; 4],
+    /// xyz = ambient ground tint, w = unused.
+    pub ambient_ground: [f32; 4],
 }
 
 /// One uploaded mesh: vertex/index buffers plus its model transform and
@@ -361,15 +371,32 @@ impl VoxelPipeline {
     pub fn body_mesh_count(&self) -> usize {
         self.bodies.len()
     }
-
     /// Update the camera/environment uniform for this frame.
-    pub fn write_camera(&self, gpu: &Gpu, view_proj: Mat4, cam_pos: Vec3, fog_end_m: f32) {
-        let sun = Vec3::new(-0.45, -0.8, -0.35).normalize();
+    /// All lighting parameters are passed in for day/night cycle support.
+    pub fn write_camera(
+        &self,
+        gpu: &Gpu,
+        view_proj: Mat4,
+        cam_pos: Vec3,
+        fog_end_m: f32,
+        sun_dir: Vec3,
+        sun_strength: f32,
+        sky_color: Vec3,
+        fill_strength: f32,
+        ambient_strength: f32,
+        sun_color: Vec3,
+        ambient_sky: Vec3,
+        ambient_ground: Vec3,
+    ) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
             cam_pos: Vec4::from((cam_pos, 1.0)).to_array(),
-            sun_dir: Vec4::from((sun, 0.0)).to_array(),
-            fog: [fog_end_m * 0.55, fog_end_m, self.voxel_size_m, 0.0],
+            sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, sun_strength],
+            fog: [fog_end_m * 0.55, fog_end_m, self.voxel_size_m, ambient_strength],
+            sky_color: [sky_color.x, sky_color.y, sky_color.z, fill_strength],
+            sun_color: [sun_color.x, sun_color.y, sun_color.z, 0.0],
+            ambient_sky: [ambient_sky.x, ambient_sky.y, ambient_sky.z, 0.0],
+            ambient_ground: [ambient_ground.x, ambient_ground.y, ambient_ground.z, 0.0],
         };
         gpu.queue()
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&uniform));

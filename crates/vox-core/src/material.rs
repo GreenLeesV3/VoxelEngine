@@ -45,6 +45,49 @@ pub struct MaterialDef {
     /// a powder piles rather than seeking a flat level. Mud and sand are
     /// powders; water is a fluid.
     pub powder: bool,
+    /// Arbitrary, data-driven custom properties captured from unknown TOML
+    /// fields (e.g. `flammable`, `explosive`, `conductivity`). This lets mods
+    /// and downstream crates tag materials with domain-specific attributes
+    /// without changing `MaterialDef` itself. Empty for materials that
+    /// declare no custom keys.
+    pub properties: HashMap<String, toml::Value>,
+}
+
+impl MaterialDef {
+    /// Generic accessor for a custom property.
+    pub fn get(&self, key: &str) -> Option<&toml::Value> {
+        self.properties.get(key)
+    }
+
+    /// `true` if the material has a `flammable = true` custom property.
+    pub fn is_flammable(&self) -> bool {
+        self.properties
+            .get("flammable")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// `true` if the material has an `explosive` custom property that is
+    /// truthy (a boolean `true` or any non-default value).
+    pub fn is_explosive(&self) -> bool {
+        match self.properties.get("explosive") {
+            Some(toml::Value::Boolean(b)) => *b,
+            Some(toml::Value::Integer(i)) => *i != 0,
+            Some(toml::Value::Float(f)) => *f != 0.0,
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    /// Electrical/thermal conductivity from the `conductivity` custom
+    /// property, or `0.0` when absent or not a number.
+    pub fn conductivity(&self) -> f32 {
+        self.properties
+            .get("conductivity")
+            .and_then(|v| v.as_float())
+            .map(|f| f as f32)
+            .unwrap_or(0.0)
+    }
 }
 
 /// Registry of material definitions with stable `u16` ids.
@@ -66,9 +109,10 @@ struct RawDoc {
 }
 
 /// One `[[material]]` table with every key optional, so presence checks can
-/// produce validation errors that name the material.
+/// produce validation errors that name the material. Unknown keys are
+/// captured into `properties` rather than rejected, enabling data-driven
+/// custom material attributes (flammable, explosive, conductivity, ...).
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawMaterial {
     name: Option<String>,
     color: Option<[f32; 3]>,
@@ -78,6 +122,9 @@ struct RawMaterial {
     solid: Option<bool>,
     fluid: Option<bool>,
     powder: Option<bool>,
+    #[serde(flatten)]
+    #[serde(default)]
+    properties: HashMap<String, toml::Value>,
 }
 
 /// Validation error for a named material: `material '{name}': {detail}`.
@@ -100,6 +147,7 @@ impl MaterialRegistry {
             solid: false,
             fluid: false,
             powder: false,
+            properties: HashMap::new(),
         };
         let mut by_name = HashMap::new();
         by_name.insert(air.name.clone(), MaterialId::AIR);
@@ -280,6 +328,7 @@ impl MaterialRegistry {
             solid,
             fluid,
             powder,
+            properties: raw.properties,
         });
         Ok(())
     }
@@ -552,12 +601,30 @@ mod tests {
             .expect("leaves present");
         assert_eq!(leaves.jitter, 0.10);
         assert!(leaves.solid, "solid defaults to true in shipped file");
+        // Data-driven custom properties from core.toml.
+        assert!(leaves.is_flammable(), "leaves are flammable");
+        let wood = reg
+            .get(reg.id_by_name("wood").expect("wood registered"))
+            .expect("wood present");
+        assert!(wood.is_flammable(), "wood is flammable");
+        let stone = reg.get(MaterialId(1)).expect("stone present");
+        assert_eq!(stone.conductivity(), 0.1, "stone has conductivity = 0.1");
+        assert!(!stone.is_flammable(), "stone is not flammable");
+        // Materials without custom properties keep an empty map.
+        let dirt = reg
+            .get(reg.id_by_name("dirt").expect("dirt registered"))
+            .expect("dirt present");
+        assert!(dirt.properties.is_empty(), "dirt has no custom properties");
     }
 
-    /// Pins `deny_unknown_fields`: a typo'd optional key must fail loudly
-    /// instead of being silently ignored (the modding surface depends on it).
+    /// With data-driven properties, unknown TOML keys are captured into the
+    /// material's `properties` map rather than rejected — this is how mods
+    /// add domain-specific attributes (flammable, explosive, ...) without
+    /// changing `MaterialDef`. A typo'd key is now silently retained as a
+    /// custom property rather than failing loudly; the known-field validation
+    /// (missing `density`, bad `color`, etc.) is what catches real errors.
     #[test]
-    fn unknown_keys_are_rejected_naming_the_typo() {
+    fn unknown_keys_are_captured_as_custom_properties() {
         let source = r#"
             [[material]]
             name = "typo"
@@ -566,11 +633,74 @@ mod tests {
             strength = 0.0
             jiter = 0.1
         "#;
-        let err =
-            MaterialRegistry::from_toml_str(source, "typo.toml").expect_err("typo key must fail");
-        let msg = err.to_string();
-        assert!(msg.contains("typo.toml"), "must name origin: {msg}");
-        assert!(msg.contains("jiter"), "must name the unknown key: {msg}");
+        let reg = MaterialRegistry::from_toml_str(source, "typo.toml")
+            .expect("unknown keys are captured, not rejected");
+        let def = reg
+            .get(reg.id_by_name("typo").expect("registered"))
+            .expect("present");
+        assert_eq!(
+            def.get("jiter"),
+            Some(&toml::Value::Float(0.1)),
+            "typo'd key lands in properties as a custom value",
+        );
+        assert_eq!(def.jitter, 0.0, "the real `jitter` field is unaffected");
+    }
+
+    #[test]
+    fn custom_properties_round_trip_and_accessor_methods_work() {
+        let source = r#"
+            [[material]]
+            name = "wood"
+            color = [0.5, 0.3, 0.2]
+            density = 700.0
+            strength = 4.0
+            flammable = true
+            conductivity = 0.2
+
+            [[material]]
+            name = "tnt"
+            color = [0.9, 0.1, 0.1]
+            density = 1200.0
+            strength = 1.0
+            explosive = true
+            conductivity = 0.0
+        "#;
+        let reg = MaterialRegistry::from_toml_str(source, "props.toml").expect("parses");
+        let wood = reg
+            .get(reg.id_by_name("wood").expect("wood registered"))
+            .expect("wood present");
+        assert!(wood.is_flammable(), "wood is flammable");
+        assert!(!wood.is_explosive(), "wood is not explosive");
+        assert_eq!(wood.conductivity(), 0.2, "wood conductivity round-trips");
+        assert_eq!(
+            wood.get("flammable"),
+            Some(&toml::Value::Boolean(true)),
+            "generic accessor returns the raw value",
+        );
+
+        let tnt = reg
+            .get(reg.id_by_name("tnt").expect("tnt registered"))
+            .expect("tnt present");
+        assert!(tnt.is_explosive(), "tnt is explosive");
+        assert!(!tnt.is_flammable(), "tnt is not flammable");
+        assert_eq!(tnt.conductivity(), 0.0, "explicit zero conductivity");
+    }
+
+    #[test]
+    fn materials_without_custom_properties_have_empty_map() {
+        let reg = MaterialRegistry::from_toml_str(&material("plain"), "plain.toml")
+            .expect("minimal material parses");
+        let def = reg
+            .get(reg.id_by_name("plain").expect("registered"))
+            .expect("present");
+        assert!(def.properties.is_empty(), "no custom keys -> empty map");
+        assert!(!def.is_flammable());
+        assert!(!def.is_explosive());
+        assert_eq!(def.conductivity(), 0.0);
+        assert_eq!(def.get("anything"), None);
+        // Air must also have an empty properties map.
+        let air = reg.get(MaterialId::AIR).expect("air");
+        assert!(air.properties.is_empty(), "air has no custom properties");
     }
 
     #[test]

@@ -8,10 +8,14 @@
 struct Camera {
     view_proj: mat4x4f,
     cam_pos: vec4f,
-    sun_dir: vec4f,          // xyz = direction the sun shines toward (unit)
-    fog: vec4f,              // x = fog start (m), y = fog end (m), z = SM64 units per meter, w = model scale
+    sun_dir: vec4f,          // xyz = sun direction (unit), w = sun strength
+    fog: vec4f,              // x = fog start (m), y = fog end (m), z = SM64 units per meter, w = ambient strength
     interp_pos: vec4f,       // xyz = interpolated Mario position (SM64 units)
     tick_pos: vec4f,         // xyz = tick position the geometry was authored at (SM64 units)
+    sky_color: vec4f,        // xyz = sky/fog color, w = fill light strength
+    sun_color: vec4f,        // xyz = sun color (linear RGB), w = model scale
+    ambient_sky: vec4f,      // xyz = ambient sky tint, w = unused
+    ambient_ground: vec4f,   // xyz = ambient ground tint, w = unused
 };
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -33,28 +37,20 @@ struct VOut {
     @location(3) uv: vec2f,
 };
 
-const SKY_COLOR = vec3f(0.45, 0.66, 0.90);
-const AMBIENT_SKY = vec3f(0.40, 0.46, 0.56);
-const AMBIENT_GROUND = vec3f(0.24, 0.22, 0.19);
-const AMBIENT_STRENGTH = 0.35;
-const SUN_COLOR = vec3f(1.0, 0.95, 0.85);
-const SUN_STRENGTH = 0.45;
-const FOG_COLOR = vec3f(0.45, 0.66, 0.90);
-
-// SM64 units per meter is passed via cam.fog.z; cam.fog.w is the model
-// scale. Mario's vertex positions are raw SM64 units authored at
-// cam.tick_pos; the CPU uploads them verbatim and we apply the
-// per-frame translate (interp_pos - tick_pos) and model_scale here so
-// the vertex buffer only needs to change when the geometry actually
-// changes (not every interpolated render frame).
+// SM64 units per meter is passed via cam.fog.z; model_scale is in
+// cam.sun_color.w (fog.w is ambient_strength for day/night cycle).
+// Mario's vertex positions are raw SM64 units authored at cam.tick_pos;
+// the CPU uploads them verbatim and we apply the per-frame translate
+// (interp_pos - tick_pos) and model_scale here so the vertex buffer
+// only needs to change when the geometry actually changes.
 
 @vertex
 fn vs_main(in: VIn) -> VOut {
     var out: VOut;
     // libsm64 outputs absolute positions in SM64 integer units, authored
     // at cam.tick_pos. Translate to the interpolated camera target
-    // (interp_pos) and scale the model around that center.
-    let model_scale = cam.fog.w;
+    // model_scale is in cam.sun_color.w (fog.w is ambient_strength for day/night)
+    let model_scale = cam.sun_color.w;
     let sm64_pos = cam.interp_pos.xyz + (in.position - cam.tick_pos.xyz) * model_scale;
     let world_pos = sm64_pos / cam.fog.z;
     out.clip = cam.view_proj * vec4f(world_pos, 1.0);
@@ -69,9 +65,13 @@ fn vs_main(in: VIn) -> VOut {
 fn fs_main(in: VOut) -> @location(0) vec4f {
     let normal = normalize(in.world_normal);
     let sun_dir = normalize(cam.sun_dir.xyz);
+    let ndotl = dot(normal, sun_dir);
 
-    // Lighting: simple half-Lambert (matches libsm64's reference renderer)
-    let light = 0.5 + 0.5 * clamp(dot(normal, sun_dir), 0.0, 1.0);
+    // Half-Lambert sun + fill + hemisphere ambient (matches voxel pipeline)
+    let sun = pow(clamp(ndotl * 0.5 + 0.5, 0.0, 1.0), 1.5) * cam.sun_dir.w * cam.sun_color.xyz;
+    let fill = max(-ndotl, 0.0) * cam.sky_color.w;
+    let hemi_t = clamp(0.5 + 0.5 * normal.y, 0.0, 1.0);
+    let ambient = mix(cam.ambient_ground.xyz, cam.ambient_sky.xyz, hemi_t) * cam.fog.w;
 
     // Alpha-masked overlay: vertex color is the base body color
     // (skin, hat, overalls), texture overrides only where alpha=1
@@ -79,12 +79,12 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
     // libsm64's reference GL renderer does it.
     let tex_color = textureSample(mario_texture, mario_sampler, in.uv);
     let main_color = mix(in.color, tex_color.rgb, tex_color.a);
-    let lit = main_color * light;
+    let lit = main_color * (ambient + sun + vec3f(fill));
 
     // Distance fog — matches the voxel pipeline
     let dist = length(cam.cam_pos.xyz - in.world_pos);
     let fog_factor = clamp((cam.fog.y - dist) / (cam.fog.y - cam.fog.x), 0.0, 1.0);
-    let final_color = mix(FOG_COLOR, lit, fog_factor);
+    let final_color = mix(cam.sky_color.xyz, lit, fog_factor);
 
     return vec4f(final_color, 1.0);
 }

@@ -6,6 +6,7 @@ mod particles;
 mod player;
 mod mario;
 mod audio;
+mod day_night;
 mod remesh;
 mod tools;
 
@@ -40,13 +41,6 @@ use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
 
-/// Sky-blue clear color (linear-space RGBA); must match the shader's fog sky.
-const CLEAR_COLOR: wgpu::Color = wgpu::Color {
-    r: 0.45,
-    g: 0.66,
-    b: 0.90,
-    a: 1.0,
-};
 
 /// Fog end distance in meters.
 const FOG_END_M: f32 = 220.0;
@@ -204,6 +198,8 @@ struct VoxApp {
     /// SM64 units per meter for Mario mode. Higher = smaller Mario.
     /// Set once from CLI, read when initializing MarioMode.
     mario_units_per_meter: f32,
+    /// Game time accumulator for day/night cycle (seconds).
+    game_time: f32,
     /// Old debris meshes kept alive past their body's despawn, each waiting
     /// on the set of its replacement fragments' async mesh jobs still in
     /// flight -- see `replace_body`'s doc comment for why this exists (a
@@ -315,13 +311,13 @@ impl VoxApp {
             debris_order: VecDeque::new(),
             mario_mode: None,
             mario_units_per_meter,
+            game_time: 60.0, // Start at noon (halfway through 120s cycle)
             pending_body_removal: HashMap::new(),
             particles: ParticleSystem::new(),
             particle_pipeline,
         };
         app.initial_mesh();
 
-        // Spawn on the terrain surface at the world center.
         let center = Vec3::from(app.world.cfg.extent_m) * 0.5;
         let surface = TerrainGen::surface_height_m(&app.world, center.x, center.z)
             .unwrap_or(app.world.cfg.extent_m[1] * 0.5);
@@ -1113,6 +1109,10 @@ impl App for VoxApp {
         self.sync_debris_render(timing.alpha);
         self.particles.update(timing.dt_frame);
 
+        // Advance day/night cycle.
+        self.game_time += timing.dt_frame;
+        let dn = day_night::compute(self.game_time);
+
         // Camera: third-person around Mario in Mario mode, else player eye.
         if mario_active {
             let mode = self.mario_mode.as_ref().unwrap();
@@ -1127,8 +1127,20 @@ impl App for VoxApp {
         let (w, h) = self.gpu.surface_size();
         let aspect = w as f32 / h.max(1) as f32;
         let view_proj = self.camera.view_proj(aspect);
-        self.pipeline
-            .write_camera(&self.gpu, view_proj, self.camera.pos, FOG_END_M);
+        self.pipeline.write_camera(
+            &self.gpu,
+            view_proj,
+            self.camera.pos,
+            FOG_END_M,
+            dn.sun_dir,
+            dn.sun_strength,
+            dn.sky_color,
+            dn.fill_strength,
+            dn.ambient_strength,
+            dn.sun_color,
+            dn.ambient_sky,
+            dn.ambient_ground,
+        );
         // Billboard basis: camera right and true up (right x forward).
         let cam_right = self.camera.right();
         let cam_up = cam_right.cross(self.camera.forward()).normalize();
@@ -1223,7 +1235,7 @@ impl App for VoxApp {
                     view: frame.view(),
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                        load: wgpu::LoadOp::Clear(day_night::clear_color(&dn)),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1252,7 +1264,14 @@ impl App for VoxApp {
                         &mut pass,
                         view_proj.to_cols_array_2d(),
                         self.camera.pos,
-                        Vec3::new(-0.45, -0.8, -0.35).normalize(), // matches voxel pipeline
+                        dn.sun_dir,
+                        dn.sun_strength,
+                        dn.sky_color,
+                        dn.fill_strength,
+                        dn.ambient_strength,
+                        dn.sun_color,
+                        dn.ambient_sky,
+                        dn.ambient_ground,
                         FOG_END_M * 0.55,
                         FOG_END_M,
                     );

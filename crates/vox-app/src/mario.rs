@@ -440,6 +440,8 @@ impl MarioMode {
     }
 
     /// Update the Mario pipeline's camera uniform and draw Mario's mesh.
+    /// All lighting parameters are passed in for day/night consistency
+    /// with the voxel pipeline.
     pub fn render<'p>(
         &'p self,
         queue: &wgpu::Queue,
@@ -447,14 +449,16 @@ impl MarioMode {
         view_proj: [[f32; 4]; 4],
         cam_pos: Vec3,
         sun_dir: Vec3,
+        sun_strength: f32,
+        sky_color: Vec3,
+        fill_strength: f32,
+        ambient_strength: f32,
+        sun_color: Vec3,
+        ambient_sky: Vec3,
+        ambient_ground: Vec3,
         fog_start: f32,
         fog_end: f32,
     ) {
-        // Interpolated Mario position to match the camera target. The
-        // mesh vertices are authored at the current tick position
-        // (last_pos_sm64); the shader translates them by
-        // (interp_pos - tick_pos) so we can reuse the vertex buffer
-        // across interpolated render frames without re-uploading.
         let a = self.tick_alpha;
         let interp_pos = [
             self.prev_tick_pos[0] + (self.last_pos_sm64[0] - self.prev_tick_pos[0]) * a,
@@ -464,8 +468,8 @@ impl MarioMode {
         let cam = MarioCameraUniform {
             view_proj,
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
-            sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
-            fog: [fog_start, fog_end, self.units_per_meter, self.model_scale],
+            sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, sun_strength],
+            fog: [fog_start, fog_end, self.units_per_meter, ambient_strength],
             interp_pos: [interp_pos[0], interp_pos[1], interp_pos[2], 0.0],
             tick_pos: [
                 self.last_pos_sm64[0],
@@ -473,6 +477,10 @@ impl MarioMode {
                 self.last_pos_sm64[2],
                 0.0,
             ],
+            sky_color: [sky_color.x, sky_color.y, sky_color.z, fill_strength],
+            sun_color: [sun_color.x, sun_color.y, sun_color.z, self.model_scale],
+            ambient_sky: [ambient_sky.x, ambient_sky.y, ambient_sky.z, 0.0],
+            ambient_ground: [ambient_ground.x, ambient_ground.y, ambient_ground.z, 0.0],
         };
         self.pipeline.update_camera(queue, &cam);
 

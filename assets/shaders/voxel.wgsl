@@ -6,8 +6,12 @@
 struct Camera {
     view_proj: mat4x4f,
     cam_pos: vec4f,
-    sun_dir: vec4f,          // xyz = direction the sun shines toward (unit)
-    fog: vec4f,              // x = start (m), y = end (m), z = voxel size (m)
+    sun_dir: vec4f,          // xyz = sun direction (unit), w = sun strength
+    fog: vec4f,              // x = start (m), y = end (m), z = voxel size (m), w = ambient strength
+    sky_color: vec4f,        // xyz = sky/fog color, w = fill light strength
+    sun_color: vec4f,        // xyz = sun color (linear RGB), w = unused
+    ambient_sky: vec4f,      // xyz = ambient sky tint, w = unused
+    ambient_ground: vec4f,   // xyz = ambient ground tint, w = unused
 };
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -32,21 +36,7 @@ struct VOut {
     @location(2) ao: f32,
     @location(3) world_pos: vec3f,
 };
-
-const SKY_COLOR = vec3f(0.45, 0.66, 0.90);
-// Ambient is two-tone (sky-facing vs. ground-facing) rather than a flat
-// scalar: a cool tint from above, a warmer/darker one from below, mixed by
-// how much the surface faces up vs. down. Reads far less "flat gray" in
-// shadow than a single ambient number ever can.
-const AMBIENT_SKY = vec3f(0.50, 0.58, 0.70);
-const AMBIENT_GROUND = vec3f(0.30, 0.27, 0.24);
-const AMBIENT_STRENGTH = 0.55;
-const SUN_STRENGTH = 0.85;
-// Faint light from the direction opposite the sun -- like real bounce
-// light off the sky and surroundings -- so a face angled away from the
-// sun still reads as lit, not flat black. Small on purpose: it's a floor,
-// not a second sun.
-const FILL_STRENGTH = 0.12;
+// All lighting constants are now uniforms (cam.*) for day/night cycle.
 
 // Face normal from id (0..6 = +X, -X, +Y, -Y, +Z, -Z). Arithmetic instead of
 // a const-array lookup: naga rejects dynamic indexing of module constants.
@@ -101,22 +91,18 @@ fn vs(v: VIn, inst: Inst) -> VOut {
 fn fs(in: VOut) -> @location(0) vec4f {
     let n = normalize(in.world_normal);
     let ndotl = dot(n, -cam.sun_dir.xyz);
-    // Half-Lambert wrap instead of a plain clamped dot product: a hard
-    // `max(ndotl, 0)` goes fully dark the instant a face tips past 90
-    // degrees from the sun, which is exactly the flat, artificial "baked"
-    // look on structure sides this pass is fixing. Wrapping softens that
-    // terminator into a gradient.
-    let sun = pow(clamp(ndotl * 0.5 + 0.5, 0.0, 1.0), 1.5) * SUN_STRENGTH;
-    let fill = max(-ndotl, 0.0) * FILL_STRENGTH;
+    // Half-Lambert wrap: softens the sun terminator into a gradient.
+    let sun = pow(clamp(ndotl * 0.5 + 0.5, 0.0, 1.0), 1.5) * cam.sun_dir.w * cam.sun_color.xyz;
+    let fill = max(-ndotl, 0.0) * cam.sky_color.w;
 
     let hemi_t = clamp(0.5 + 0.5 * n.y, 0.0, 1.0);
-    let ambient = mix(AMBIENT_GROUND, AMBIENT_SKY, hemi_t) * AMBIENT_STRENGTH;
+    let ambient = mix(cam.ambient_ground.xyz, cam.ambient_sky.xyz, hemi_t) * cam.fog.w;
 
     let ao = 0.45 + 0.55 * in.ao;
-    var c = in.color * (ambient + vec3f(sun + fill)) * ao;
+    var c = in.color * (ambient + sun + vec3f(fill)) * ao;
 
     let dist = length(in.world_pos - cam.cam_pos.xyz);
     let f = clamp((dist - cam.fog.x) / (cam.fog.y - cam.fog.x), 0.0, 1.0);
-    c = mix(c, SKY_COLOR, f * f);
+    c = mix(c, cam.sky_color.xyz, f * f);
     return vec4f(c, 1.0);
 }

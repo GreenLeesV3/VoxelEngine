@@ -17,6 +17,7 @@ color = [0.55, 0.55, 0.57]
 jitter = 0.04
 density = 2600.0
 strength = 8.0
+conductivity = 0.1
 
 [[material]]
 name = "dirt"
@@ -47,6 +48,7 @@ color = [0.52, 0.37, 0.23]
 jitter = 0.05
 density = 700.0
 strength = 4.0
+flammable = true
 
 [[material]]
 name = "leaves"
@@ -54,6 +56,7 @@ color = [0.28, 0.48, 0.22]
 jitter = 0.10
 density = 200.0
 strength = 0.5
+flammable = true
 
 [[material]]
 name = "brick"

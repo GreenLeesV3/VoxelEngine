@@ -12,7 +12,8 @@ use wgpu::util::DeviceExt;
 use crate::gpu::{DEPTH_FORMAT, Gpu};
 
 /// Camera + environment uniform, must match `mario.wgsl`.
-/// Same layout as the voxel pipeline's `CameraUniform` for consistency.
+/// Shares the same lighting fields as the voxel pipeline's CameraUniform
+/// for consistent day/night rendering.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct MarioCameraUniform {
@@ -20,14 +21,13 @@ pub struct MarioCameraUniform {
     pub cam_pos: [f32; 4],
     pub sun_dir: [f32; 4],
     pub fog: [f32; 4],
-    /// Interpolated Mario position (SM64 units) the mesh should be
-    /// translated to this frame. xyz = position; w unused.
     pub interp_pos: [f32; 4],
-    /// Position the geometry was authored at (the current tick's SM64
-    /// position). xyz = position; w unused. The shader translates
-    /// vertices by `(interp_pos - tick_pos)` so the buffer can hold
-    /// raw SM64 positions and be reused across interpolated frames.
     pub tick_pos: [f32; 4],
+    /// Day/night lighting — must match voxel pipeline CameraUniform.
+    pub sky_color: [f32; 4],
+    pub sun_color: [f32; 4],
+    pub ambient_sky: [f32; 4],
+    pub ambient_ground: [f32; 4],
 }
 
 /// Mario vertex: position + normal + color + uv, matching `mario.wgsl`.
