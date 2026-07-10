@@ -6,6 +6,11 @@ blast structures into physically simulated debris that tumbles, collides,
 and settles. The same engine runs at Teardown-scale (10 cm voxels) or
 Minecraft-scale (1 m voxels), chosen per world at creation time.
 
+Features a dynamic day/night cycle with cascaded shadow mapping, cel-shaded
+lighting with HDR post-processing, transparent water, 3D animated grass,
+a fire propagation system, undo/redo, an in-engine voxel editor, replay
+recording, and an optional Super Mario 64 integration (bring-your-own-ROM).
+
 Everything that defines engine *behavior* — voxel storage, noise, worldgen,
 meshing, the rigidbody solver, destruction — is custom Rust, no game engine
 or physics engine underneath. Third-party crates are infrastructure only
@@ -35,13 +40,19 @@ world.
 | `Shift` | Fly down (noclip) |
 | `Ctrl` (held, noclip) | 5x fly speed |
 | `F` | Toggle fly / noclip |
-| `1`-`9` | Hotbar: 1 Dig, 2 Scalable Dig, 3 Bomb, 4 Death Laser, 5 Place Water (6-9 reserved) |
-| Mouse wheel | Adjust tool radius (Scalable Dig / Bomb / Place Water) or cycle build material (otherwise) |
+| `1`-`6` | Hotbar: 1 Dig, 2 Scalable Dig, 3 Bomb, 4 Death Laser, 5 Place Water, 6 Ember |
+| Mouse wheel | Adjust tool radius (Scalable Dig / Bomb / Place Water / Ember) or cycle build material (otherwise) |
 | Left click | Use the active hotbar tool |
 | Right click | Place selected material |
 | `[` / `]` | Shrink / grow the Scalable Dig / Bomb / Place Water radius (0.5-4 m) |
 | `B` | Spawn a wood debris cube in front of the player |
 | `X` | Clear all sleeping (settled) debris |
+| `E` | Toggle editor mode (LMB paint sphere, RMB erase sphere, wheel adjusts radius) |
+| `Ctrl+Z` | Undo last world edit (safe edits only — no debris-spawning operations) |
+| `Ctrl+Y` | Redo last undone edit |
+| `R` | Toggle replay recording (snapshots player + camera + debris every ~1s) |
+| `P` | Toggle replay playback |
+| `M` | Toggle Mario mode (requires SM64 ROM — see below) |
 | `F3` | Toggle the debug overlay (FPS, timings, tuning sliders) |
 | `Esc` | Release the cursor, then exit |
 
@@ -54,31 +65,122 @@ world.
 | 3 | Bomb | Carves a sphere of adjustable radius and gives the debris an outward blast impulse. |
 | 4 | Death Laser | An effectively infinite-range beam that tunnels straight through everything in its path in one shot -- no raycast gate, no impulse, just an instant, total cut. |
 | 5 | Place Water | Fills a 0.5 m default, adjustable water source on the empty face of the targeted terrain; it starts flowing immediately. |
+| 6 | Ember | Places an ember that ignites flammable materials (wood, leaves, planks, grass). Fire spreads via 6-neighbor CA, burns to ash, and emits smoke particles. |
 
-Slots 6-9 are reserved for future tools.
+Slots 7-9 are reserved for future tools.
 
 ### CLI
 
 ```
-voxelengine [--scale 0.1|1.0] [--seed N] [--extent X,Y,Z] [--help]
+voxelengine [--scale 0.1|1.0] [--mario-scale N] [--seed N] [--extent X,Y,Z] [--help]
 ```
 
 `--scale` is the voxel edge length in meters — this is the one setting that
 switches the whole engine between Teardown-scale and Minecraft-scale.
-`--extent` is the world's footprint in meters. See
+`--extent` is the world's footprint in meters. `--mario-scale` sets SM64
+units per meter for Mario mode (default 125, Mario ~1.3m tall). See
 [`crates/vox-app/src/args.rs`](crates/vox-app/src/args.rs).
+
+## Mario Mode (Bring Your Own ROM)
+
+Mario mode is an optional easter egg that integrates Super Mario 64's
+movement and physics into the voxel world. Press `M` to toggle. Mario
+runs, jumps, ground-pounds, and wall-kicks through destructible terrain.
+
+**The SM64 ROM is NOT included** (it's copyrighted Nintendo content).
+You must provide your own legally-obtained SM64 US ROM.
+
+### Setup
+
+1. Obtain an SM64 US ROM (`.z64` format). The expected file has SHA1:
+   `9bef1128717f958171a4afac3ed78ee2bb4e86ce`
+2. Run `enable_mario.bat` (Windows), either:
+   - Double-click and it auto-searches for `.z64` files, or
+   - Drag-and-drop your ROM onto the script, or
+   - `enable_mario.bat "C:\path\to\your_rom.z64"`
+3. The script validates the ROM by SHA1 and copies it to `roms/baserom.us.z64`
+4. Launch the game and press `M`
+
+Without a ROM, pressing `M` logs a warning and does nothing — the game
+works fully without Mario mode.
+
+### Mario features
+
+- Full SM64 movement: run, walk, jump, double/triple jump, ground pound,
+  wall-kick, wall-slide
+- Wall collision via libsm64 surface objects (all 6 face directions)
+- SM64 audio: jump sounds, footsteps, ground pound, background music
+  (resampled 32→48 kHz via cpal, volume 0.5)
+- Mario ↔ debris interaction: Mario can stand on, kick, and ride falling
+  debris bodies (registered as SM64 surface objects)
+- Ground-pound craters: carving shallow dents into terrain for traversal
+- Ground-pound bombs: explosive blasts that detach structures (like the
+  Bomb tool, aimed with a jump)
+- Triple-jump-pound: raises a voxel mound for building ledges
+- Third-person camera with yaw/pitch, interpolated between 30 Hz ticks
+
+## Rendering
+
+- **Day/night cycle**: 120-second cycle starting at noon. Sun direction,
+  color, sky color, ambient, and fog all driven by time-of-day uniforms
+  threaded through every pipeline.
+- **Cel-shading**: Half-Lambert lighting quantized into 4 bands with
+  smooth transitions for a painterly, comic-book look.
+- **HDR post-processing**: Scene renders to an offscreen Rgba16Float
+  buffer, then a fullscreen pass applies soft tone-mapping, +30%
+  saturation boost, and warm color grading before compositing to the
+  swapchain.
+- **Cascaded shadow mapping**: 2048×2048 depth texture, PCF 3×3,
+  orthographic camera following the player, sun-direction driven.
+- **Transparent water**: Alpha-blended (0.85), blue tint scaled by sun
+  strength (dims at night), depth-write disabled, rendered last so
+  terrain/grass shows through translucency.
+- **3D grass blades**: Real geometry (blocky quads) standing up from
+  grass voxels, wind sway in vertex shader, day/night lighting,
+  throttled regeneration (every 30 frames or 5m camera move, 30m radius).
+- **Crack decals**: Procedural shader-based dark branching lines on
+  solid voxels, driven by a `crack_intensity` uniform (default 0 = off).
+- **Smoke particles**: World-colliding billboard particles with
+  inter-particle repulsion, enclosure-aware drag, emitted by fire.
+
+## Simulation
+
+- **Fire system**: Ember ignition (hotbar slot 6), fire spreads through
+  flammable materials (wood, leaves, planks, grass) via 6-neighbor CA.
+  Burning cells show orange glow, then transition to ash (full burn) or
+  char (water extinguished). Smoke emitted from burning/consumed cells.
+  Unsupported material above consumed cells detaches as debris.
+- **Fluid sim**: Water flows downhill with 8-direction drop-search,
+  momentum memory for cohesive flow. Weathering: grass→dirt→mud,
+  stone→sand erosion with waterfall boost, mud drying. Powders (mud,
+  sand) fall and pile at an angle of repose.
+- **Buoyancy**: Debris bodies float or sink based on material density
+  vs water density. Wood floats, stone sinks.
+
+## Editor & Tools
+
+- **Editor mode** (`E`): LMB paints a sphere of the selected material,
+  RMB erases a sphere, mouse wheel adjusts the radius. The player still
+  flies/looks normally — only mouse-button meaning changes.
+- **Undo/redo** (`Ctrl+Z` / `Ctrl+Y`): Tier-1 world-edit undo via voxel
+  diffs. Only safe for operations that don't spawn debris.
+- **Replay** (`R` to record, `P` to play): Snapshot-based replay
+  capturing player, camera, game time, and debris body transforms
+  every ~1 second. 10 minutes of recording capacity.
 
 ## Architecture
 
-Nine crates, strictly layered — nothing lower depends on anything higher:
+Ten crates, strictly layered — nothing lower depends on anything higher:
 
 ```
 vox-app        playable binary: game loop, player, tools, wiring
   |
 vox-debug      egui debug overlay (HUD, timings, tuning) — quarantined
-vox-render     wgpu pipelines, camera, chunk/debris draw, culling
+vox-render     wgpu pipelines, camera, chunk/debris draw, shadows, post-process
 vox-platform   winit window, input mapping, fixed-timestep loop
   |
+vox-sm64       libsm64 FFI: Mario movement, collision, audio (bring-your-own-ROM)
+vox-sim        cellular automata: fluid sim, fire, weathering, powders
 vox-physics    rigidbody solver + destruction (carve -> connectivity -> debris)
 vox-mesh       greedy meshing (pure functions, headless)
 vox-gen        noise, terrain, trees (deterministic)
@@ -431,45 +533,50 @@ inputs). `vox-app`'s tools/CLI have their own tests, including one that
 drives the *actual* raycast-based blast entry point end to end: blast a
 pillar's base, confirm the upper section detaches, tumbles, and sleeps.
 
-## Roadmap (post-MVP, not built)
+## Roadmap
 
-- Streaming chunk load/unload beyond the current finite-but-sparse world map
-  (the `HashMap<ChunkPos, Chunk>` storage is already streaming-ready).
-- Palette-compressed chunks and an RLE binary save format (the chunk
-  storage's `Uniform`/`Dense` enum already hides this behind `get`/`set`).
-- ~~A cellular-automata simulation crate (`vox-sim`): falling sand, fire,
-  water — a sibling crate at the physics tier.~~ **Implemented:** a
-  cellular-automata fluid sim (`vox-sim`) with active-cell sleeping, 8-
-  direction drop-search, momentum memory for cohesive flow, water-driven
-  weathering (grass→dirt→mud, stone→sand erosion with waterfall boost,
-  mud drying), and powder materials (mud and sand fall and pile at an
-  angle of repose). See `docs/plans/2026-07-09-fluid-sim-design.md`,
-  `docs/plans/2026-07-09-water-refinement-design.md`, and
-  `docs/plans/2026-07-09-powder-design.md`.
-- ~~Rich gas/smoke particles.~~ **Implemented:** world-colliding billboard
-  particles with inter-particle repulsion via spatial hash, enclosure-aware
-  drag, ceiling stop, floor settle, and 16k particle budget. Smoke fills
-  rooms instead of drifting through walls. See
-  `docs/plans/2026-07-09-gas-particles-design.md`.
-- ~~Fire system.~~ **Implemented:** ember ignition (placeable block, hotbar
-  slot 6), fire spreading through flammable materials (wood, leaves, planks,
-  grass) via 6-neighbor CA. Burning cells show orange ember glow that spreads
-  visually, then transition to ash (full burn) or char (water extinguished).
-  Ash wetted by water darkens to dark_ash. Smoke particle emission from
-  burning/consumed/extinguished cells with longer-lasting smoke. See
-  `docs/plans/2026-07-09-fire-system-design.md`.
-- An ecosystem/life crate: creatures, growth, populations.
-- Structural stress (load propagation -> creaking collapses) layered on top
-  of the existing connectivity pass.
-- Debris re-freezing into the world once fully settled, and debris
-  re-fracturing under a second hit.
-- A raytraced renderer path behind the existing renderer interface;
-  shadow maps; transparency.
+### Implemented (post-MVP)
+
+- **Day/night cycle** (#10/#12): 120-second cycle, all lighting uniforms
+  threaded through voxel + Mario + grass pipelines.
+- **3D grass blades** (#11): Real geometry, wind sway, day/night lighting.
+- **Transparent water** (#13): Alpha-blended, blue tint, proper face culling.
+- **Cascaded shadow mapping** (#14): 2048×2048, PCF 3×3, sun-direction driven.
+- **HDR post-processing + cel-shading** (#15): Offscreen Rgba16Float,
+  4-band lighting quantization, saturation boost, color grading.
+- **Crack decals** (#43): Procedural shader-based, `crack_intensity` uniform.
+- **Undo/redo** (#36): Tier-1 voxel-diff undo (Ctrl+Z/Y).
+- **Editor mode** (#37): Brush tools, LMB paint / RMB erase sphere.
+- **Replay** (#39): Snapshot-based recording (R/P), 10-minute capacity.
+- **Mario wall collision** (#21): All 6 face directions via surface objects.
+- **Mario audio** (#22): cpal resampled 32→48 kHz, volume 0.5.
+- **Mario ↔ debris** (#23): Surface objects for falling debris.
+- **Mario ground-pound bombs** (#27): ACT_GROUND_POUND_LAND → blast pipeline.
+- **Mario ground-pound craters** (#30): carve_sphere + triple-jump mound.
+- **Buoyancy** (#20): Debris floats/sinks by material density (from upstream).
+- **Fire system**: Ember ignition, CA spread, smoke, ash/char transitions.
+- **Fluid sim** (`vox-sim`): Water, weathering, powders, active-cell sleeping.
+- **Smoke particles**: World-colliding, repulsion, enclosure-aware drag.
+- **Performance** (#51-57): SolidLookup caching, broadphase reuse, substep
+  contact reuse, Mario surface slice-skip, draw_bodies distance culling,
+  vertex version stamping.
+
+### Not yet built
+
+- Streaming chunk load/unload (#7) — HashMap storage is already streaming-ready.
+- Save/load (#8) — Uniform/Dense enum designed for palette-RLE serialization.
+- Ecosystem & creatures (#9).
+- Chain-reaction explosives (#16) — `explosive` flag in MaterialDef.
+- Sustained-load structural failure (#17) — stress analysis beyond connectivity.
+- Mario cap throw (#24), power-up materials (#25), star power-up (#26).
+- Lakitu camera modes (#28), coins & stars collectibles (#29).
+- GPU compute meshing (#40) — shader written, integration deferred.
+- SSR (#41), cone-traced GI (#44), minimimap (#45) — depend on HDR (now done).
+- Rope, cloth, temperature, gravity wells, earthquakes (#46-50).
+- Gameplay modes: siege, rally, storm survivor, creative, derby (#1-5, #31-35).
 - **Dependency modernization**: wgpu 0.20 / winit 0.29 / egui 0.28 are
-  pinned to the exact combination proven to compile and render on this
-  machine at MVP time. Upgrading (e.g. to wgpu 26+, winit 0.30) is a
-  contained follow-up isolated to `vox-render`, `vox-platform`, and
-  `vox-debug` — no other crate touches these APIs directly.
+  pinned to the exact combination proven to compile and render. Upgrading
+  is contained to `vox-render`, `vox-platform`, and `vox-debug`.
 
 ## License
 
