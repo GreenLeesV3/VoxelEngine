@@ -1500,7 +1500,7 @@ impl App for VoxApp {
                 occlusion_query_set: None,
             });
             pass.set_bind_group(1, self.shadow_pipeline.sample_bind_group(), &[]);
-            let chunk_stats = self.pipeline.draw_chunks(&mut pass, &frustum);
+            let chunk_stats = self.pipeline.draw_chunks_opaque(&mut pass, &frustum);
             let body_stats = self.pipeline.draw_bodies(&mut pass, &frustum, self.camera.pos, FOG_END_M);
             stats = vox_render::DrawStats {
                 drawn: chunk_stats.drawn + body_stats.drawn,
@@ -1526,8 +1526,8 @@ impl App for VoxApp {
                     );
                 }
             }
+            // Grass and particles before water so water blends on top.
             self.particle_pipeline.draw(&mut pass);
-            // Grass blades: 3D blades standing up from grass voxels.
             let grass_verts = self.grass_cache.get_or_regen(
                 &self.world,
                 self.camera.pos,
@@ -1551,6 +1551,8 @@ impl App for VoxApp {
                 FOG_END_M,
             );
             self.grass_pipeline.draw(self.gpu.queue(), &mut pass, grass_verts);
+            // Water last — alpha-blends over terrain, grass, and particles.
+            self.pipeline.draw_water(&mut pass, &frustum);
             self.debug_overlay.paint(&mut pass, &prepared_overlay);
         }
         self.gpu.queue().submit([encoder.finish()]);

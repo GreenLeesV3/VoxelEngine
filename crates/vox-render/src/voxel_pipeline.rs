@@ -299,7 +299,7 @@ impl VoxelPipeline {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: true,
+                depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -498,14 +498,15 @@ impl VoxelPipeline {
     ///    with the water pipeline (alpha blending, depth writes off) so
     ///    terrain behind water is visible through the semi-transparent
     ///    surface.
-    pub fn draw_chunks<'p>(
+    /// Draw opaque chunk geometry (water fragments discarded by shader).
+    /// Returns draw/cull stats. Call `draw_water` after grass/particles
+    /// for correct translucency layering.
+    pub fn draw_chunks_opaque<'p>(
         &'p self,
         pass: &mut wgpu::RenderPass<'p>,
         frustum: &Frustum,
     ) -> DrawStats {
         let mut stats = DrawStats::default();
-
-        // Pass 1: opaque (water fragments discarded by shader).
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         for mesh in self.chunks.values() {
@@ -519,9 +520,17 @@ impl VoxelPipeline {
             pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             stats.drawn += 1;
         }
+        stats
+    }
 
-        // Pass 2: water-only (non-water fragments discarded by shader).
-        // Only draw chunks that actually contain water voxels.
+    /// Draw water-only chunk geometry (non-water fragments discarded).
+    /// Alpha-blended, depth_write disabled. Call after grass/particles
+    /// so they show through the translucent water.
+    pub fn draw_water<'p>(
+        &'p self,
+        pass: &mut wgpu::RenderPass<'p>,
+        frustum: &Frustum,
+    ) {
         pass.set_pipeline(&self.water_pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         for mesh in self.chunks.values() {
@@ -535,8 +544,18 @@ impl VoxelPipeline {
             pass.set_vertex_buffer(1, mesh.instance.slice(..));
             pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-            stats.drawn += 1;
         }
+    }
+
+    /// Draw all chunk geometry (opaque + water). Convenience method for
+    /// callers that don't need grass between the passes.
+    pub fn draw_chunks<'p>(
+        &'p self,
+        pass: &mut wgpu::RenderPass<'p>,
+        frustum: &Frustum,
+    ) -> DrawStats {
+        let stats = self.draw_chunks_opaque(pass, frustum);
+        self.draw_water(pass, frustum);
         stats
     }
 
