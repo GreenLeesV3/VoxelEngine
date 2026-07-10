@@ -122,15 +122,14 @@ pub fn generate_grass(
                                 let base = Vec3::new(center.x + offset_x, center.y, center.z + offset_z);
                                 let height = vs * (0.4 + h3 * 0.8);
                                 let width = vs * (0.04 + h * 0.04);
-                                let wind = (game_time * 1.5 + pos.x as f32 * 0.7 + pos.z as f32 * 0.5 + b as f32 * 1.3).sin();
-                                let tip_offset_x = wind * height * 0.15;
-                                let wind2 = (game_time * 1.1 + pos.z as f32 * 0.9 + b as f32 * 2.1).cos();
-                                let tip_offset_z = wind2 * height * 0.10;
+
+
                                 let facing = h2 * std::f32::consts::TAU;
                                 let fx = facing.cos();
                                 let fz = facing.sin();
                                 let half_w = width * 0.5;
-                                let tip = Vec3::new(base.x + tip_offset_x, base.y + height, base.z + tip_offset_z);
+                                // Tip is straight up — wind sway is in the vertex shader.
+                                let tip = Vec3::new(base.x, base.y + height, base.z);
                                 let bl = Vec3::new(base.x - fx * half_w, base.y, base.z - fz * half_w);
                                 let br = Vec3::new(base.x + fx * half_w, base.y, base.z + fz * half_w);
                                 let tl = Vec3::new(tip.x - fx * half_w * 0.3, tip.y, tip.z - fz * half_w * 0.3);
