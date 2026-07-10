@@ -67,37 +67,19 @@ fn boost_saturation(c: vec3f, amount: f32) -> vec3f {
 @fragment
 fn fs(@builtin(position) frag_pos: vec4f) -> @location(0) vec4f {
     let uv = frag_pos.xy * params.texel_size;
-    let ts = params.texel_size;
 
     // Sample base color.
-    let base = textureSample(color_tex, samp, uv).rgb;
+    var c = textureSample(color_tex, samp, uv).rgb;
 
-    // Edge detection: depth edges (silhouette/depth discontinuities)
-    // and normal edges (face/material boundaries).
-    let depth_edge = sobel_depth(uv, ts);
-    let normal_edge = sobel_vec3(normal_tex, uv, ts);
-
-    // Combine edges. Depth edges are stronger (silhouettes); normal
-    // edges are softer (interior face boundaries). Threshold to keep
-    // only meaningful edges.
-    let edge = clamp(depth_edge * 1.5 + normal_edge * 1.0, 0.0, 1.0);
-    let edge_mask = smoothstep(0.25, 0.5, edge);
-
-    // Material-tinted outline: darken the base color by 65% for the
-    // outline, giving a material-tinted dark edge instead of pure black.
-    let outline_color = base * 0.35;
-    var c = mix(base, outline_color, edge_mask);
-
-    // Saturation boost (+30%).
-    c = boost_saturation(c, 1.3);
-
-    // Dreamy color grading: slight shadow lift, warm tint, gentle
-    // contrast S-curve.
-    c = c + 0.02;                           // shadow lift
-    c = c * vec3f(1.02, 1.0, 0.98);         // warm tint
+    // ACES filmic tone mapping (approximation) for realistic contrast.
+    c = c * (2.51 * c + 0.03) / (c * (2.43 * c + 0.59) + 0.14);
     c = clamp(c, vec3f(0.0), vec3f(1.0));
-    // Gentle S-curve for contrast.
-    c = mix(c, smoothstep(vec3f(0.0), vec3f(1.0), c), 0.15);
+
+    // Subtle warm tint for natural outdoor feel.
+    c = c * vec3f(1.01, 1.0, 0.99);
+
+    // Slight contrast boost.
+    c = mix(c, smoothstep(vec3f(0.0), vec3f(1.0), c), 0.1);
 
     return vec4f(c, 1.0);
 }

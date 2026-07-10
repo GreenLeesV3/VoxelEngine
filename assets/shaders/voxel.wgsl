@@ -107,15 +107,8 @@ fn fs(in: VOut) -> FOut {
     let n = normalize(in.world_normal);
     let ndotl = dot(n, -cam.sun_dir.xyz);
 
-    // Cel-shading: quantize the half-Lambert into 4 bands with smooth
-    // transitions at band edges (painterly, not flat).
-    let raw = clamp(ndotl * 0.5 + 0.5, 0.0, 1.0);
-    let bands = 4.0;
-    let quantized = floor(raw * bands + 0.5) / bands;
-    // Smooth the band edges slightly to avoid hard stair-stepping.
-    let frac_val = fract(raw * bands);
-    let smooth_q = mix(quantized, raw, smoothstep(0.4, 0.6, frac_val) * smoothstep(0.4, 0.6, 1.0 - frac_val));
-    let sun = smooth_q * SUN_STRENGTH;
+    // Smooth half-Lambert lighting (realistic, not cel-shaded).
+    let sun = pow(clamp(ndotl * 0.5 + 0.5, 0.0, 1.0), 1.5) * SUN_STRENGTH;
 
     let fill = max(-ndotl, 0.0) * FILL_STRENGTH;
 
