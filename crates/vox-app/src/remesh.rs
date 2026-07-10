@@ -68,7 +68,7 @@ impl RemeshQueue {
     }
 
     /// Dispatch up to the per-frame budget, nearest chunks first.
-    pub fn dispatch(&mut self, world: &World, camera_pos: Vec3, water_voxel: Voxel) {
+    pub fn dispatch(&mut self, world: &World, camera_pos: Vec3, fluids: &[Voxel]) {
         if self.pending.is_empty() {
             return;
         }
@@ -88,8 +88,9 @@ impl RemeshQueue {
             let slab = VoxelSlab::extract(world, origin, IVec3::splat(CHUNK_SIZE as i32));
             let tx = self.tx.clone();
             self.in_flight += 1;
+            let fluids = fluids.to_vec();
             rayon::spawn(move || {
-                let mesh = mesh_slab(&slab, origin, water_voxel);
+                let mesh = mesh_slab(&slab, origin, &fluids);
                 // Receiver dropped only on shutdown; ignore send failure.
                 let _ = tx.send((key, generation, mesh));
             });

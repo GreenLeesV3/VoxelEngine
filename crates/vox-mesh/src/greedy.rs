@@ -130,7 +130,7 @@ fn jitter_hash(seed: IVec3, local: [u8; 3]) -> u8 {
 /// Greedy-mesh a slab into quads. `jitter_seed` anchors the baked per-vertex
 /// jitter pattern (see `jitter_hash`) -- pass a chunk's world origin for
 /// chunks, `IVec3::ZERO` for a body's own local mesh.
-pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3, water_voxel: Voxel) -> MeshData {
+pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3, fluids: &[Voxel]) -> MeshData {
     let mut mesh = MeshData::default();
     let dims = slab.inner_dims;
 
@@ -159,9 +159,9 @@ pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3, water_voxel: Voxel) -> Me
                     p[axis] = slice;
                     p[u_axis] = u;
                     p[v_axis] = v;
-                    let is_water = slab.get(p) == vox_world::Voxel(9);
-                    let cell = if (slab.opaque(p) && !slab.opaque(p + normal))
-                        || (is_water && !slab.solid(p + normal))
+                    let is_fluid = fluids.contains(&slab.get(p));
+                    let cell = if (slab.opaque(p, fluids) && !slab.opaque(p + normal, fluids))
+                        || (is_fluid && !slab.solid(p + normal))
                     {
                         let outer = p + normal;
                         let mut ao4 = [0u8; 4];
@@ -171,9 +171,9 @@ pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3, water_voxel: Voxel) -> Me
                             let u_off = if cu == 0 { -u_dir } else { u_dir };
                             let v_off = if cv == 0 { -v_dir } else { v_dir };
                             ao4[i] = ao(
-                                slab.opaque(outer + u_off),
-                                slab.opaque(outer + v_off),
-                                slab.opaque(outer + u_off + v_off),
+                                slab.opaque(outer + u_off, fluids),
+                                slab.opaque(outer + v_off, fluids),
+                                slab.opaque(outer + u_off + v_off, fluids),
                             );
                         }
                         // Compute water column depth: for water faces,
@@ -183,7 +183,7 @@ pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3, water_voxel: Voxel) -> Me
                         // depth-based darkening.
                         let mat = slab.get(p);
                         let mut depth: u8 = 0;
-                        if mat == water_voxel {
+                        if fluids.contains(&mat) {
                             // Start at 1: the face voxel itself is one
                             // layer of water. Then count additional
                             // water voxels below.
@@ -243,7 +243,7 @@ pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3, water_voxel: Voxel) -> Me
                         w,
                         h,
                         jitter_seed,
-                        water_voxel,
+                        fluids,
                     );
                     for vv in v0..v0 + h {
                         for uu in u0..u0 + w {
@@ -274,7 +274,7 @@ fn emit_quad(
     w: i32,
     h: i32,
     jitter_seed: IVec3,
-    water_voxel: Voxel,
+    fluids: &[Voxel],
 ) {
     // Corner positions on the face plane, in (du, dv) order 00, 10, 01, 11.
     let plane = if sign > 0 { slice + 1 } else { slice };
@@ -294,7 +294,7 @@ fn emit_quad(
             pos,
             ao: cell.ao4[i],
             normal: normal_id,
-            jitter: if cell.material == water_voxel {
+            jitter: if fluids.contains(&cell.material) {
                 cell.water_depth
             } else {
                 jitter_hash(jitter_seed, pos)
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn empty_slab_zero_quads() {
         let slab = slab_of(IVec3::splat(4), &[]);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[]);
         assert_eq!(mesh.quads(), 0);
         assert!(mesh.is_empty());
     }
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn single_voxel_six_quads() {
         let slab = slab_of(IVec3::splat(3), &[(IVec3::splat(1), STONE)]);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[]);
         assert_eq!(mesh.quads(), 6);
         assert_eq!(mesh.indices.len(), 36);
     }
@@ -399,8 +399,8 @@ mod tests {
                 (IVec3::new(1, 2, 1), STONE),
             ],
         );
-        let mesh_a = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0));
-        let mesh_b = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0));
+        let mesh_a = mesh_slab(&slab, IVec3::new(7, -3, 42), &[]);
+        let mesh_b = mesh_slab(&slab, IVec3::new(7, -3, 42), &[]);
         let jitter_a: Vec<u8> = mesh_a.vertices.iter().map(|v| v.jitter).collect();
         let jitter_b: Vec<u8> = mesh_b.vertices.iter().map(|v| v.jitter).collect();
         assert_eq!(
@@ -412,7 +412,7 @@ mod tests {
         // *different* seed (a different chunk's origin) must generally
         // produce a different pattern -- confirming the seed actually
         // participates, not just the local position.
-        let mesh_c = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh_c = mesh_slab(&slab, IVec3::ZERO, &[]);
         let jitter_c: Vec<u8> = mesh_c.vertices.iter().map(|v| v.jitter).collect();
         assert_ne!(
             jitter_a, jitter_c,
@@ -426,7 +426,7 @@ mod tests {
             IVec3::new(2, 1, 1),
             &[(IVec3::new(0, 0, 0), STONE), (IVec3::new(1, 0, 0), STONE)],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[]);
         assert_eq!(mesh.quads(), 6, "coplanar same-material faces must merge");
     }
 
@@ -436,7 +436,7 @@ mod tests {
             IVec3::new(2, 1, 1),
             &[(IVec3::new(0, 0, 0), STONE), (IVec3::new(1, 0, 0), DIRT)],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[]);
         // 2 end caps + 4 long sides split in two each = 2 + 8 = 10.
         assert_eq!(mesh.quads(), 10);
     }
@@ -453,7 +453,7 @@ mod tests {
             }
         }
         let slab = slab_of(dims, &solids);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[]);
         assert_eq!(mesh.quads(), 6, "each full face merges into one quad");
         // Corner coordinates must span the whole region.
         let max = mesh.vertices.iter().map(|v| v.pos[0]).max().unwrap();
@@ -478,7 +478,7 @@ mod tests {
                 }
             }
             let slab = slab_of(dims, &solids);
-            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+            let mesh = mesh_slab(&slab, IVec3::ZERO, &[]);
 
             // Brute-force expected exposed faces.
             let mut expected: HashSet<(IVec3, u8)> = HashSet::new();
@@ -548,7 +548,7 @@ mod tests {
             }
         }
         let slab = slab_of(dims, &solids);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[]);
         assert!(!mesh.is_empty());
 
         for tri in mesh.indices.chunks_exact(3) {
@@ -581,7 +581,7 @@ mod tests {
                 (IVec3::new(0, 1, 0), STONE), // wall on top of (0,0,0)
             ],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[]);
 
         // Top faces (+Y, normal id 2) of the floor at y=1 (excluding the wall
         // voxel's own top at y=2).

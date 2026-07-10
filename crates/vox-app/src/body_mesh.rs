@@ -51,15 +51,16 @@ impl BodyMeshQueue {
         key: BodyMeshKey,
         dims: IVec3,
         voxels: Vec<Voxel>,
-        water_voxel: Voxel,
+        fluids: &[Voxel],
     ) {
         let tx = self.tx.clone();
         self.in_flight += 1;
+        let fluids = fluids.to_vec();
         rayon::spawn(move || {
             let slab = VoxelSlab::from_grid(dims, &voxels);
             // Zero seed: a body has no meaningful "world origin" (it moves),
             // so the jitter pattern is anchored to its own local grid only.
-            let mesh = mesh_slab(&slab, IVec3::ZERO, water_voxel);
+            let mesh = mesh_slab(&slab, IVec3::ZERO, &fluids);
             // Receiver dropped only on shutdown; ignore send failure.
             let _ = tx.send((key, mesh));
         });

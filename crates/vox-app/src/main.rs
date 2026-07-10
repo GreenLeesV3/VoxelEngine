@@ -610,7 +610,7 @@ impl VoxApp {
             .map(|key| {
                 let origin = chunk_origin(*key);
                 let slab = VoxelSlab::extract(world, origin, IVec3::splat(CHUNK_SIZE as i32));
-                (*key, mesh_slab(&slab, origin, water))
+                (*key, mesh_slab(&slab, origin, &[water]))
             })
             .collect();
         let meshed = meshes.len();
@@ -680,7 +680,7 @@ impl VoxApp {
         let voxel_count = (body.grid.dims.x * body.grid.dims.y * body.grid.dims.z) as usize;
         let dispatch = if voxel_count <= INLINE_MESH_VOXEL_BUDGET {
             let slab = VoxelSlab::from_grid(body.grid.dims, &body.grid.voxels);
-            let mesh = mesh_slab(&slab, IVec3::ZERO, water);
+            let mesh = mesh_slab(&slab, IVec3::ZERO, &[water]);
             self.pipeline
                 .upload_body(&self.gpu, (id.slot, id.generation), &mesh);
             MeshDispatch::Sync
@@ -689,7 +689,7 @@ impl VoxApp {
                 (id.slot, id.generation),
                 body.grid.dims,
                 body.grid.voxels.clone(),
-                water,
+                &[water],
             );
             MeshDispatch::Async
         };
@@ -1784,7 +1784,7 @@ impl App for VoxApp {
             }
             self.remesh.absorb_dirty(&mut self.world);
             self.remesh
-                .dispatch(&self.world, eye, water_material(&self.registry));
+                .dispatch(&self.world, eye, &[water_material(&self.registry)]);
             self.remesh.collect(&self.gpu, &mut self.pipeline);
             self.body_mesh.collect(&self.gpu, &mut self.pipeline)
         };
