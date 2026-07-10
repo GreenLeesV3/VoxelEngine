@@ -1340,7 +1340,6 @@ mod tests {
         // Carve a pool on top of the stone floor (floor top at 4 m) and fill
         // it with muddy_water (material id 2) instead of water.
         const MUDDY_WATER: Voxel = Voxel(2);
-        let s = 0.1;
         let floor_top = 40; // 4.0 m in voxel coords
         let pool_top = 70; // 7.0 m — 3 m deep pool
         world.fill_box(
