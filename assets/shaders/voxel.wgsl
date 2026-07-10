@@ -30,6 +30,8 @@ struct VOut {
     @location(1) world_normal: vec3f,
     @location(2) ao: f32,
     @location(3) world_pos: vec3f,
+    @location(4) mat_id: f32,
+    @location(5) jitter_raw: f32,
 };
 
 const SKY_COLOR = vec3f(0.45, 0.66, 0.90);
@@ -93,6 +95,8 @@ fn vs(v: VIn, inst: Inst) -> VOut {
     out.world_normal = normalize((model * vec4f(local_n, 0.0)).xyz);
     out.ao = f32(v.pos_ao.w) / 3.0;
     out.world_pos = wp;
+    out.mat_id = f32(mat_id);
+    out.jitter_raw = f32(v.norm_mat.y);
     return out;
 }
 
@@ -129,10 +133,24 @@ fn fs(in: VOut) -> FOut {
     let fog_n = mix(enc_n, vec3f(0.5, 0.5, 0.5), f * f);
 
     var out: FOut;
-    out.color = vec4f(c, 1.0);
+    // Water: depth-based darkening. The mesher bakes water column depth
+    // (how many water voxels below this face until terrain) into the
+    // jitter field for water faces. Deeper water = darker + slightly
+    // more opaque-looking (achieved by darkening, not alpha blending).
+    let water_id = u32(cam.fog.w);
+    if u32(in.mat_id) == water_id {
+        // Jitter field holds water depth (0=surface, higher=deeper).
+        let water_depth = in.jitter_raw;
+        // Exponential absorption: shallow water is bright, deep water
+        // darkens quickly. Tunes to ~10 voxels for full darkening.
+        let absorption = 1.0 - exp(-water_depth * 0.25);
+        let deep_color = vec3f(0.03, 0.08, 0.15);
+        let water_color = mix(c, deep_color, absorption);
+        out.color = vec4f(water_color, 1.0);
+    } else {
+        out.color = vec4f(c, 1.0);
+    }
     out.normal = vec4f(fog_n, 1.0);
-    // Output NDC depth (clip.z / clip.w) for edge detection — stable
-    // across a flat face, unlike linear distance which varies per voxel.
     let ndc_depth = in.clip.z / in.clip.w;
     out.depth_out = vec4f(ndc_depth, 0.0, 0.0, 1.0);
     return out;

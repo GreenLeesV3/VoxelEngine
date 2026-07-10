@@ -1198,7 +1198,7 @@ impl App for VoxApp {
         let aspect = w as f32 / h.max(1) as f32;
         let view_proj = self.camera.view_proj(aspect);
         self.pipeline
-            .write_camera(&self.gpu, view_proj, self.camera.pos, FOG_END_M);
+            .write_camera(&self.gpu, view_proj, self.camera.pos, FOG_END_M, water_material(&self.registry).0 as f32);
         // Billboard basis: camera right and true up (right x forward).
         let cam_right = self.camera.right();
         let cam_up = cam_right.cross(self.camera.forward()).normalize();

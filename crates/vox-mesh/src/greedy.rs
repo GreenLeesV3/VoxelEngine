@@ -72,13 +72,29 @@ fn ao(side1: bool, side2: bool, corner: bool) -> u8 {
     }
 }
 
-/// A meshable face cell: merged only with cells equal in both fields.
-#[derive(Copy, Clone, PartialEq, Eq)]
+/// A meshable face cell: merged only with cells equal in material AND all
+/// four corner AO values. Water depth is NOT part of the merge comparison
+/// (it varies across a surface over uneven terrain) — merged quads take
+/// the first cell's depth, which is less precise but keeps mesh density low.
+#[derive(Copy, Clone)]
 struct Cell {
     material: Voxel,
     /// Corner AO in (du, dv) order: `[ao00, ao10, ao01, ao11]`.
     ao4: [u8; 4],
+    /// Water column depth: how many voxels of the same material extend
+    /// downward from this face before a different material. 0 for
+    /// non-water materials. Used by the shader for depth-based water
+    /// darkening (stored in the jitter field for water faces).
+    water_depth: u8,
 }
+
+impl PartialEq for Cell {
+    fn eq(&self, other: &Self) -> bool {
+        self.material == other.material && self.ao4 == other.ao4
+    }
+}
+
+impl Eq for Cell {}
 
 /// Deterministic per-vertex jitter hash, baked into the mesh once here
 /// rather than recomputed from world position in the shader every frame.
@@ -158,9 +174,23 @@ pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3) -> MeshData {
                                 slab.solid(outer + u_off + v_off),
                             );
                         }
+                        // Compute water column depth: count same-material
+                        // voxels below this face (Y axis, downward) until
+                        // a different material or out of bounds. Only
+                        // meaningful for non-solid materials (water).
+                        let mat = slab.get(p);
+                        let mut depth: u8 = 0;
+                        if !slab.solid(p) {
+                            let mut below = p - IVec3::Y;
+                            while below.y >= 0 && slab.get(below) == mat {
+                                depth = depth.saturating_add(1);
+                                below -= IVec3::Y;
+                            }
+                        }
                         Some(Cell {
-                            material: slab.get(p),
+                            material: mat,
                             ao4,
+                            water_depth: depth,
                         })
                     } else {
                         None
@@ -244,7 +274,7 @@ fn emit_quad(
             pos,
             ao: cell.ao4[i],
             normal: normal_id,
-            jitter: jitter_hash(jitter_seed, pos),
+            jitter: if cell.water_depth > 0 { cell.water_depth } else { jitter_hash(jitter_seed, pos) },
             material: cell.material.0,
         });
     }
