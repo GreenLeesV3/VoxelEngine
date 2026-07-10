@@ -1307,6 +1307,14 @@ impl App for VoxApp {
                             store: wgpu::StoreOp::Store,
                         },
                     }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: self.postprocess.depth_copy_view(),
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 1e6, g: 0.0, b: 0.0, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
                 ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: self.postprocess.depth_view(),

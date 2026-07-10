@@ -16,6 +16,9 @@ use crate::gpu::{DEPTH_FORMAT, Gpu};
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Offscreen texture format for the normal buffer.
 pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Offscreen texture format for the linear depth copy (R32Float color
+/// texture, used for edge detection — sampled as texture_2d<f32>).
+pub const DEPTH_COPY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -32,6 +35,7 @@ pub struct PostProcessPipeline {
     params_buf: wgpu::Buffer,
     color_tex: wgpu::TextureView,
     normal_tex: wgpu::TextureView,
+    depth_copy_tex: wgpu::TextureView,
     depth_tex: wgpu::TextureView,
     sampler: wgpu::Sampler,
     width: u32,
@@ -46,8 +50,8 @@ impl PostProcessPipeline {
         // --- Offscreen textures ---
         let color_tex = create_color_texture(device, width, height, COLOR_FORMAT);
         let normal_tex = create_color_texture(device, width, height, NORMAL_FORMAT);
+        let depth_copy_tex = create_color_texture(device, width, height, DEPTH_COPY_FORMAT);
         let depth_tex = create_depth_texture_view(device, width, height);
-
         // --- Sampler ---
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("postprocess-sampler"),
@@ -105,7 +109,7 @@ impl PostProcessPipeline {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -136,7 +140,7 @@ impl PostProcessPipeline {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&color_tex) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&depth_tex) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&depth_copy_tex) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&normal_tex) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sampler) },
 
@@ -185,6 +189,7 @@ impl PostProcessPipeline {
             params_buf,
             color_tex,
             normal_tex,
+            depth_copy_tex,
             depth_tex,
             sampler,
             width,
@@ -201,8 +206,8 @@ impl PostProcessPipeline {
         self.height = height;
         self.color_tex = create_color_texture(gpu.device(), width, height, COLOR_FORMAT);
         self.normal_tex = create_color_texture(gpu.device(), width, height, NORMAL_FORMAT);
+        self.depth_copy_tex = create_color_texture(gpu.device(), width, height, DEPTH_COPY_FORMAT);
         self.depth_tex = create_depth_texture_view(gpu.device(), width, height);
-
         // Update params uniform.
         let params = ParamsUniform {
             resolution: [width as f32, height as f32],
@@ -217,7 +222,7 @@ impl PostProcessPipeline {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: self.params_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.color_tex) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.depth_tex) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.depth_copy_tex) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.normal_tex) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
@@ -234,6 +239,11 @@ impl PostProcessPipeline {
         &self.normal_tex
     }
 
+
+    /// The offscreen linear depth copy view (scene outputs depth here).
+    pub fn depth_copy_view(&self) -> &wgpu::TextureView {
+        &self.depth_copy_tex
+    }
     /// The offscreen depth texture view (scene depth-tests here).
     pub fn depth_view(&self) -> &wgpu::TextureView {
         &self.depth_tex

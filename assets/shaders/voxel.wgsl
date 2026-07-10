@@ -99,6 +99,7 @@ fn vs(v: VIn, inst: Inst) -> VOut {
 struct FOut {
     @location(0) color: vec4f,
     @location(1) normal: vec4f,  // world normal encoded to 0..1 for edge detection
+    @location(2) depth_out: vec4f, // linear depth for edge detection (R32Float)
 };
 
 @fragment
@@ -134,5 +135,7 @@ fn fs(in: VOut) -> FOut {
     var out: FOut;
     out.color = vec4f(c, 1.0);
     out.normal = vec4f(enc_n, 1.0);
+    // Output linear depth (distance from camera) for edge detection.
+    out.depth_out = vec4f(dist, 0.0, 0.0, 1.0);
     return out;
 }
