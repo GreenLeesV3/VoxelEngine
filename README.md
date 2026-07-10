@@ -99,6 +99,10 @@ You must provide your own legally-obtained SM64 US ROM.
 Initialize the pinned public libsm64 submodule and generate its Mario
 geometry before enabling the feature:
 
+The native library uses GNU C extensions. On Windows, build the Mario
+feature from an MSYS2 MinGW shell (or another environment that provides
+`gcc`); the default Rust build does not require that toolchain.
+
 ```powershell
 git submodule update --init
 Push-Location libsm64
