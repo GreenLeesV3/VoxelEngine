@@ -23,6 +23,6 @@ pub use fire::{
 };
 pub use fluid::{ContactEvent, FluidSim};
 pub use weathering::{
-    DIRT_SOAK_TICKS, GRASS_SOAK_TICKS, MUD_DRY_TICKS, STONE_ERODE_TICKS, STONE_FALL_BOOST,
+    DIRT_SOAK_TICKS, GRASS_SOAK_TICKS, MUD_DISSOLVE_TICKS, MUD_DRY_TICKS, STONE_ERODE_TICKS, STONE_FALL_BOOST,
     WeatherTable, Weathering,
 };

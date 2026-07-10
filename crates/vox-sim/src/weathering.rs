@@ -23,6 +23,9 @@ pub const STONE_ERODE_TICKS: u32 = 450; // ~30 s
 pub const STONE_FALL_BOOST: u32 = 5;
 /// Dry ticks (no adjacent water) before mud firms back to dirt.
 pub const MUD_DRY_TICKS: u32 = 300; // ~20 s
+/// Dissolve ticks (at the fluid tick rate, ~15 Hz) before mud adjacent to
+/// water dissolves into muddy_water.
+pub const MUD_DISSOLVE_TICKS: u32 = 60; // ~4 s
 
 const NEIGHBORS_6: [IVec3; 6] = [
     IVec3::new(1, 0, 0),
@@ -58,6 +61,7 @@ pub struct Weathering {
     table: WeatherTable,
     soaking: FxHashMap<IVec3, u32>,
     drying: FxHashMap<IVec3, u32>,
+    dissolving: FxHashMap<IVec3, u32>,
 }
 
 impl Weathering {
@@ -66,6 +70,7 @@ impl Weathering {
             table,
             soaking: FxHashMap::default(),
             drying: FxHashMap::default(),
+            dissolving: FxHashMap::default(),
         }
     }
 
@@ -75,6 +80,9 @@ impl Weathering {
     }
     pub fn drying_count(&self) -> usize {
         self.drying.len()
+    }
+    pub fn dissolving_count(&self) -> usize {
+        self.dissolving.len()
     }
 
     pub fn tick(&mut self, world: &mut World, events: &[ContactEvent]) {
@@ -110,6 +118,7 @@ impl Weathering {
                 let v = world.get_voxel(q);
                 if v == t.mud {
                     self.drying.remove(&q); // re-wetted
+                    self.dissolving.entry(q).or_insert(0);
                 } else if v == t.grass || v == t.dirt || (v == t.stone && moving) {
                     self.soaking.entry(q).or_insert(0);
                     if fell && v == t.stone {
@@ -165,6 +174,30 @@ impl Weathering {
             if to == t.dirt {
                 self.soaking.insert(pos, 0);
             }
+        }
+
+        // 2b. Advance dissolving: mud with adjacent wet cell counts toward
+        // dissolving; at threshold, becomes muddy_water.
+        let mut dissolved = Vec::new();
+        self.dissolving.retain(|&pos, ticks| {
+            if world.get_voxel(pos) != t.mud {
+                return false;
+            }
+            if !NEIGHBORS_6
+                .iter()
+                .any(|&n| t.is_wet(world.get_voxel(pos + n)))
+            {
+                return false; // no wet neighbor
+            }
+            *ticks += 1;
+            if *ticks >= MUD_DISSOLVE_TICKS {
+                dissolved.push(pos);
+                return false;
+            }
+            true
+        });
+        for pos in dissolved {
+            world.set_voxel(pos, t.muddy_water);
         }
 
         // 3. Advance drying: mud with water back nearby stops; dry long
@@ -518,5 +551,32 @@ mod tests {
             }
         }
         assert!(mud_count > 0, "the pool's bed must have become mud");
+    }
+    #[test]
+    fn mud_adjacent_to_water_dissolves_to_muddy_water() {
+        let mut world = world_with_floor(MUD);
+        let mut weathering = Weathering::new(table());
+        let cell = IVec3::new(8, 4, 8);
+        let above = cell + IVec3::Y;
+        world.set_voxel(above, WATER);
+        world.set_solid_table(vec![false, false, true, true, true, true, true, false]);
+        // Seed: one Settled event registers the mud for dissolving
+        weathering.tick(&mut world, &[ContactEvent::Settled(above)]);
+        assert_eq!(
+            weathering.dissolving_count(),
+            1,
+            "mud adjacent to water must enter dissolving"
+        );
+        // Not before the threshold
+        for _ in 0..(MUD_DISSOLVE_TICKS - 2) {
+            weathering.tick(&mut world, &[]);
+            assert_eq!(world.get_voxel(cell), MUD, "must not dissolve early");
+        }
+        weathering.tick(&mut world, &[]);
+        assert_eq!(
+            world.get_voxel(cell),
+            MUDDY_WATER,
+            "mud must dissolve to muddy_water at the threshold"
+        );
     }
 }

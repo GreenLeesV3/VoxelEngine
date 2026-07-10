@@ -202,7 +202,7 @@ override water_pass: u32 = 0u;
 override muddy_water_id: u32 = 0u;
 
 fn is_fluid(id: u32) -> bool {
-    return id == 9u || id == muddy_water_id;
+    return id == 9u || (muddy_water_id != 0u && id == muddy_water_id);
 }
 
 @fragment
