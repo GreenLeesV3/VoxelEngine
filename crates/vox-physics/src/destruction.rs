@@ -404,7 +404,7 @@ fn flood_from(
         component.push(v);
         for d in DIRS {
             let n = v + d;
-            if lookup.solid(n) && visited.insert(n) {
+            if lookup.present(n) && visited.insert(n) {
                 heap.push(Reverse(key(n)));
             }
         }
@@ -440,7 +440,7 @@ pub fn detach_unsupported(
     for &r in removed {
         for d in DIRS {
             let seed = r + d;
-            if visited.contains(&seed) || !lookup.solid(seed) {
+            if visited.contains(&seed) || !lookup.present(seed) {
                 continue;
             }
             if let FloodResult::Bounded(component) = flood_from(world, &mut lookup, seed, &mut visited)

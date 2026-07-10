@@ -130,12 +130,17 @@ fn fs(in: VOut) -> FOut {
     c = mix(c, SKY_COLOR, f * f);
 
     // Encode normal to 0..1 for the post-process edge detection pass.
+    // Blend toward the clear color (0.5, 0.5, 0.5) in fog so fogged
+    // pixels don't produce false normal edges against the sky.
     let enc_n = n * 0.5 + 0.5;
+    let fog_n = mix(enc_n, vec3f(0.5, 0.5, 0.5), f * f);
 
     var out: FOut;
     out.color = vec4f(c, 1.0);
-    out.normal = vec4f(enc_n, 1.0);
-    // Output linear depth (distance from camera) for edge detection.
-    out.depth_out = vec4f(dist, 0.0, 0.0, 1.0);
+    out.normal = vec4f(fog_n, 1.0);
+    // Output NDC depth (clip.z / clip.w) for edge detection — stable
+    // across a flat face, unlike linear distance which varies per voxel.
+    let ndc_depth = in.clip.z / in.clip.w;
+    out.depth_out = vec4f(ndc_depth, 0.0, 0.0, 1.0);
     return out;
 }

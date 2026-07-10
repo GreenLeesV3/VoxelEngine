@@ -80,8 +80,8 @@ fn fs(@builtin(position) frag_pos: vec4f) -> @location(0) vec4f {
     // Combine edges. Depth edges are stronger (silhouettes); normal
     // edges are softer (interior face boundaries). Threshold to keep
     // only meaningful edges.
-    let edge = clamp(depth_edge * 2.0 + normal_edge * 1.5, 0.0, 1.0);
-    let edge_mask = smoothstep(0.15, 0.4, edge);
+    let edge = clamp(depth_edge * 1.5 + normal_edge * 1.0, 0.0, 1.0);
+    let edge_mask = smoothstep(0.25, 0.5, edge);
 
     // Material-tinted outline: darken the base color by 65% for the
     // outline, giving a material-tinted dark edge instead of pure black.

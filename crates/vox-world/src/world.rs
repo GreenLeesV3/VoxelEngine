@@ -55,6 +55,29 @@ impl<'w> SolidLookup<'w> {
             None => false,
         }
     }
+
+    /// True when the voxel at `v` is present (non-air), regardless of
+    /// solidity. Used by the connectivity flood to traverse non-solid
+    /// materials (leaves, water) that are still physically present in
+    /// the grid and should detach with the structure they're part of.
+    pub fn present(&mut self, v: IVec3) -> bool {
+        if !self.world.in_bounds(v) {
+            return false;
+        }
+        let key = chunk_of(v);
+        let chunk = match self.cached {
+            Some((k, c)) if k == key => c,
+            _ => {
+                let c = self.world.chunk_at(key);
+                self.cached = Some((key, c));
+                c
+            }
+        };
+        match chunk {
+            Some(c) => c.get(local_of(v)) != AIR,
+            None => false,
+        }
+    }
 }
 
 /// A half-open voxel-space box `[min, max)` touched by an edit.
