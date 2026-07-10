@@ -79,6 +79,9 @@ pub struct CarveOutcome {
     /// nothing was hit) -- lets feedback particles take on the color of the
     /// material actually being destroyed.
     pub impact_material: Voxel,
+    /// Voxel diff for undo: (position, old_voxel) pairs of every world voxel
+    /// that was changed by this operation. Empty for body-only carves.
+    pub voxel_diff: Vec<(IVec3, Voxel)>,
 }
 
 /// What a scene raycast hit: a specific static-world voxel, or an existing
@@ -301,9 +304,11 @@ impl Tools {
         let material = hit_material(world, phys, &hit);
         let mut outcome = match hit {
             SceneHit::World(voxel) => {
+                let old_voxel = world.get_voxel(voxel);
                 world.set_voxel(voxel, AIR);
                 CarveOutcome {
                     spawned: vox_physics::detach_unsupported(world, phys, registry, &[voxel]),
+                    voxel_diff: vec![(voxel, old_voxel)],
                     ..CarveOutcome::default()
                 }
             }
@@ -343,8 +348,8 @@ impl Tools {
         };
         let material = hit_material(world, phys, &hit);
         let mut outcome = match hit {
-            SceneHit::World(_) => CarveOutcome {
-                spawned: vox_physics::blast(
+            SceneHit::World(_) => {
+                let result = vox_physics::blast(
                     world,
                     phys,
                     registry,
@@ -352,10 +357,13 @@ impl Tools {
                     self.radius_m,
                     power,
                     seed,
-                )
-                .spawned,
-                ..CarveOutcome::default()
-            },
+                );
+                CarveOutcome {
+                    spawned: result.spawned,
+                    voxel_diff: result.removed,
+                    ..CarveOutcome::default()
+                }
+            }
             SceneHit::Body(id, _) => {
                 let spawned = vox_physics::carve_body_explosion_at(
                     phys,
@@ -393,14 +401,14 @@ impl Tools {
         let material = hit_material(world, phys, &hit);
         let mut outcome = match hit {
             SceneHit::World(_) => {
-                let mut carve = vox_physics::carve_sphere(world, hit_point_m, self.radius_m);
+                let carve = vox_physics::carve_sphere(world, hit_point_m, self.radius_m);
                 let removed: Vec<IVec3> = carve.removed.iter().map(|&(v, _)| v).collect();
                 let ids = vox_physics::detach_unsupported(world, phys, registry, &removed);
                 let s = world.cfg.voxel_size_m;
                 phys.wake_region(carve.region.0.as_vec3() * s, carve.region.1.as_vec3() * s);
-                carve.spawned = ids;
                 CarveOutcome {
-                    spawned: carve.spawned,
+                    spawned: ids,
+                    voxel_diff: carve.removed,
                     ..CarveOutcome::default()
                 }
             }
@@ -432,9 +440,10 @@ impl Tools {
             Some((hit, point)) => (Some(*point), hit_material(world, phys, hit)),
             None => (None, AIR),
         };
+        let laser_result = vox_physics::laser(world, phys, registry, eye_m, end_m, DEATH_LASER_RADIUS_M);
         let mut outcome = CarveOutcome {
-            spawned: vox_physics::laser(world, phys, registry, eye_m, end_m, DEATH_LASER_RADIUS_M)
-                .spawned,
+            spawned: laser_result.spawned,
+            voxel_diff: laser_result.removed,
             impact_m,
             impact_material,
             ..CarveOutcome::default()
@@ -455,13 +464,14 @@ impl Tools {
     }
 
     /// Place the selected material against the hit face, unless it would
-    /// intersect the player.
-    pub fn place_voxel(&self, world: &mut World, eye_m: Vec3, look: Vec3, player: Aabb) {
+    /// intersect the player. Returns the (pos, old_voxel) diff if a voxel
+    /// was placed, for undo support.
+    pub fn place_voxel(&self, world: &mut World, eye_m: Vec3, look: Vec3, player: Aabb) -> Option<(IVec3, Voxel)> {
         let Some(hit) = raycast(world, eye_m, look, REACH) else {
-            return;
+            return None;
         };
         let Some(face) = hit.face else {
-            return; // Eye inside a solid voxel; nowhere to place.
+            return None; // Eye inside a solid voxel; nowhere to place.
         };
         let target = hit.voxel + face;
         let s = world.cfg.voxel_size_m;
@@ -471,7 +481,11 @@ impl Tools {
             && (c.y + half > player.min.y && c.y - half < player.max.y)
             && (c.z + half > player.min.z && c.z - half < player.max.z);
         if !overlaps {
+            let old = world.get_voxel(target);
             world.set_voxel(target, self.material());
+            Some((target, old))
+        } else {
+            None
         }
     }
 

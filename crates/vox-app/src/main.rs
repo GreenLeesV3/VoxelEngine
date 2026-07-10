@@ -209,6 +209,10 @@ struct VoxApp {
     /// CPU-simulated destruction feedback particles (see `particles`).
     particles: ParticleSystem,
     particle_pipeline: ParticlePipeline,
+    /// Undo stack: each entry is a voxel diff (pos, old_voxel) from a world edit.
+    undo_stack: Vec<Vec<(IVec3, Voxel)>>,
+    /// Redo stack: entries popped from undo_stack by Ctrl+Z, re-applied by Ctrl+Y.
+    redo_stack: Vec<Vec<(IVec3, Voxel)>>,
 }
 
 /// Hard cap on total debris bodies alive at once. Past this, the oldest
@@ -313,6 +317,8 @@ impl VoxApp {
             mario_units_per_meter,
             game_time: 60.0, // Start at noon (halfway through 120s cycle)
             pending_body_removal: HashMap::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             particles: ParticleSystem::new(),
             particle_pipeline,
         };
@@ -681,6 +687,15 @@ impl VoxApp {
             // until every replacement fragment is ready (see its own doc
             // comment).
             self.emit_tool_particles(&outcome);
+            // Push voxel diff onto undo stack (if any world voxels changed).
+            if !outcome.voxel_diff.is_empty() {
+                self.undo_stack.push(outcome.voxel_diff);
+                self.redo_stack.clear();
+                // Cap undo history to 50 operations.
+                if self.undo_stack.len() > 50 {
+                    self.undo_stack.remove(0);
+                }
+            }
             match outcome.removed.first() {
                 Some(&old_id) => self.replace_body(old_id, outcome.spawned),
                 None => {
@@ -691,8 +706,15 @@ impl VoxApp {
             }
         }
         if input.mouse_clicked(MouseButton::Right) {
-            self.tools
-                .place_voxel(&mut self.world, eye, look, self.player.ctrl.aabb());
+            if let Some(diff) = self.tools
+                .place_voxel(&mut self.world, eye, look, self.player.ctrl.aabb())
+            {
+                self.undo_stack.push(vec![diff]);
+                self.redo_stack.clear();
+                if self.undo_stack.len() > 50 {
+                    self.undo_stack.remove(0);
+                }
+            }
         }
         if input.wheel_delta.abs() >= 1.0 {
             let steps = input.wheel_delta as i32;
@@ -702,6 +724,53 @@ impl VoxApp {
                 self.tools.cycle_material(steps, &self.registry);
             }
         }
+    }
+
+    /// Undo the last world edit: restore old voxel values, clear redo stack
+    /// entry for this undo (push current values for redo).
+    fn undo(&mut self) {
+        let Some(diff) = self.undo_stack.pop() else {
+            return;
+        };
+        // Capture current values for redo (voxels may have been re-edited).
+        let redo_diff: Vec<(IVec3, Voxel)> = diff
+            .iter()
+            .map(|&(pos, _)| (pos, self.world.get_voxel(pos)))
+            .collect();
+        // Restore old values (set_voxel marks dirty + dirty_regions).
+        for &(pos, old_voxel) in &diff {
+            self.world.set_voxel(pos, old_voxel);
+        }
+        self.redo_stack.push(redo_diff);
+        // Wake physics for the edited regions.
+        let s = self.world.cfg.voxel_size_m;
+        for (min, max) in self.world.drain_dirty_regions() {
+            self.phys.wake_region(min.as_vec3() * s, max.as_vec3() * s);
+        }
+        tracing::info!(voxels = diff.len(), "undo");
+    }
+
+    /// Redo the last undone edit: re-apply the saved current values.
+    fn redo(&mut self) {
+        let Some(diff) = self.redo_stack.pop() else {
+            return;
+        };
+        // Capture current values for undo (so undo can undo the redo).
+        let undo_diff: Vec<(IVec3, Voxel)> = diff
+            .iter()
+            .map(|&(pos, _)| (pos, self.world.get_voxel(pos)))
+            .collect();
+        // Re-apply the redo values.
+        for &(pos, voxel) in &diff {
+            self.world.set_voxel(pos, voxel);
+        }
+        self.undo_stack.push(undo_diff);
+        // Wake physics for the edited regions (set_voxel marks dirty).
+        let s = self.world.cfg.voxel_size_m;
+        for (min, max) in self.world.drain_dirty_regions() {
+            self.phys.wake_region(min.as_vec3() * s, max.as_vec3() * s);
+        }
+        tracing::info!(voxels = diff.len(), "redo");
     }
 
     /// Carve a crater where Mario's ground pound landed, detach any
@@ -979,6 +1048,12 @@ impl App for VoxApp {
         }
         if input.key_pressed(KeyCode::KeyM) {
             self.toggle_mario_mode();
+        }
+        if input.key_down(KeyCode::ControlLeft) && input.key_pressed(KeyCode::KeyZ) {
+            self.undo();
+        }
+        if input.key_down(KeyCode::ControlLeft) && input.key_pressed(KeyCode::KeyY) {
+            self.redo();
         }
         self.profile
             .input
