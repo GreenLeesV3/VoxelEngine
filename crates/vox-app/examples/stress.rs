@@ -128,7 +128,7 @@ fn stress_blast_in_huge_terrain(reg: &MaterialRegistry) {
     for i in 0..10 {
         let center = Vec3::new(20.0 + i as f32 * 8.0, 5.0, 20.0);
         let t0 = Instant::now();
-        vox_physics::blast(&mut world, &mut phys, reg, center, 3.0, 40.0, i as u32);
+        vox_physics::blast(&mut world, &mut phys, reg, center, 3.0, 40.0, i as u32, None);
         times.push(t0.elapsed().as_secs_f32() * 1000.0);
     }
     report("blast-in-huge-terrain", times);
@@ -169,7 +169,7 @@ fn stress_meshing(sizes: &[i32]) {
         for _ in 0..20 {
             let t0 = Instant::now();
             let slab = VoxelSlab::from_grid(dims, &voxels);
-            let _mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(9));
+            let _mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(9), None);
             times.push(t0.elapsed().as_secs_f32() * 1000.0);
         }
         report(&format!("mesh-slab/{n}^3-cube"), times);

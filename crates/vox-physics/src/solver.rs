@@ -147,6 +147,8 @@ pub struct PhysicsWorld {
     broadphase: Broadphase,
     contact_flags: Vec<bool>,
     pos_corr: Vec<Vec3>,
+    contacts_scratch: Vec<Contact>,
+    staged_scratch: Vec<Contact>,
     pub tunables: Tunables,
     lifetime_rng: u64,
     /// The voxel material id treated as water for buoyancy. `None` (default)
@@ -349,8 +351,10 @@ impl PhysicsWorld {
         // every substep.
         let mut peaks: FxHashMap<usize, (f32, Vec3, Vec3)> = FxHashMap::default();
         let h = dt / SUBSTEPS as f32;
+        self.broadphase.build(&self.slots);
+        let mut lookup = SolidLookup::new(world);
         for _ in 0..SUBSTEPS {
-            self.substep(world, h, &mut peaks);
+            self.substep(world, h, &mut peaks, &mut lookup);
         }
         let impacts = peaks
             .into_iter()
@@ -433,7 +437,7 @@ impl PhysicsWorld {
             }
             parent[x]
         }
-        for &(a, b) in self.broadphase.candidate_pairs(&self.slots) {
+        for &(a, b) in self.broadphase.pairs() {
             let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
             if ra != rb {
                 parent[ra] = rb;
@@ -449,7 +453,7 @@ impl PhysicsWorld {
         groups.into_values().collect()
     }
 
-    fn substep(&mut self, world: &World, h: f32, peaks: &mut FxHashMap<usize, (f32, Vec3, Vec3)>) {
+    fn substep(&mut self, world: &World, h: f32, peaks: &mut FxHashMap<usize, (f32, Vec3, Vec3)>, lookup: &mut SolidLookup<'_>) {
         // Refresh every live body's cached world inverse inertia -- rotation
         // only changes at the end of a substep, so this is constant across
         // the whole contact solve below (see `Body::inv_iw`'s docs).
@@ -459,8 +463,10 @@ impl PhysicsWorld {
             body.inv_iw = body.inv_inertia_world();
         }
 
-        let mut lookup = SolidLookup::new(world);
-        let mut contacts: Vec<Contact> = Vec::new();
+        // Reuse the persistent SolidLookup (chunk cache carries over between
+        // substeps) and persistent contact buffers (.clear() preserves the
+        // allocation) instead of allocating fresh ones every substep.
+        self.contacts_scratch.clear();
         // Integrate velocities and collect contacts.
         for (slot, entry) in self.slots.iter_mut().enumerate() {
             let Some(body) = entry else { continue };
@@ -507,15 +513,16 @@ impl PhysicsWorld {
                 body.omega = body.omega.normalize() * MAX_ANGULAR_SPEED_RAD_S;
             }
             debug_assert!(body.vel.is_finite() && body.pos.is_finite());
-            world_contacts(body, slot, &mut contacts, &mut lookup);
+            world_contacts(body, slot, &mut self.contacts_scratch, lookup);
         }
 
         // Body-body narrowphase over broadphase candidates. One staging
         // buffer reused across every pair (`Vec::append` drains it but
         // keeps its capacity) instead of a fresh allocation per touching
-        // pair per substep.
-        let mut staged: Vec<Contact> = Vec::new();
-        for &(a, b) in self.broadphase.candidate_pairs(&self.slots) {
+        // pair per substep. The broadphase pairs were built once at the
+        // top of step() and are reused across all substeps.
+        self.staged_scratch.clear();
+        for &(a, b) in self.broadphase.pairs() {
             let (asleep_a, asleep_b) = {
                 let ba = self.slots[a].as_ref().expect("pair body alive");
                 let bb = self.slots[b].as_ref().expect("pair body alive");
@@ -541,11 +548,11 @@ impl PhysicsWorld {
                 target_asleep = true;
             }
 
-            staged.clear();
+            self.staged_scratch.clear();
             let result = {
                 let sb = self.slots[sampler].as_ref().expect("alive");
                 let tb = self.slots[target].as_ref().expect("alive");
-                pair_contacts(sb, sampler, tb, target, target_asleep, &mut staged)
+                pair_contacts(sb, sampler, tb, target, target_asleep, &mut self.staged_scratch)
             };
             if result.contact_count == 0 {
                 continue;
@@ -555,16 +562,16 @@ impl PhysicsWorld {
                 let tb = self.slots[target].as_mut().expect("alive");
                 tb.sleep.asleep = false;
                 tb.sleep.quiet_steps = 0;
-                staged.clear();
+                self.staged_scratch.clear();
                 let sb_ref = self.slots[sampler].as_ref().expect("alive");
                 let tb_ref = self.slots[target].as_ref().expect("alive");
-                pair_contacts(sb_ref, sampler, tb_ref, target, false, &mut staged);
+                pair_contacts(sb_ref, sampler, tb_ref, target, false, &mut self.staged_scratch);
             }
-            contacts.append(&mut staged);
+            self.contacts_scratch.append(&mut self.staged_scratch);
         }
 
         // Warm start from the previous substep's accumulated impulses.
-        for c in &mut contacts {
+        for c in &mut self.contacts_scratch {
             if let Some(&(n0, t10, t20)) = self.warm.get(&c.key) {
                 c.acc_n = n0;
                 c.acc_t1 = t10;
@@ -590,7 +597,7 @@ impl PhysicsWorld {
         // recovered *positionally* (split impulse, below), which by
         // construction cannot add kinetic energy to anything.
         for _ in 0..SOLVER_ITERS {
-            for c in &mut contacts {
+            for c in &mut self.contacts_scratch {
                 let vn = Self::relative_velocity(&self.slots, c).dot(c.normal);
                 let lambda = -vn / c.kn;
                 let new_acc = (c.acc_n + lambda).max(0.0);
@@ -616,7 +623,7 @@ impl PhysicsWorld {
         // material-based impact fracture (see `ImpactEvent`). Positions
         // here are pre-integration, matching the frame `c.r_arm`/`r_arm_b`
         // were computed in when this substep's contacts were generated.
-        for c in &contacts {
+        for c in &self.contacts_scratch {
             if c.acc_n <= 0.0 || c.approach_speed < MIN_IMPACT_APPROACH_SPEED_M_S {
                 continue;
             }
@@ -645,7 +652,7 @@ impl PhysicsWorld {
         // resistance below.
         self.contact_flags.clear();
         self.contact_flags.resize(self.slots.len(), false);
-        for c in &contacts {
+        for c in &self.contacts_scratch {
             self.contact_flags[c.body] = true;
             if let Some(b) = c.body_b {
                 self.contact_flags[b] = true;
@@ -700,7 +707,7 @@ impl PhysicsWorld {
         self.pos_corr.clear();
         self.pos_corr.resize(self.slots.len(), Vec3::ZERO);
         for _ in 0..POSITION_ITERS {
-            for c in &contacts {
+            for c in &self.contacts_scratch {
                 let corr_b = c.body_b.map_or(Vec3::ZERO, |b| self.pos_corr[b]);
                 let already = (self.pos_corr[c.body] - corr_b).dot(c.normal);
                 let remaining = (c.depth - CONTACT_SLOP) - already;
@@ -733,8 +740,10 @@ impl PhysicsWorld {
         }
 
         // Persist accumulated impulses for the next substep's warm start.
+        // `.clear()` preserves the map's backing allocation; the insert loop
+        // repopulates it with this substep's accumulated impulses.
         self.warm.clear();
-        for c in &contacts {
+        for c in &self.contacts_scratch {
             self.warm.insert(c.key, (c.acc_n, c.acc_t1, c.acc_t2));
         }
     }

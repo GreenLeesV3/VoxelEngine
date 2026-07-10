@@ -1,6 +1,12 @@
 // Camera-facing billboard particles: one instanced quad per particle, soft
-// circular falloff in the fragment shader, alpha-blended, depth-tested but
-// not depth-written (particles never occlude the world or each other).
+// circular falloff in the fragment shader, alpha-blended.
+//
+// Soft particles (#70): the fragment shader reads the scene depth texture
+// and fades alpha to zero as the particle fragment approaches the scene
+// surface behind it, eliminating hard-cut intersections with terrain.
+// The particle pass has NO depth attachment — the depth texture is bound
+// as a sampled resource, and both the behind-terrain occlusion test and
+// the soft fade are done manually in the shader via textureLoad.
 
 struct Camera {
     view_proj: mat4x4f,
@@ -9,6 +15,11 @@ struct Camera {
 };
 
 @group(0) @binding(0) var<uniform> cam: Camera;
+@group(0) @binding(1) var scene_depth: texture_depth_2d;
+
+// Depth range (in NDC 0..1) over which a particle fades when it meets the
+// scene surface. Must match the Rust-side _SOFT_FADE_RANGE constant.
+const SOFT_FADE_RANGE: f32 = 0.02;
 
 struct Inst {
     @location(0) center_size: vec4f, // xyz = world center (m), w = half-size (m)
@@ -57,5 +68,35 @@ fn fs(in: VOut) -> @location(0) vec4f {
     if a <= 0.003 {
         discard;
     }
-    return vec4f(in.color.rgb, a);
+
+    // Soft particle fade + behind-terrain test (#70): read the scene depth
+    // at this fragment's pixel and compare it to the particle's NDC depth.
+    // The engine uses standard NDC (0=near, 1=far, clear=1.0, LessEqual),
+    // NOT reverse-Z. A particle well in front of terrain has
+    // particleDepth < sceneDepth, so softness → 1 (fully visible). As the
+    // particle sinks into the surface the gap shrinks to zero and softness
+    // → 0 (fades out). A particle fully behind terrain (particleDepth >
+    // sceneDepth) is discarded entirely — the old hardware depth_compare
+    // LessEqual behavior, now done in-shader since the particle pass has no
+    // depth attachment.
+    //
+    // `in.clip.xy` is the fragment's pixel coordinate (the @builtin(position)
+    // in a fragment input is the pixel-center position, not interpolated).
+    let texel = vec2i(in.clip.xy);
+    let scene_depth_val = textureLoad(scene_depth, texel, 0);
+    let particle_depth = in.clip.z;
+
+    // Behind terrain — discard (replaces the old hardware depth test).
+    // Use step() instead of > comparison (naga doesn't support > on
+    // depth texture samples). step(a, b) = 1.0 if b >= a, 0.0 if b < a.
+    // behind = step(scene_depth_val, particle_depth) — 1.0 if particle is behind.
+    let behind = step(scene_depth_val, particle_depth);
+    if behind > 0.5 {
+        discard;
+    }
+
+    // Intersection fade: 1 when well in front, 0 at the surface.
+    let softness = clamp((scene_depth_val - particle_depth) / SOFT_FADE_RANGE, 0.0, 1.0);
+
+    return vec4f(in.color.rgb, a * softness);
 }

@@ -46,15 +46,15 @@ spreads through flammable materials, water flows downhill and carves channels,
 falling sand cascades. Scale-invariant (rates in m/s). Headlessly testable.
 **Highest single-system impact on the roadmap.**
 
-### 7. vox-stream — Streaming Infinite Worlds
+### 7. vox-stream — Streaming Infinite Worlds — Merges #84 (chunk streaming) + #131 (GenQueue + LRU)
 New crate at world/gen tier. HashMap chunk storage is already streaming-ready.
 Deterministic per-chunk generation. Background GenQueue mirroring RemeshQueue.
-Replaces finite world wall with load radius. Turns the demo into a sandbox.
+Replaces finite world wall with load radius. Turns the demo into a sandbox. **Detailed impl (#84):** World enforces finite bounds via in_bounds(); build_terrain_world generates everything upfront. Streaming needs: replace fixed bounds with load radius, add background GenQueue mirroring RemeshQueue, LRU eviction of far chunks, relax bounds_voxels. Uniform/Dense storage means most unloaded chunks regenerate trivially. **Detailed impl (#131):** RemeshQueue's pattern (generation-stamped pending/latest, nearest-first dispatch) is the template for GenQueue. Three pieces: GenQueue mirroring RemeshQueue, LRU eviction on chunk HashMap, bounded dirty/dirty_regions. Feasibility: **hard**.
 
-### 8. vox-save — Chunk Serialization & Save/Load
+### 8. vox-save — Chunk Serialization & Save/Load — Merges #87 (delta-over-base)
 New crate at world tier. Uniform chunks = ~3 bytes, Dense = palette-RLE.
 Delta-over-base: only edited chunks saved, unedited regenerate from seed.
-Versioned header for future features. The Uniform/Dense enum was designed for this.
+Versioned header for future features. The Uniform/Dense enum was designed for this. **Detailed impl (#87):** WorldConfig is serde-serializable, ChunkStorage was designed for serialization, undo stack captures voxel diffs, terrain gen is deterministic per-seed. Save format: header (config + seed + version), per-chunk delta blocks (only edited chunks — unedited regenerate from seed). Lightly-edited worlds save in kilobytes. Debris bodies serialize VoxelGrid + transforms. Integration with undo: save is a checkpoint, load clears undo history. Feasibility: **medium**.
 
 ### 9. vox-eco — Ecosystem & Creatures
 New crate at gen/physics tier. Creatures with simple AI (wander, flee, hunt).
@@ -101,26 +101,45 @@ everything.
 ## Physics & Simulation
 
 ### 16. Chain-Reaction Explosives & Blast-Cascade System
-Add `explosive` flag to MaterialDef. Blast scans carved voxels for explosive
-materials, enqueues deferred secondary blasts. Genuine cascades through the
-existing destruction pipeline. Bomb Block as buildable material (hotbar slot 5).
-Cheap, high payoff — reuses everything.
+Add `explosive` flag to MaterialDef (like the existing `flammable` field) plus
+per-material blast_radius and blast_power. When `blast()` carves voxels, it scans
+the removed list for explosive materials and enqueues deferred secondary blasts at
+those positions, each with its own seed. A TNT block hit by a bomb detonates its
+neighbors, which detonate theirs — genuine chain reactions. The fire system's
+`FireEvent::Consumed` → `detach_unsupported` pattern proves deferred post-tick
+processing works. Secondary blasts re-enter `blast()` recursively (with a depth
+cap), so cratering, debris chips, and connectivity floods all compose for free.
+Bomb Block as buildable material (hotbar slot 5). Cheap, high payoff — reuses
+everything. Feasibility: **medium**. *(Merges #134.)*
 
 ### 17. Sustained-Load Structural Failure (Towers Topple Under Load)
-New stress analysis alongside the connectivity flood. Towers under their own weight
-or heavy debris piles yield and collapse. NOT in the existing flood (binary
-anchored/bounded) or impact pipeline (filters resting forces). Genuinely new
-physics: beams crack, towers topple.
+The current connectivity flood is binary: a component is anchored (reaches floor)
+or bounded (doesn't). This adds a *load estimate* to anchored components: during
+`flood_from`, accumulate the total mass of solid voxels above each support column.
+A pillar supporting 500 voxels of stone carries more load than one supporting 50.
+When load exceeds a material-dependent threshold (strength × cross-section), the
+pillar's voxels are marked 'stressed' — crack decals (#43, DONE) darken them, and
+if load exceeds a breaking threshold, the pillar is carved via
+`detach_unsupported`, triggering progressive collapse as upper material loses its
+anchor. NOT in the existing flood (binary anchored/bounded) or impact pipeline
+(filters resting forces). Genuinely new physics: beams crack, towers topple.
+Feasibility: **hard**. *(Merges #135.)*
 
 ### 18. Fluid Simulation (SPH or grid-based water)
 Water as particles or grid cells with pressure/velocity. Flows downhill, fills
 containers, erodes terrain. Pairs with vox-sim for cellular automata approach, or
 standalone for particle-based fluids.
 
-### 19. Terrain Erosion from Water Flow
+### 19. Terrain Erosion from Water Flow — Merges #105 (sediment transport)
 Water carves channels through weak materials over time. Sand washes away, stone
 resists. Creates natural canyons and riverbeds. The carve pipeline already exists —
-erosion is a slow, automated version driven by fluid sim.
+erosion is a slow, automated version driven by fluid sim. **Detailed impl (#105):**
+The current weathering erodes stone to sand only when *moving* water touches it,
+but deposition is missing — eroded sand should be carried downstream and deposited
+where water slows. The fluid sim classifies contacts as Fell/Flowed/Settled;
+weathering can emit deposition_events when a Flowed cell slows (Settled after
+Flowed), placing sand. Over time carves canyons and builds sandbars — emergent
+geomorphology from the existing event pipeline. Feasibility: **medium**.
 
 ### 20. Buoyancy & Floating Structures — ✅ DONE (from upstream merge, debris floats)
 Debris bodies float or sink based on material density vs water density. Wood floats
@@ -151,10 +170,10 @@ Cappy as a projectile that interacts with voxels — could carve a small hole, k
 debris around, or be thrown to possess/mount debris bodies. New tool slot, new
 animation state.
 
-### 25. Power-Up Voxel Materials
+### 25. Power-Up Voxel Materials — Merges #88 (FFI binding details)
 Metal cap (immune to fire, sinks in water), wing cap (fly around), vanish cap (clip
 through walls). Implemented as special voxel materials Mario interacts with — touch
-a metal block, get metal cap. Ties Mario to the voxel material system.
+a metal block, get metal cap. Ties Mario to the voxel material system. **Detailed impl (#88):** The grant FFI is completely unbound: `sm64_set_mario_state` (libsm64.h:167) sets MARIO_VANISH/METAL/WING_CAP flags, `sm64_mario_interact_cap` (libsm64.h:180) handles full grant with timer+music. Neither is in ffi.rs. C-side behavior is fully implemented: vanish cap skips wall collision, metal cap sinks + immune to fire, wing cap enables flying triple-jump. Bind both, trigger from voxel-material proximity. Feasibility: **medium**.
 
 
 ---
@@ -242,7 +261,7 @@ demolition charge they *aim with gameplay* rather than a crosshair.
 Reuses 100% of the bomb pipeline; reframes Mario as a character-shaped
 tool.
 
-### 28. Lakitu Camera Modes — Fly Cam & Fixed-Camera Angles
+### 28. Lakitu Camera Modes — Merges #94 (collision-aware camera FFI)
 SM64's signature feel comes from Lakitu's inertia and mode switches, but
 libsm64 only accepts `camLookX/camLookZ` (mario.rs:233-238) — the
 internal Lakitu cam is NOT exposed to the host. So this is a *voxel-side
@@ -257,7 +276,7 @@ Mario enters a region the camera locks to that anchor, giving cinematic
 platformer framing over destructed structures. (3) **Free orbit**
 (current behavior, kept as default). All three reuse `MarioCameraUniform`;
 pure Rust camera logic, no FFI, no new render pass. The fixed-cam presets
-author as a `Vec` in Tunables, editable in the egui panel (vox-debug).
+author as a `Vec` in Tunables, editable in the egui panel (vox-debug). **Detailed impl (#94):** Two already-bound FFI functions solve camera collision: `sm64_surface_find_wall_collision` (ffi.rs:146) pushes a position out of walls, `sm64_surface_find_floor_height` (ffi.rs:153) returns ground height. After computing desired camera position, wall-collision-pull it. Add spring-damped lag (lerp toward target, 0.15 alpha) for Lakitu feel. Feasibility: **medium**.
 
 ### 29. Collectibles Placed in the Voxel World — Coins & Stars
 libsm64 does NOT expose SM64's native object/coin/star system to the
@@ -318,10 +337,10 @@ Destruction is the thing you AVOID. Fragile fossil artifacts shatter if blast/im
 exceeds their strength threshold. Dig=safe, Bomb/Laser=risk, Scalable Dig=tension.
 Needs new material ("ceramic" strength 0.3) + ruin gen module.
 
-### 33. Rube-Goldberg Demolition Machine
+### 33. Rube-Goldberg Demolition Machine — Merges #100 (chain reaction sandbox)
 Player authors a multi-stage physical chain reaction: sever, detach, fall, impact,
 fracture, sever again. No new explosive flag needed — composed loop of existing
-systems. Material strength tunes each domino's topple threshold. Works today.
+systems. Material strength tunes each domino's topple threshold. Works today. **Detailed impl (#100):** Free-form sandbox: build multi-stage chain reactions using fire, water, and destruction as links. Build a wooden ramp (flammable), place an ember, fire spreads down it to a bomb-buried pillar, blast severs it, tower falls, debris fractures lower structure. Water as a link: flow → erode → collapse. 'Trigger' button starts the chain, replay captures it. No win condition — cascade authoring joy. Feasibility: **easy**.
 
 ### 34. Time-Rewind Demolition Sandbox
 Braid-for-destruction. Scrub timeline, fork from any prior state, try a different
@@ -329,11 +348,11 @@ cut. Every carve returns removed: Vec<(IVec3,Voxel)> — complete invertible log
 Undo = write pairs back + despawn seeded bodies. Needs vox-rewind crate for full
 scrub; single-step undo prototype fits vox-app.
 
-### 35. Voxel Seismograph — Mining With Cave-In Risk
+### 35. Voxel Seismograph — Mining With Cave-In Risk — Merges #139 (risk indicator)
 The connectivity flood IS the gameplay loop — exposed as a cave-in warning readout.
 Sever the last anchor and the roof falls on you. New flood_risk_probe reports
 at-risk volumes without spawning bodies. Material strength = margin. Needs
-read-only flood probe in vox-physics + vox-debug overlay.
+read-only flood probe in vox-physics + vox-debug overlay. **Detailed impl (#139):** A read-only `flood_risk_probe(world, point)` that reports at-risk volume without spawning bodies. Hovering the crosshair over a support voxel shows a color-coded risk meter: green (small detach), yellow (moderate), red (catastrophic). The flood already does this computation — the probe skips extract-and-spawn. Pairs with #17's stress propagation to show load AND connectivity risk. Feasibility: **easy**.
 
 ---
 
@@ -349,11 +368,11 @@ Brush = operation (Paint/Replace/Erase/Smooth/Noise) x shape (Sphere/Box/Line/
 Cylinder). Prefab stamping reuses VoxelSlab::extract. Editor is a separate mode
 (toggled like Mario mode). Depends on #36 for undo.
 
-### 38. vox-mod — Data-Driven Content and Tool API
+### 38. vox-mod — Data-Driven Content and Tool API — Merges #86 (entity/tool manifest)
 Three tiers: (1) open-ended material properties HashMap (unblocks water, explosives,
 flammable — currently blocked by deny_unknown_fields), (2) data-described tools as
 TOML recipes composing native Rust effectors, (3) data-driven gen hooks. NO
-scripting runtime — mods compose our primitives.
+scripting runtime — mods compose our primitives. **Detailed impl (#86):** The engine is hardcoded to specific material names (fire_table, weather_table, water_material look up by string). Tools are hardcoded Rust enums. A data-driven registry: sim manifest maps materials to roles, tools as TOML recipes, terrain layers as TOML biomes. Relax `deny_unknown_fields` on RawMaterial for custom modder properties. Enables modding without Rust changes. Feasibility: **medium**.
 
 ### 39. vox-determinism — Replay and Lockstep Networking Foundation — ✅ DONE (snapshot replay, R/P)
 One system, not two. Replay (snapshot-based, ships first) and lockstep networking
@@ -385,9 +404,9 @@ New pass + meshing extension. Pairs with sustained-load #17.
 World-space color bleeding + directional indirect light. The only proposal that
 makes light bounce. Most expensive; quality-gated. Needs storage textures feature.
 
-### 45. Live Minimap / 3D Map Overlay
+### 45. Live Minimap / 3D Map Overlay — Merges #110 (compass + egui minimap)
 Navigation, not fidelity. The only HUD/spatial-awareness idea. Becomes essential
-once streaming (#7) makes the world infinite. Small new pass + egui composite.
+once streaming (#7) makes the world infinite. Small new pass + egui composite. **Detailed impl (#110):** Compass ribbon (N/E/S/W + bearing from player.yaw) + live minimap rendering a top-down heightmap projection of nearby chunks with player position/heading. Uses egui compositing on the existing vox-debug overlay. Compass is pure math; minimap samples chunk data for a low-res heightmap tile. Feasibility: **medium**.
 
 ---
 
@@ -404,20 +423,20 @@ Mass-spring grid for flags, capes, tarps. Interacts with voxel world via existin
 surface-point-vs-grid contacts. Wind force per node. Tearing when spring strain
 exceeds material strength. New lightweight render path (not voxel mesher).
 
-### 48. Temperature Diffusion (Heat Spreads Through Materials)
+### 48. Temperature Diffusion (Heat Spreads Through Materials) — Merges #106 (heat diffusion field)
 Per-voxel temperature sidecar (same pattern as vox-sim). Heat diffuses through
 adjacent voxels based on material conductivity. Hot enough = ignite flammable
-materials = fire sim. Cold enough = freeze water. Pairs with vox-sim #6.
+materials = fire sim. Cold enough = freeze water. Pairs with vox-sim #6. **Detailed impl (#106):** Fire currently spreads via direct 6-neighbor ignition. Heat diffusion adds a per-cell temperature sidecar (sparse FxHashMap, same pattern as burning map). Burning cells emit heat to neighbors; cells exceeding ignition_threshold ignite. Enables: fire jumping gaps through hot air, materials with different ignition points, heat death in enclosed spaces (backdraft). BurnState gains a temp field. Feasibility: **hard**.
 
 ### 49. Gravity Wells and Anti-Gravity Zones
 Region-based gravity modification. Zero-G zones for floating debris. Gravity wells
 that pull bodies toward a point. Inverted gravity for ceiling-walking. Simple:
 override the gravity vector per-region in the solver. Big gameplay implications.
 
-### 50. Earthquake / Tremor Events
+### 50. Earthquake / Tremor Events — Merges #109 (dynamic world events)
 Periodic impulses applied to ALL awake bodies + terrain carve at fault lines.
 Creates cascade events where everything shakes, weak structures collapse, debris
-rains down. Uses existing apply_impulse + carve pipeline at scale.
+rains down. Uses existing apply_impulse + carve pipeline at scale. **Detailed impl (#109):** Earthquakes: sample a fault line from FBM noise, apply_impulse to all awake bodies near the fault + carve_sphere at epicenter. Meteor strikes: random surface point, blast with large radius, scatter ember voxels (auto-ignites via fire sim). Volcanic eruptions: volcano structure emits magma voxels (#107). All reuse the blast pipeline and noise/hash infrastructure — scheduled triggers over existing effectors. Feasibility: **hard**.
 
 ---
 
@@ -463,3 +482,686 @@ redundant wake_region calls. Fix: batch dirty regions into one wake_region call.
 File: vox-render/src/mario_pipeline.rs, draw (lines 300-326).
 queue.write_buffer every frame, even when Mario is idle and geometry hasn't changed.
 Fix: version-stamp the geometry, skip upload when unchanged.
+
+---
+
+## Round 3 — 10-Agent Audit Swarm (2026-07-10)
+
+Ten agents audited the engine from different angles: rendering, physics
+performance, engine architecture, Mario, gameplay, world simulation, UI/UX,
+meshing, data structures, and destruction. Each read the source code and
+proposed grounded, specific improvements.
+
+---
+
+## Rendering Improvements (RenderAgent)
+
+### 64. Connect Dead MRT + Edge-Detection for Cel Outlines — 🔄 SCAFFOLDING EXISTS
+CRITICAL FINDING: The postprocess pipeline allocates normal + depth-copy textures
+and binds them, postprocess.wgsl has sobel_depth() and sobel_vec3() functions —
+but none are connected at runtime. The scene pass has only 1 color attachment;
+normal_view() and depth_copy_view() are never written to. To activate: add normal
+and depth-copy as 2nd/3rd color targets to scene pipelines, extend fragment
+shaders to output world_normal + linear depth, add as color attachments to the
+scene pass, invoke sobel functions in postprocess fs() for material-tinted
+outlines. The scaffolding exists — this is pipe-connecting, not inventing.
+Feasibility: **medium**.
+
+### 65. SSAO from Wired Depth + Normal MRT
+Once #64's MRT is wired, sample the depth + normal buffers for screen-space
+ambient occlusion. Current lighting uses only baked vertex AO (0-3 levels) and
+constant hemisphere ambient — no contact shadows in concave corners or under
+overhangs. SSAO samples a hemisphere of depth+normal samples per pixel, producing
+soft contact shadows. New fullscreen pass between scene and postprocess, outputting
+an R8 occlusion texture. ~16-32 taps per pixel, gateable via Tunables.
+Feasibility: **medium**. Depends on #64.
+
+### 66. Procedural Sky Dome with Rayleigh/Mie Scattering and Sun Disc
+The sky is currently a flat clear color. A procedural sky dome replaces it with a
+Rayleigh + Mie scattering approximation: horizon gradient, visible sun disc
+(gaussian falloff at sun_dir), warm sunset/sunrise tint, star field at night.
+The day/night system already computes sun_dir, sun_strength, sky_color. Single
+highest-impact visual upgrade — the sky is visible every frame and contributes
+zero visual interest today.
+Feasibility: **medium**.
+
+### 67. Screen-Space Water Refraction, Depth-Based Opacity, and Shoreline Foam
+Current water: flat alpha 0.85, fixed blue tint, fake sin ripple. Improvements:
+(1) depth-based opacity (shallow → 0.5, deep → 0.95, sample scene depth behind
+water fragment), (2) procedural foam at shallow water depth via noise, (3)
+screen-space refraction (requires splitting water into a separate fullscreen pass
+that samples the color buffer). Depth-based opacity and foam are achievable within
+the current pass structure; true refraction needs a pass split.
+Feasibility: **hard**.
+
+### 68. Selective Bloom Pass for the HDR Pipeline
+The HDR pipeline (Rgba16Float) exists but the tone mapper compresses everything
+with no bright-pass isolation. Fire embers, sun disc, explosions clip flatly
+instead of glowing. A selective bloom pass: extract pixels above luminance
+threshold, downsample + Gaussian blur (ping-pong), additively composite before
+tone mapping. 3-4 new fullscreen passes sharing the existing pipeline structure.
+Fire system is the immediate beneficiary.
+Feasibility: **medium**.
+
+### 69. Screen-Space God Rays via Radial Depth Ray Marching
+At sunrise/sunset, radial god rays from the sun disc add dramatic atmosphere.
+Screen-space: compute sun's screen position, march radially outward sampling the
+depth buffer — geometry attenuates rays, producing light shafts through terrain
+gaps. ~32 samples per pixel in a fullscreen pass. Requires #66's sun disc for the
+ray origin. Most impactful at dawn/dusk.
+Feasibility: **medium**. Depends on #66.
+
+### 70. Soft Particles with Depth-Aware Surface Fade
+Particles hard-cut at depth boundaries — smoke on the ground shows a crisp slice
+line. Fix: bind the scene depth texture in the particle fragment shader, compute
+the depth difference, fade alpha to zero as the difference approaches zero. Makes
+smoke settle softly on floors, dust cling to walls. Add depth texture as a new
+binding in the particle bind group layout, sample in particle.wgsl fs(). Small,
+high-impact change — particle pipeline is ~200 lines.
+Feasibility: **easy**.
+
+### 71. Unified Cel Quantization Across All Pipelines + Fire Point Lights
+(1) Voxel shader has 4-band cel quantization but grass.wgsl and mario.wgsl use
+plain half-Lambert — grass and Mario render with smooth gradients that clash with
+banded terrain. Copy the quantization block into both shaders. (2) The fire system
+emits no light — burning structures illuminate nothing. Add a small fixed-size
+array of point lights (8 lights, position+color+intensity) populated from active
+fire cells, sampled in voxel.wgsl for distance-attenuated illumination.
+Feasibility: **medium**.
+
+---
+
+## Physics Performance (PerfAgent)
+
+### 72. Hoist Broadphase Build to Once-Per-Step
+Broadphase.candidate_pairs() calls build() inside the substep loop AND in
+islands() — (SUBSTEPS+1) full grid rebuilds per step instead of 1. AABBs only
+move after position integration at end of substep. Fix: build once at top of
+step(), use pairs() everywhere. Turns (SUBSTEPS+1) grid builds into 1.
+Feasibility: **easy**.
+
+### 73. Persistent Contacts Vec and Warm-Start Map Across Substeps
+substep() allocates a fresh Vec<Contact> (~112 bytes each) every substep. With 50
+bodies × 20-40 contacts × 2 substeps = ~2000 heap allocs/drops per step. Hoist
+into PhysicsWorld as persistent fields, .clear() preserves capacity. Warm-start
+map: use .retain() instead of .clear()+rebuild.
+Feasibility: **easy**.
+
+### 74. Reuse SolidLookup Across Substeps
+SolidLookup caches the last-queried chunk, but a fresh one is constructed every
+substep — cache starts cold each time. Construct once in step(), pass &mut into
+substep(). Substep 2's first query likely hits the same chunk substep 1 ended on.
+Feasibility: **easy**.
+
+### 75. Avoid Per-Substep Resize of contact_flags and pos_corr
+contact_flags and pos_corr are .clear()+.resize(slots.len()) every substep —
+rewrites every byte even if length is unchanged. For 500 slots that's 6KB zeroed
+per substep. Keep as persistent fields, reset only dirty indices via a small
+Vec<usize> tracked during the contact loop.
+Feasibility: **medium**.
+
+### 76. SOA Solver Iteration for SIMD-Friendly Access
+The solver's inner loop iterates contacts SOLVER_ITERS times, doing random-access
+into Vec<Option<Body>> — the Option wrapper adds a branch, contacts touching the
+same body are far apart in memory. Fix: sort contacts by body index, replace
+Option<Body> arena with Vec<Body> + Vec<bool> bitmap, precompute into SOA contact
+buffers. Standard approach in Box2D v3 and Bullet's MLCP solvers.
+Feasibility: **hard**.
+
+### 77. Chunk-Local Bitset for Flood-Fill Visited Set
+flood_from uses FxHashSet<IVec3> for visited — 200k hash insertions with poor
+cache behavior for large severed components. Replace with a per-chunk bitset
+(FxHashMap<IVec3, Box<[u8; 32768]>>): turns the inner-loop check from a hash
+operation into a chunk-cache lookup + bit test. O(1) with far better locality.
+Worst-case memory ~375KB of bitsets.
+Feasibility: **medium**.
+
+### 78. split_components: Reuse Visited Buffer and Indexed BFS
+split_components allocates vec![false; len] for visited, VecDeque per component,
+fresh VoxelGrid per component. Use a flat Vec ring buffer for BFS, bitset over
+existing voxels array instead of separate visited, pre-size component Vec from
+solid_count(), use Vec::with_capacity for output grids.
+Feasibility: **medium**.
+
+### 79. Contact Persistence: Skip world_contacts for Unmoved Bodies
+world_contacts iterates every surface point of every awake body every substep
+(14,000 chunk queries for a 50-body pile). Cache contacts per body keyed by
+(transform hash, world edit epoch). A resting body's transform barely changes —
+skip regeneration and reuse last contact list. Analog of Box2D's contact manager.
+Feasibility: **hard**.
+
+---
+
+## Engine Architecture (EngineAgent)
+
+### 80. Unified Engine Error Hierarchy with thiserror
+Four independent error enums scattered across crates; Sm64Error lacks thiserror
+derives. VoxApp::new returns Box<dyn Error>, losing all type info. Unify: derive
+thiserror on Sm64Error, add top-level VoxError enum with #[from] conversions,
+eliminate Box<dyn Error> erasure for actionable diagnostics.
+Feasibility: **easy**.
+
+### 81. Shader Hot-Reload System
+All 6 WGSL shaders are read once at startup and baked into immutable pipelines.
+Each constructor already takes shader_source as &str — text is decoupled from GPU
+resources. Hot-reload: poll file modification timestamps once per second, on change
+re-read shader + create new ShaderModule + RenderPipeline, swap atomically. Bind
+group layouts, buffers, textures stay. Dramatically speeds up shader iteration.
+Feasibility: **medium**.
+
+### 82. In-Engine Hierarchical Profiler with Per-System Timing
+FrameProfile + ScopedTimer exist in vox-core but only vox-app uses them — physics,
+world, sim internal costs are invisible. Add ScopedTimer calls inside solver.rs,
+broadphase.rs, contact.rs, destruction.rs, vox-sim's fluid/fire ticks. Debug
+overlay gets a drill-down flamegraph view. Borrow conflict solved by per-system
+local TimingRing accumulators.
+Feasibility: **medium**.
+
+### 83. Parallel Physics Island Solving via Rayon
+vox-physics declares rayon as a dependency but never uses it. Islands are
+independent (share no contacts) — solve in parallel. Pragmatic first step:
+parallelize world_contacts across awake bodies using par_iter (each body's
+collision checks only read &World). Island-based parallel solve is the bigger win
+but needs careful warm-start key management.
+Feasibility: **hard**.
+
+### 84. Chunk Streaming with Spatial Load/Unload — → Merged into #7 (see above)
+World enforces finite bounds via in_bounds(); build_terrain_world generates
+everything upfront. Streaming needs: replace fixed bounds with load radius, add
+background GenQueue mirroring RemeshQueue, LRU eviction of far chunks, relax
+bounds_voxels check. Uniform/Dense storage means most unloaded chunks regenerate
+trivially. Ties to save/load (#93) for edited-chunk persistence.
+Feasibility: **hard**.
+
+### 85. GPU Occlusion Culling via Depth Pyramid
+Frustum culling exists but no occlusion culling — hidden chunks behind mountains
+are still drawn. Two-phase: build depth pyramid (compute pass, min-reduce), test
+chunk AABBs against hierarchical depth buffer. HDR pipeline already has depth
+textures available. Cuts draw calls significantly when structures occlude each
+other.
+Feasibility: **hard**.
+
+### 86. Data-Driven Entity & Tool System with Asset Manifest — → Merged into #38 (see above)
+The entire engine is hardcoded to specific material names: fire_table, weather_table,
+water_material all look up by string. Tools are hardcoded Rust enums. A data-driven
+registry: sim manifest maps materials to roles, tools declared as TOML recipes,
+terrain layers as TOML biomes. Relax deny_unknown_fields on RawMaterial for custom
+modder properties. Enables modding without Rust changes.
+Feasibility: **medium**.
+
+### 87. World Save/Load with Delta-Over-Base Chunk Serialization — → Merged into #8 (see above)
+WorldConfig is serde-serializable, ChunkStorage was designed for serialization,
+undo stack captures voxel diffs, terrain gen is deterministic per-seed. Save format:
+header (config + seed + version), per-chunk delta blocks (only edited chunks —
+unedited regenerate from seed). Lightly-edited worlds save in kilobytes. Debris
+bodies serialize their VoxelGrid + transforms. Integration with undo: save is a
+checkpoint, load clears undo history.
+Feasibility: **medium**.
+
+---
+
+## Mario Mode (MarioAgent)
+
+### 88. Voxel Cap Power-Ups via sm64_set_mario_state — Bind the Grant FFI — → Merged into #25 (see above)
+The power-up grant FFI is completely unbound: sm64_set_mario_state sets
+MARIO_VANISH/METAL/WING_CAP flags, sm64_mario_interact_cap handles full grant with
+timer+music. Neither is in ffi.rs. C-side behavior is fully implemented: vanish cap
+skips wall collision, metal cap sinks + immune to fire, wing cap enables flying.
+Bind both functions, trigger from voxel-material proximity (touch a 'metal block' →
+metal cap). Single highest-value Mario gap.
+Feasibility: **medium**.
+
+### 89. Mario Swims in Voxel Water — Bind Water Level FFI
+libsm64 has a complete submerged action set (breaststroke, flutter kick, metal
+water walking, drowning) but Mario can't swim because sm64_set_mario_water_level
+and sm64_surface_find_water_level are unbound. Bind both, query the voxel world's
+water column height at Mario's position each tick, call set_water_level. Mario
+automatically transitions to swimming when feet go below water level. Zero new
+gameplay code — just two FFI bindings and a water-height query.
+Feasibility: **medium**.
+
+### 90. Positional Audio via sm64_register_play_sound_function
+sm64_register_play_sound_function is declared in ffi.rs:108 but NEVER CALLED. It
+registers a callback receiving (soundBits, *pos) — the 3D position of each sound.
+Register a Rust callback, apply distance-based volume attenuation and L/R panning
+relative to camera before mixing. Makes Mario's 'wahoo!' pan left as he runs right.
+No new FFI — just calling an already-declared function + panning math.
+Feasibility: **easy**.
+
+### 91. Surface particleFlags for Engine-Side Particle Trails
+SM64MarioState has particleFlags and invincTimer but MarioTickResult drops both.
+libsm64 sets particleFlags every tick: PARTICLE_SPARKLES for star, PARTICLE_DUST
+for running, PARTICLE_BUBBLE underwater, PARTICLE_MIST_CIRCLE for ground pound.
+Add both fields to MarioTickResult, spawn engine-side particles at Mario's position
+dust when running, splashes when entering water, sparkles when invincible. invincTimer
+readback is the cheap star-active detector.
+Feasibility: **easy**.
+
+### 92. Re-enable 30→120fps Animation Interpolation
+Mario's position is interpolated at 120 FPS but his mesh pose snaps at 30 Hz
+because the interpolation call is disabled: `if false && ticks_this_frame == 0`.
+The interpolation is fully implemented (render_interpolated calls
+gfx_adapter_set_interp_alpha + sm64_mario_render_geometry, both bound). Flip the
+guard to re-enable 120 FPS pose interpolation. One-line boolean flip + guard flag.
+Feasibility: **easy**.
+
+### 93. Local Multiplayer — Multiple Mario Instances
+libsm64's Rust doc claims single-instance but this is WRONG — libsm64.c uses an
+instance pool, sm64_mario_create allocates per-Mario GlobalState. Generalize
+MarioMode from Option<Mario> to Vec<Mario>, spawn a second Mario, tick both.
+Player 2 uses arrow keys + numpad. Unlocks local co-op platforming. Main complexity
+is input routing and camera management, not FFI.
+Feasibility: **medium**.
+
+### 94. Lakitu-Style Collision-Aware Camera — → Merged into #28 (see above)
+Third-person camera clips through walls with zero collision awareness. Two
+already-bound FFI functions solve this: sm64_surface_find_wall_collision pushes a
+position out of walls, sm64_surface_find_floor_height returns ground height. After
+computing desired camera position, wall-collision-pull it. Add spring-damped lag
+(lerp toward target, 0.15 alpha) for Lakitu feel. Add MarioCamMode enum cycled
+with C: FreeOrbit, LakituFollow, FixedAngle.
+Feasibility: **medium**.
+
+### 95. Background Music Sequencing — Bind BGM FFI
+Five BGM FFI functions are unbound: sm64_seq_player_play_sequence, sm64_play_music,
+sm64_stop_background_music, sm64_fadeout_background_music,
+sm64_get_current_background_music. Audio init already loaded the sequence bank.
+Bind the functions, trigger music from game events: play Bob-omb Battlefield when
+Mario mode activates, star fanfare on collectible pickup, fade out on mode exit.
+Sequences are already in the ROM — minimal code.
+Feasibility: **easy**.
+
+---
+
+## Gameplay Modes (GameplayAgent)
+
+### 96. Firebreak Defense — Wildfire Containment Mode
+Fire sim as the antagonist. Fire spreads through flammable terrain; player races
+the fire front: carve firebreaks with Scalable Dig, extinguish with Place Water,
+surgical cuts with Death Laser. Weathering compounds: water soaks grass→dirt→mud,
+mud can erode. Win: fire burns out before consuming protected zone. Lose: zone
+ignites. Scoring = % terrain saved + time-to-containment. Fire system already does
+everything — this is a scoring layer + objective definition.
+Feasibility: **easy**.
+
+### 97. Hot-Seat Siege — Build-then-Breach Turn Combat
+Two-player hot-seat: one builds a fortification (editor mode, material budget by
+strength), the other attacks with 3 of 4 destruction tools. Then swap. Scoring =
+structural damage vs integrity remaining (measured via connectivity flood). Replay
+system records attack for review. Turn structure is pure app-state. No networking —
+same keyboard, same screen. Builds on idea #5 but adds turn structure, budget, and
+replay-review loop.
+Feasibility: **easy**.
+
+### 98. Mario Star Run — Platforming in Destructible Worlds
+Full Mario game mode: collect N stars scattered across a destructible voxel course.
+Stars placed in hard-to-reach positions — atop towers (triple-jump mound), across
+gaps (ground-pound stair-steps), behind walls (ground-pound bombs). Star power-up
+as temporary reward. Coins drop from shattered debris. Time limit = one 120s
+day/night cycle. Synthesizes #27, #29, #30, #26 into a cohesive game mode with
+win condition. Course layout is TOML-authored.
+Feasibility: **medium**.
+
+### 99. Demolition Speedrun — Timer + Scored Challenges with Replay
+Series of pre-built structures, each with a demolition contract (collapse direction,
+collateral radius, budget). 60 seconds to execute plan. Replay plays back
+automatically. Score = contract compliance × speed bonus. Failed contracts offer
+instant retry via Time-Rewind (write logged voxel+material pairs back). Each level
+uses different material mix as difficulty. TOML level definitions.
+Feasibility: **medium**.
+
+### 100. Chain Reaction Sandbox — Rube Goldberg Machine Toy Mode — → Merged into #33 (see above)
+Free-form sandbox: build elaborate multi-stage chain reactions using fire, water,
+and destruction. Build a wooden ramp, place an ember, fire spreads down it to a
+bomb-buried pillar, blast severs it, tower falls, debris fractures lower structure.
+Water can be a link (flow → erode → collapse). 'Trigger' button starts the chain,
+replay captures it. No win condition — just cascade authoring joy. Mode flag +
+optional camera auto-follow.
+Feasibility: **easy**.
+
+### 101. Structural Challenge — Build to Survive the Load Test
+Physics-puzzle mode: build a load-bearing structure (bridge, tower, dam), then
+simulation tests it. Build phase uses editor brush. Test phase: structure must
+support its own weight (connectivity flood proves anchored vs bounded), support
+added loads (spawn heavy debris on top), or hold back water. Scoring = time-to-
+failure or pass/fail. Material choice is the puzzle: stone strong but heavy, wood
+light but flammable, brick balanced. Extends #4 into a scored challenge.
+Feasibility: **medium**.
+
+---
+
+## World Gen & Simulation (WorldSimAgent)
+
+### 102. Biome Regions via 2D Noise Classification
+Terrain gen produces a single biome. A biome layer samples a low-frequency FBM
+noise field to classify each column (plains, forest, desert, mountain, tundra).
+Each biome parameterizes height amplitudes, surface material, dirt depth, tree
+density. TerrainGen gains a biomes field + biome_at(x,z) method. fill_surface_chunk
+already does per-column material selection — biome lookup slots right in.
+Feasibility: **medium**.
+
+### 103. 3D Cave Systems via Thresholded Value Noise
+No caves, no ore veins, no hollow spaces below dirt. 3D carving uses the existing
+value3 noise function at ~8m wavelength to carve tunnels where noise > 0.72, plus
+a second octave for branching. Ore veins use hash3 at lattice points to scatter
+clusters at depth-gated probabilities. No new noise infrastructure — value3 and
+hash3 already exist and are tested.
+Feasibility: **medium**.
+
+### 104. River Generation via Heightmap Carving with Water Seeding
+Rivers need valley-like depressions along a path. A 2D FBM-guided path where
+height_m is lowered by a Gaussian-profile channel. After terrain gen, water voxels
+placed along riverbed — FluidSim active set seeded so flowing water fills the
+channel naturally. Builds on existing height_m function (subtract channel term) +
+FluidSim::place_blob.
+Feasibility: **hard**.
+
+### 105. Fluid Erosion with Sediment Transport and Deposition — → Merged into #19 (see above)
+Weathering erodes stone to sand when moving water touches it, but deposition is
+missing — eroded sand should be carried downstream and deposited where water slows.
+The fluid sim already classifies contacts as Fell/Flowed/Settled. Weathering can
+emit deposition_events when a Flowed cell slows (Settled after Flowed), placing
+sand. Over time carves canyons and builds sandbars — emergent geomorphology from
+the existing event pipeline.
+Feasibility: **medium**.
+
+### 106. Heat Diffusion Field for Fire Propagation — → Merged into #48 (see above)
+Fire currently spreads via direct 6-neighbor ignition. Heat diffusion adds a
+per-cell temperature sidecar (sparse FxHashMap, same pattern as burning map).
+Burning cells emit heat to neighbors; cells exceeding ignition_threshold ignite.
+Enables: fire jumping gaps through hot air, materials with different ignition
+points, heat death in enclosed spaces (backdraft). BurnState gains a temp field.
+Feasibility: **hard**.
+
+### 107. Magma Material via CA Fluid Extension
+FluidSim already dispatches per-material (water vs powder). A magma material is a
+third class: flows like fluid but slower (tick-skip counter), interacts with water
+(magma+water → stone, water → steam), auto-ignites flammable materials. Adding
+is_magma(v) + step_magma rule slots directly into the existing architecture.
+Lava-on-water stone generation creates new terrain dynamically.
+Feasibility: **medium**.
+
+### 108. Seasonal Weathering: Freeze/Thaw and Plant Growth Cycles
+Weathering handles only water-driven transformations. A generalized material
+lifecycle: dry grass → dead grass (drought), wet dirt → grass (water+sunlight),
+wood → rotting_wood (prolonged water), stone → mossy_stone (water+shade). Each
+transformation is a (from, trigger, duration, to) rule in a table. Turns weathering
+from 3 hardcoded rules into a data-driven material state machine.
+Feasibility: **medium**.
+
+### 109. Dynamic World Events: Earthquakes, Meteor Strikes, Volcanic Eruptions — → Merged into #50 (see above)
+Earthquakes: sample a fault line from FBM noise, apply_impulse to all awake bodies
+near the fault + carve_sphere at epicenter. Meteor strikes: random surface point,
+blast with large radius, scatter ember voxels (auto-ignites via fire sim). Volcanic
+eruptions: volcano structure emits magma voxels (#107). All reuse the blast
+pipeline and noise/hash infrastructure — scheduled triggers over existing effectors.
+Feasibility: **hard**.
+
+---
+
+## UI/UX & Player Experience (UIAgent)
+
+### 110. Compass & Minimap HUD Overlay — → Merged into #45 (see above)
+Compass ribbon (N/E/S/W + bearing degrees from player.yaw) + live minimap rendering
+a top-down heightmap projection of nearby chunks with player position/heading.
+Uses egui compositing on the existing vox-debug overlay. Compass is pure math;
+minimap samples chunk data for a low-res heightmap tile. Essential once streaming
+worlds make the world infinite.
+Feasibility: **medium**.
+
+### 111. Keybinding System with Live Rebinding Panel
+Every key binding is a hardcoded KeyCode scattered across 3 files. Introduce a
+KeyBindings struct in vox-platform mapping logical actions to KeyCode, with TOML
+config for persistence + egui rebinding panel. Unblocks gamepad support,
+accessibility, and lets players fix the awkward J/B/K Mario button mapping.
+Feasibility: **medium**.
+
+### 112. Tunable Mouse Sensitivity with Smoothing Curve
+Sensitivity hardcoded to 0.0025 rad/pixel in two places with no adjustment. Add
+look_sensitivity to Tunables (existing slider infrastructure exposes it), have
+Player::look and MarioMode read it each frame. Add acceleration/curve option.
+15-line change that dramatically improves comfort across mouse DPI differences.
+Feasibility: **easy**.
+
+### 113. First/Third-Person Camera Toggle with Collision Avoidance
+Engine is permanently first-person; Mario permanently third-person. Add a toggle
+(KeyV) switching between modes. Third-person: camera behind player at configurable
+distance/height, render a simple avatar. First-person Mario: camera at Mario's eye
+position. Third-person needs camera-world collision (raycast pullback). Both modes
+already compute camera_pos from yaw/pitch.
+Feasibility: **medium**.
+
+### 114. Player Status HUD — Health, Coordinates, Mode Indicator
+Current HUD shows only crosshair + hotbar + one info line. Build a proper game HUD:
+health/status bar, coordinate readout, tool cooldown indicator, active-mode
+indicator (fly/noclip/editor/Mario). Each is an egui widget in hud.rs following the
+existing HudState pattern — architecture is there, content is minimal.
+Feasibility: **medium**.
+
+### 115. Accessibility Options — Colorblind, Motion Reduction, Text Scaling
+Zero accessibility features. Add: (1) colorblind mode via Daltonization in HDR
+postprocess pass, (2) motion reduction (disable camera shake/bob, reduce particle
+counts, slow day/night cycle), (3) text scaling (multiply egui FontId sizes).
+All parameter-driven, building on existing Tunables + egui infrastructure.
+Feasibility: **medium**.
+
+### 116. Contextual Onboarding — Control Hints, First-Run Tutorial, Tooltips
+New players have no idea what keys do what. Add: controls overlay toggled by H,
+contextual hints that appear briefly when first using a mode, first-time tooltips
+on hotbar slots. All via egui in vox-debug. Single highest-impact UX improvement
+for new players, costs the least.
+Feasibility: **easy**.
+
+### 117. Engine Audio System — Ambient, Tool, Destruction, UI Sounds
+Audio exists only for Mario mode. Engine is completely silent: digging, bombs,
+debris impacts, UI — no sounds. Extend the existing cpal output infrastructure
+(audio.rs) with procedural SFX: noise burst for digging, low-freq boom for blasts,
+crunch for impacts, ambient wind. The audio pipeline, ring buffer, and resampler
+are all reusable — adding a second audio source alongside SM64.
+Feasibility: **medium**.
+
+---
+
+## Meshing & Rendering Performance (MeshAgent)
+
+### 118. Reuse Mask Buffer + Skip Empty Slices in Greedy Mesher
+mesh_slab allocates a fresh Vec<Option<Cell>> for each of 6 face directions and
+iterates every voxel unconditionally. Chunk::solid_slice_masks() already computes
+per-axis occupancy (used by vox-sm64 but NOT by the mesher). Hoist mask buffer
+outside the face loop, skip slices where mask is false. Skips 70-90% of Y slices
+for typical terrain chunks, eliminates 6 heap allocations per remesh.
+Feasibility: **easy**.
+
+### 119. Skip Slab Extraction for Uniform Chunks
+VoxelSlab::extract copies the entire 34³ region (~39K voxels) per chunk on the main
+thread. For Uniform all-air/all-solid chunks (the majority), this is a 39K-iteration
+loop producing trivial output. Fast-path: if chunk is Uniform, construct slab
+directly — all-air = empty mesh, all-solid = 6 quads. Chunk::uniform_value() already
+exposes this. Wire through RemeshQueue::dispatch.
+Feasibility: **easy**.
+
+### 120. Mega-Buffer + Indirect Draw for Chunk Meshes
+draw_chunks_opaque issues one draw_indexed per chunk — ~144 draw calls for a 12×12
+chunk world. Merge all chunk vertex/index data into a single large buffer, record
+offsets into a DrawIndirect args buffer, issue one multi_draw_indexed_indirect call.
+Cuts chunk draw calls from N to 1. Index format can drop to u16, halving bandwidth.
+Prerequisite for GPU-driven culling.
+Feasibility: **medium**.
+
+### 121. Instanced Debris Rendering — Merge Body Meshes with Indirect Draws
+draw_bodies issues one draw per debris body — unbounded growth is the biggest perf
+driver. Group all body meshes into a shared mega-buffer, one indirect draw call.
+Per-body transforms in a storage buffer, compute shader culls against frustum,
+writes only visible ones into indirect args. GPU-driven culling for debris.
+Feasibility: **medium**.
+
+### 122. Frustum Culling with Temporal Coherence
+Each chunk/body runs a full 6-plane frustum test every frame. For a static camera
+this is redundant. Cache last-frame visibility signature, only re-test when camera
+moves enough to cross a plane. Chunks never move — result only changes on camera
+movement. Halves per-frame culling cost for stationary viewpoints. Enables
+hierarchical BIT for O(log N) culling.
+Feasibility: **medium**.
+
+### 123. Separate Water Meshing Pass — Split Water Faces into Dedicated Buffer
+Water faces are interspersed with opaque faces in the same chunk mesh — water
+chunks get drawn TWICE (once opaque discarding water, once water discarding opaque)
+with full vertex fetch both times. Split water faces into a separate MeshData at
+mesh time. Opaque pass never touches water vertices, water pass only draws chunks
+with water geometry. Eliminates double-vertex-fetch and fragment-level discard
+branching.
+Feasibility: **medium**.
+
+### 124. Higher-Quality Mesh AO with 2-Ring Neighborhood and Per-Face UVs
+AO is per-vertex with only 4 levels (0-3) from 1-voxel shell — banding on large
+walls. Extend to 2-voxel shell for 0-7 range with smoother gradients. Add per-face
+UV coordinates (2 spare bits in the 8-byte format) for material textures (stone
+grain, wood grain) instead of flat palette colors. (1) is quickest win; (2) is
+highest visual impact.
+Feasibility: **medium**.
+
+### 125. Incremental/Partial Remeshing — Only Re-Mesh Edited Sub-Region
+A single voxel edit dirties 1-7 chunks and re-meshes the entire 32³ chunk from
+scratch. Track the edit's local bounding box, only re-mesh slabs/faces intersecting
+it, splice new quads into existing MeshData. Conservative approach: re-mesh padded
+sub-region (edit bbox + 1 voxel margin for AO), replace overlapping quads. Turns
+a single-block edit from a full 32³ remesh into a ~3³ patch. Highest impact for
+editor mode and real-time gameplay.
+Feasibility: **hard**.
+
+---
+
+## Data Structures & Storage (DataAgent)
+
+### 126. In-Memory Palette-Compressed Chunk Storage
+ChunkStorage enum reserves palette compression. Add a Palette variant: { palette,
+bits, data }. A typical 4-material chunk → 2-bit indices = 8 KiB vs 64 KiB for
+Dense, 8x memory reduction. The existing try_demote collapses Dense→Uniform; add
+a try_palette pass. Zero caller changes — the enum is private.
+Feasibility: **medium**.
+
+### 127. Array-Indexed Chunk Grid for Finite Worlds
+World stores chunks in FxHashMap<IVec3, Chunk> but enforces finite bounds. A
+Box<[Option<Chunk>]> 3D array gives O(1) access with zero hashing overhead, no
+hash table memory, perfect cache locality for sequential iteration. HashMap becomes
+the streaming-mode fallback (#84). World can hold an enum of either backend behind
+the same API.
+Feasibility: **medium**.
+
+### 128. Data-Driven Biome & Structure Configuration
+WorldConfig is just {seed, voxel_size, extent} — no biome or structure parameters.
+TerrainGen hardcodes noise layers, amplitudes, material mappings. A BiomeConfig
+TOML schema with noise parameters, material mappings, height ranges, and structure
+placement rules would make terrain data-driven and moddable. Distinct from #86
+(material/tool modding) — this is world-generation config.
+Feasibility: **medium**.
+
+### 129. Undo Ring Buffer with Run-Length Encoded Diffs
+Undo uses Vec with O(n) remove(0) eviction. Each diff entry is 18 bytes; large
+brushes produce thousands. Fix: (1) replace with VecDeque for O(1) pop_front, (2)
+run-length encode consecutive same-material voxels as (start, count, material).
+#36 marked undo as DONE — this targets storage efficiency, not the feature.
+Feasibility: **easy**.
+
+### 130. Spatial Dirty Region Merger for Physics Wake Batching
+World tracks dirty_regions as Vec<(IVec3, IVec3)>, pushed per-voxel by set_voxel.
+Tree gen, fluid sim, fire spread generate hundreds of tiny single-voxel regions →
+redundant wake_region calls. A spatial merge pass (sort-and-sweep coalescing of
+overlapping AABBs) in drain_dirty_regions would cut wake calls dramatically.
+#56 noted edit_box's per-chunk issue; this addresses set_voxel's path.
+Feasibility: **easy**.
+
+### 131. Chunk Generation Queue with LRU Eviction for Streaming — → Merged into #7 (see above)
+RemeshQueue's pattern (generation-stamped pending/latest, nearest-first dispatch)
+is the exact template for a GenQueue. Three pieces: GenQueue mirroring RemeshQueue,
+LRU eviction on the chunk HashMap (evict least-recently-accessed when over budget),
+bounded dirty/dirty_regions collections. bounds_voxels check must be relaxed for
+infinite worlds. Concrete data-structure design for #84.
+Feasibility: **hard**.
+
+### 132. Material Registry Versioned IDs & Hot-Reload
+MaterialRegistry assigns IDs in declaration order; adding a material at runtime
+requires rebuilding everything. A versioned ID scheme (MaterialId + registry_version)
+with a remapping table enables hot-reload: only voxels referencing the old version
+need remapping. GPU palette buffer updates without full world reload. Prerequisite
+for runtime modding (#86).
+Feasibility: **hard**.
+
+### 133. Chunk-Local Sidecar State Storage for Sim Systems
+vox-sim systems track per-voxel state in sparse maps keyed by world position —
+disconnected from chunk lifecycle. If a chunk unloads, sim state leaks as orphaned
+entries. Moving per-chunk sidecar data into a chunk-keyed map parallel to the chunk
+HashMap, or into the Chunk struct as Option<Box<SimState>>, would unify lifecycle:
+load/unload sim state with the chunk. Fire system's sparse map is the ideal first
+candidate.
+Feasibility: **medium**.
+
+---
+
+## Destruction & Physics Gameplay (DestructionAgent)
+
+### 134. Chain-Reaction Explosives — Material-Triggered Secondary Blasts — → Merged into #16 (see above)
+Add an `explosive` flag to MaterialDef + per-material blast_radius/power. When
+blast() carves voxels, scan for explosive materials and enqueue deferred secondary
+blasts — genuine chain reactions. Fire system's deferred event pattern proves this
+works. Secondary blasts re-enter blast() recursively (with depth cap), so cratering,
+debris chips, and connectivity floods compose for free.
+Feasibility: **medium**.
+
+### 135. Stress Propagation Through the Connectivity Flood — → Merged into #17 (see above)
+The flood is binary: anchored or bounded. Add a load estimate: during flood_from,
+accumulate mass of voxels above each support column. When load exceeds material
+threshold (strength × cross-section), mark as stressed (crack decals darken) or
+break (detach_unsupported triggers progressive collapse). The sustained-load
+failure #17 proposed, grounded in the existing flood.
+Feasibility: **hard**.
+
+### 136. Debris Re-Freezing — Sleeping Bodies Write Back to the World
+Sleeping debris bodies persist forever, costing broadphase/render budget. Convert
+long-sleeping bodies back to static world voxels: after asleep for N seconds, write
+grid voxels into World::edit_box, despawn body, drop GPU mesh. Subsequent blast
+re-detaches through the normal pipeline. Caps debris body count, eliminates
+'longer you play, worse it gets' scaling.
+Feasibility: **medium**.
+
+### 137. Burning Debris — Fire Spreads to Rigidbody Fragments
+Fire only burns the static world — debris is immune. Extend fire to bodies: check
+awake bodies whose AABB intersects burning world voxels, ignite flammable material
+in the body's grid. Track per-body burn state, carve consumed voxels via
+carve_body_sphere_at, splitting the body as fire eats through it. A burning wood
+beam breaks apart as consumed, fragments inherit velocity and continue burning.
+Feasibility: **medium**.
+
+### 138. Directional Blasts & Shaped Charges
+ExplosionShape is a uniform spike starburst; impulse is radial. Add a direction
+vector: spikes biased toward the direction, impulse falloff is cone-weighted.
+A shaped charge cuts a focused hole through a wall instead of a crater. Implemented
+by adding optional direction to ExplosionShape + cone-weighted falloff in
+apply_blast_impulse. Gameplay: mine a tunnel with a shaped charge.
+Feasibility: **easy**.
+
+### 139. Cave-In Risk Indicator — Read-Only Connectivity Flood as Gameplay — → Merged into #35 (see above)
+A read-only flood_risk_probe(world, point) that reports at-risk volume without
+spawning bodies. Hovering the crosshair over a support voxel shows a color-coded
+risk meter: green (small detach), yellow (moderate), red (catastrophic). The flood
+already does this computation — the probe just skips extract-and-spawn. Pairs with
+#135 to show load AND connectivity risk.
+Feasibility: **easy**.
+
+### 140. Impact Dust Clouds & Lingering Smoke — Volumetric Debris Feedback
+When a blast or heavy impact hits terrain, emit a persistent dust cloud: slow-
+expanding, gravity-settling particle volume that lingers for several seconds.
+Unlike the current one-shot burst, a dust cloud is a sustained emitter tied to the
+crater — expands with velocity field, fades as particles settle. Makes destruction
+feel weighty. Reuses ParticleSystem with a longer-lived, slower-decaying burst mode.
+Feasibility: **easy**.
+
+### 141. Avalanche & Landslide Cascades — Progressive Slope Failure
+When a blast detaches material from a slope, falling debris impacts the slope below,
+potentially detaching more — a landslide. This emerges from composing existing
+systems: detach_unsupported → fall → impact → carve_body_sphere_at_impact →
+detach_unsupported on newly-exposed face. Add a 'slope fragility' material property:
+materials on steep gradients have reduced effective strength when struck. No new
+system — just a tunable making the existing impact→carve→detach loop more
+aggressive on slopes.
+Feasibility: **medium**.

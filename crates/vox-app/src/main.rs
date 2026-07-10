@@ -333,10 +333,12 @@ impl VoxApp {
             world.cfg.voxel_size_m,
             Some(shadow_pipeline.sample_bind_group_layout()),
         );
-        let particle_pipeline = ParticlePipeline::new(&gpu, &particle_shader);
+        let mut particle_pipeline = ParticlePipeline::new(&gpu, &particle_shader);
         let tools = Tools::new(&registry);
         let (surf_w, surf_h) = gpu.surface_size();
         let postprocess = vox_render::PostProcessPipeline::new(&gpu, &post_shader, surf_w, surf_h);
+        // Bind the scene depth texture for soft-particle surface fade (#70).
+        particle_pipeline.set_depth_view(gpu.device(), postprocess.depth_view());
         let grass_pipeline = vox_render::GrassPipeline::new(&gpu, &grass_shader);
         let debug_overlay = DebugOverlay::new(
             gpu.device(),
@@ -429,8 +431,10 @@ impl VoxApp {
             .filter(|key| world.chunk_at(**key).is_some())
             .map(|key| {
                 let origin = chunk_origin(*key);
+                let chunk = world.chunk_at(*key).expect("filtered above");
+                let masks = chunk.solid_slice_masks();
                 let slab = VoxelSlab::extract(world, origin, IVec3::splat(CHUNK_SIZE as i32));
-                (*key, mesh_slab(&slab, origin, Voxel(9)))
+                (*key, mesh_slab(&slab, origin, Voxel(9), Some(&masks)))
             })
             .collect();
         let meshed = meshes.len();
@@ -495,7 +499,7 @@ impl VoxApp {
         let voxel_count = (body.grid.dims.x * body.grid.dims.y * body.grid.dims.z) as usize;
         let dispatch = if voxel_count <= INLINE_MESH_VOXEL_BUDGET {
             let slab = VoxelSlab::from_grid(body.grid.dims, &body.grid.voxels);
-            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(9));
+            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(9), None);
             self.pipeline
                 .upload_body(&self.gpu, (id.slot, id.generation), &mesh);
             MeshDispatch::Sync
@@ -943,6 +947,7 @@ impl VoxApp {
             CRATER_RADIUS_M,
             POUND_POWER,
             seed,
+            None,
         );
         // Upload meshes for every debris fragment the blast spawned, so
         // they're visible immediately (mirrors `apply_tools`'s post-blast
@@ -1567,6 +1572,10 @@ impl App for VoxApp {
 
         let stats;
         {
+            // Pass 1: opaque world + Mario. Writable depth (clear), clear
+            // color. Grass and particles are deferred to later passes so the
+            // particle pass can bind the depth texture as a sampled resource
+            // (#70 — soft particles require no depth attachment).
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("voxel-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1615,8 +1624,56 @@ impl App for VoxApp {
                     );
                 }
             }
-            // Grass and particles before water so water blends on top.
+        }
+
+        // Pass 2: particles. No depth attachment — the scene depth texture
+        // is bound as a sampled resource for the soft-particle fade (#70).
+        // The fragment shader does both the behind-terrain occlusion test
+        // and the intersection fade via textureLoad on the bound depth.
+        // Color loads (not cleared) so pass 1's opaque result is preserved.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("particle-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.postprocess.color_view(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
             self.particle_pipeline.draw(&mut pass);
+        }
+
+        // Pass 3: grass + water. Loads color and depth from the prior
+        // passes. Water alpha-blends over terrain, particles, and grass.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("grass-water-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.postprocess.color_view(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: self.postprocess.depth_view(),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_bind_group(1, self.shadow_pipeline.sample_bind_group(), &[]);
             let grass_verts = self.grass_cache.get_or_regen(
                 &self.world,
                 self.camera.pos,
@@ -1640,7 +1697,7 @@ impl App for VoxApp {
                 FOG_END_M,
             );
             self.grass_pipeline.draw(self.gpu.queue(), &mut pass, grass_verts);
-            // Water last — alpha-blends over terrain, grass, and particles.
+            // Water last — alpha-blends over terrain, particles, and grass.
             self.pipeline.draw_water(&mut pass, &frustum);
         }
 
@@ -1683,6 +1740,9 @@ impl App for VoxApp {
     fn resize(&mut self, width: u32, height: u32) {
         self.gpu.resize(width, height);
         self.postprocess.resize(&self.gpu, width, height);
+        // The depth texture was recreated by postprocess.resize — rebind it
+        // so the soft-particle fade keeps sampling the current depth buffer.
+        self.particle_pipeline.set_depth_view(self.gpu.device(), self.postprocess.depth_view());
     }
 
     fn window_event(&mut self, event: &winit::event::WindowEvent) -> bool {

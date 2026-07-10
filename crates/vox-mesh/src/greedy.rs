@@ -6,6 +6,7 @@
 //! smear AO across a seam.
 
 use glam::IVec3;
+use vox_core::consts::CHUNK_SIZE;
 use vox_world::Voxel;
 
 use crate::slab::VoxelSlab;
@@ -131,11 +132,23 @@ fn jitter_hash(seed: IVec3, local: [u8; 3]) -> u8 {
 /// Greedy-mesh a slab into quads. `jitter_seed` anchors the baked per-vertex
 /// jitter pattern (see `jitter_hash`) -- pass a chunk's world origin for
 /// chunks, `IVec3::ZERO` for a body's own local mesh.
-pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3, water_voxel: Voxel) -> MeshData {
+pub fn mesh_slab(
+    slab: &VoxelSlab,
+    jitter_seed: IVec3,
+    water_voxel: Voxel,
+    slice_masks: Option<&[[bool; CHUNK_SIZE]; 3]>,
+) -> MeshData {
     let mut mesh = MeshData::default();
     let dims = slab.inner_dims;
 
+    // Hoist the mask buffer outside the face loop: allocate once, clear and
+    // reuse per face direction. The buffer is always sized to the largest
+    // (du * dv) face plane; each face direction reuses it after clearing.
+    let max_plane = (dims[1] * dims[2]).max(dims[0] * dims[2]).max(dims[0] * dims[1]);
+    let mut mask: Vec<Option<Cell>> = vec![None; max_plane as usize];
+
     for (normal_id, axis, sign) in FACE_DIRS {
+        let slice_mask = slice_masks.map(|m| m[axis]);
         // Tangent axes: u, v are the other two axes in ascending order.
         let (u_axis, v_axis) = match axis {
             0 => (1, 2),
@@ -150,9 +163,25 @@ pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3, water_voxel: Voxel) -> Me
         let mut v_dir = IVec3::ZERO;
         v_dir[v_axis] = 1;
 
-        let mut mask: Vec<Option<Cell>> = vec![None; (du * dv) as usize];
+        // Reuse the hoisted mask buffer for this face direction.
+        let plane_len = (du * dv) as usize;
+        debug_assert!(plane_len <= mask.len());
+        let mask = &mut mask[..plane_len];
+        for slot in mask.iter_mut() {
+            *slot = None;
+        }
 
         for slice in 0..dims[axis] {
+            // Skip slices with no solid (non-air) voxels — no faces can be
+            // generated. The slice mask marks slices that contain at least
+            // one non-air voxel; a false slice is all-air, so the inner
+            // loop would produce only `None` cells.
+            if let Some(sm) = slice_mask {
+                if slice < CHUNK_SIZE as i32 && !sm[slice as usize] {
+                    continue;
+                }
+            }
+
             // Build the mask of exposed faces in this slice.
             for v in 0..dv {
                 for u in 0..du {
@@ -350,7 +379,7 @@ mod tests {
     #[test]
     fn empty_slab_zero_quads() {
         let slab = slab_of(IVec3::splat(4), &[]);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
         assert_eq!(mesh.quads(), 0);
         assert!(mesh.is_empty());
     }
@@ -358,7 +387,7 @@ mod tests {
     #[test]
     fn single_voxel_six_quads() {
         let slab = slab_of(IVec3::splat(3), &[(IVec3::splat(1), STONE)]);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
         assert_eq!(mesh.quads(), 6);
         assert_eq!(mesh.indices.len(), 36);
     }
@@ -384,8 +413,8 @@ mod tests {
                 (IVec3::new(1, 2, 1), STONE),
             ],
         );
-        let mesh_a = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0));
-        let mesh_b = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0));
+        let mesh_a = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0), None);
+        let mesh_b = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0), None);
         let jitter_a: Vec<u8> = mesh_a.vertices.iter().map(|v| v.jitter).collect();
         let jitter_b: Vec<u8> = mesh_b.vertices.iter().map(|v| v.jitter).collect();
         assert_eq!(jitter_a, jitter_b, "same geometry + same seed must match exactly");
@@ -394,7 +423,7 @@ mod tests {
         // *different* seed (a different chunk's origin) must generally
         // produce a different pattern -- confirming the seed actually
         // participates, not just the local position.
-        let mesh_c = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh_c = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
         let jitter_c: Vec<u8> = mesh_c.vertices.iter().map(|v| v.jitter).collect();
         assert_ne!(jitter_a, jitter_c, "different seeds should not collide onto the same pattern");
     }
@@ -405,7 +434,7 @@ mod tests {
             IVec3::new(2, 1, 1),
             &[(IVec3::new(0, 0, 0), STONE), (IVec3::new(1, 0, 0), STONE)],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
         assert_eq!(mesh.quads(), 6, "coplanar same-material faces must merge");
     }
 
@@ -415,7 +444,7 @@ mod tests {
             IVec3::new(2, 1, 1),
             &[(IVec3::new(0, 0, 0), STONE), (IVec3::new(1, 0, 0), DIRT)],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
         // 2 end caps + 4 long sides split in two each = 2 + 8 = 10.
         assert_eq!(mesh.quads(), 10);
     }
@@ -432,7 +461,7 @@ mod tests {
             }
         }
         let slab = slab_of(dims, &solids);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
         assert_eq!(mesh.quads(), 6, "each full face merges into one quad");
         // Corner coordinates must span the whole region.
         let max = mesh.vertices.iter().map(|v| v.pos[0]).max().unwrap();
@@ -457,7 +486,7 @@ mod tests {
                 }
             }
             let slab = slab_of(dims, &solids);
-            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
 
             // Brute-force expected exposed faces.
             let mut expected: HashSet<(IVec3, u8)> = HashSet::new();
@@ -527,7 +556,7 @@ mod tests {
             }
         }
         let slab = slab_of(dims, &solids);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
         assert!(!mesh.is_empty());
 
         for tri in mesh.indices.chunks_exact(3) {
@@ -560,7 +589,7 @@ mod tests {
                 (IVec3::new(0, 1, 0), STONE), // wall on top of (0,0,0)
             ],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
 
         // Top faces (+Y, normal id 2) of the floor at y=1 (excluding the wall
         // voxel's own top at y=2).

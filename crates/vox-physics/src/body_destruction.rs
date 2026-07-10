@@ -116,14 +116,17 @@ pub fn carve_body_sphere(
 /// `center_local_m` (in the grid's own local-meter frame). Same shape as
 /// [`crate::destruction::carve_explosion`], against a body's dense grid --
 /// so a Bomb hit on debris looks as chaotic as one on the world.
+/// `direction` is in the grid's local frame (caller should rotate the
+/// world-space direction by the body's inverse rotation before passing).
 pub fn carve_body_explosion(
     grid: &mut VoxelGrid,
     center_local_m: Vec3,
     radius_m: f32,
     voxel_size_m: f32,
     seed: u32,
+    direction: Option<Vec3>,
 ) -> Vec<(IVec3, Voxel)> {
-    let shape = ExplosionShape::new(center_local_m, radius_m, seed);
+    let shape = ExplosionShape::new(center_local_m, radius_m, seed, direction);
     let s = voxel_size_m;
     let (bmin, bmax) = shape.bounds_m();
     let min = (bmin / s).floor().as_ivec3();
@@ -509,14 +512,20 @@ pub fn carve_body_explosion_at(
     center_world_m: Vec3,
     radius_m: f32,
     seed: u32,
+    direction: Option<Vec3>,
 ) -> Vec<BodyId> {
     let Some(body) = phys.get(id) else {
         return Vec::new();
     };
     let voxel_size_m = body.half_voxel * 2.0;
-    let center_local = body.rot.inverse() * (center_world_m - body.pos) - body.grid_offset;
+    let inv_rot = body.rot.inverse();
+    let center_local = inv_rot * (center_world_m - body.pos) - body.grid_offset;
+    // Rotate the world-space direction into the body's local frame so the
+    // shaped-charge cone aligns with the player's look direction even on a
+    // rotated body.
+    let dir_local = direction.map(|d| inv_rot * d);
     let mut grid = body.grid.clone();
-    let removed = carve_body_explosion(&mut grid, center_local, radius_m, voxel_size_m, seed);
+    let removed = carve_body_explosion(&mut grid, center_local, radius_m, voxel_size_m, seed, dir_local);
     if removed.is_empty() {
         return Vec::new();
     }

@@ -53,7 +53,7 @@ impl BodyMeshQueue {
             let slab = VoxelSlab::from_grid(dims, &voxels);
             // Zero seed: a body has no meaningful "world origin" (it moves),
             // so the jitter pattern is anchored to its own local grid only.
-            let mesh = mesh_slab(&slab, IVec3::ZERO, water_voxel);
+            let mesh = mesh_slab(&slab, IVec3::ZERO, water_voxel, None);
             // Receiver dropped only on shutdown; ignore send failure.
             let _ = tx.send((key, mesh));
         });

@@ -39,10 +39,19 @@ struct CameraUniform {
     up: [f32; 4],
 }
 
+/// Depth over which a particle fades to zero alpha when it intersects
+/// terrain, in normalized device coordinates (0..1). A particle fragment
+/// whose depth is within this range *behind* the scene depth is faded out
+/// smoothly instead of hard-cutting at the depth boundary. The value is
+/// consumed by the WGSL shader (particle.wgsl `SOFT_FADE_RANGE`); this
+/// constant exists as a documented mirror.
+const _SOFT_FADE_RANGE: f32 = 0.02;
+
 /// Pipeline + persistent buffers for particle drawing.
 pub struct ParticlePipeline {
     pipeline: wgpu::RenderPipeline,
     camera_buf: wgpu::Buffer,
+    bgl: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     instances: wgpu::Buffer,
     count: u32,
@@ -62,26 +71,38 @@ impl ParticlePipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        // No sampler needed — the fragment shader uses textureLoad on the
+        // depth texture (exact pixel read, no filtering), which avoids the
+        // sampler binding entirely and is correct for Depth32Float.
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("particle bind group layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("particle bind group"),
-            layout: &bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buf.as_entire_binding(),
-            }],
+                // Scene depth texture — read in the fragment shader via
+                // textureLoad for both the behind-terrain test and the
+                // soft-particle surface fade. Depth32Float is non-
+                // filterable, so the sample type must be Depth.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -131,16 +152,12 @@ impl ParticlePipeline {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                // Hidden behind terrain, but never occluding anything --
-                // unsorted alpha-blended quads writing depth would punch
-                // invisible holes in each other.
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
+            // No depth_stencil: the particle render pass does not attach
+            // depth (the depth texture is bound as a sampled resource
+            // instead). The fragment shader performs both the behind-
+            // terrain test and the soft fade via textureLoad on the
+            // bound scene depth — see particle.wgsl fs().
+            depth_stencil: None,
             multisample: Default::default(),
             multiview: None,
         });
@@ -151,9 +168,32 @@ impl ParticlePipeline {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Placeholder bind group with a 1x1 dummy depth view — the real one
+        // is set by `set_depth_view` before the first frame.
+        let dummy_depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("particle-dummy-depth"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let dummy_depth_view = dummy_depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("particle bind group"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dummy_depth_view) },
+            ],
+        });
+
         Self {
             pipeline,
             camera_buf,
+            bgl,
             bind_group,
             instances,
             count: 0,
@@ -170,6 +210,21 @@ impl ParticlePipeline {
         };
         gpu.queue()
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// Recreate the bind group with the scene depth texture view (for soft
+    /// particles). Call once after construction and again whenever the
+    /// depth texture is recreated (e.g. on resize). The depth view must
+    /// have `TEXTURE_BINDING` usage.
+    pub fn set_depth_view(&mut self, device: &wgpu::Device, depth_view: &wgpu::TextureView) {
+        self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("particle bind group"),
+            layout: &self.bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(depth_view) },
+            ],
+        });
     }
 
     /// Upload this frame's live particles (anything past [`MAX_PARTICLES`]

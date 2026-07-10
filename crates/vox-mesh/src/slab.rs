@@ -43,6 +43,37 @@ impl VoxelSlab {
         slab
     }
 
+    /// Like [`extract`](Self::extract) but for a chunk whose inner region is
+    /// known to be uniformly `fill`. The inner `inner_dims³` voxels are set
+    /// directly (a memset, not 32K `get_voxel` calls); only the 1-voxel shell
+    /// border is sampled from the world. Produces a slab identical to what
+    /// `extract` would return for the same region.
+    pub fn extract_uniform(world: &World, inner_min: IVec3, inner_dims: IVec3, fill: Voxel) -> Self {
+        let mut slab = Self::filled(inner_min, inner_dims, fill);
+        let d = slab.padded_dims();
+        let inner = inner_dims;
+        for y in 0..d.y {
+            for z in 0..d.z {
+                for x in 0..d.x {
+                    let rel = IVec3::new(x, y, z) - IVec3::ONE;
+                    // Skip inner positions — already `fill` from `filled`.
+                    if rel.x >= 0 && rel.x < inner.x
+                        && rel.y >= 0 && rel.y < inner.y
+                        && rel.z >= 0 && rel.z < inner.z
+                    {
+                        continue;
+                    }
+                    let v = world.get_voxel(inner_min + rel);
+                    if v != fill {
+                        let idx = slab.index(rel);
+                        slab.data[idx] = v;
+                    }
+                }
+            }
+        }
+        slab
+    }
+
     /// Wrap a dense body grid (x-major rows, `dims` sized) with an air shell.
     /// `data` is indexed `x + z*dx + y*dx*dz`, matching `VoxelGrid`.
     pub fn from_grid(dims: IVec3, data: &[Voxel]) -> Self {
@@ -168,5 +199,69 @@ mod tests {
         assert_eq!(slab.get(IVec3::new(1, 0, 0)), STONE);
         assert_eq!(slab.get(IVec3::new(2, 0, 0)), AIR, "shell");
         assert_eq!(slab.get(IVec3::new(-1, 0, 0)), AIR, "shell");
+    }
+
+    #[test]
+    fn extract_uniform_matches_extract() {
+        // A world with a uniform stone region and some shell neighbors.
+        let mut world = World::new(WorldConfig {
+            voxel_size_m: 1.0,
+            extent_m: [128.0; 3],
+            ..WorldConfig::default()
+        });
+        // Fill a 4³ region at (10,10,10) with stone.
+        for y in 0..4 {
+            for z in 0..4 {
+                for x in 0..4 {
+                    world.set_voxel(IVec3::new(10 + x, 10 + y, 10 + z), STONE);
+                }
+            }
+        }
+        // Place a different voxel just outside the shell.
+        world.set_voxel(IVec3::new(14, 10, 10), Voxel(2));
+        world.set_voxel(IVec3::new(9, 10, 10), Voxel(3));
+
+        let origin = IVec3::new(10, 10, 10);
+        let dims = IVec3::splat(4);
+        let a = VoxelSlab::extract(&world, origin, dims);
+        let b = VoxelSlab::extract_uniform(&world, origin, dims, STONE);
+
+        // Every padded cell must match — the two methods are equivalent.
+        let pd = dims + 2;
+        for y in -1..=dims.y {
+            for z in -1..=dims.z {
+                for x in -1..=dims.x {
+                    let rel = IVec3::new(x, y, z);
+                    assert_eq!(a.get(rel), b.get(rel), "mismatch at rel {rel}");
+                }
+            }
+        }
+        let _ = pd;
+    }
+
+    #[test]
+    fn extract_uniform_air_chunk_matches_extract() {
+        // All-air uniform chunk — the most common case.
+        let mut world = World::new(WorldConfig {
+            voxel_size_m: 1.0,
+            extent_m: [128.0; 3],
+            ..WorldConfig::default()
+        });
+        // Put a solid voxel in the shell region (outside the chunk).
+        world.set_voxel(IVec3::new(15, 10, 10), STONE);
+
+        let origin = IVec3::new(10, 10, 10);
+        let dims = IVec3::splat(4);
+        let a = VoxelSlab::extract(&world, origin, dims);
+        let b = VoxelSlab::extract_uniform(&world, origin, dims, AIR);
+
+        for y in -1..=dims.y {
+            for z in -1..=dims.z {
+                for x in -1..=dims.x {
+                    let rel = IVec3::new(x, y, z);
+                    assert_eq!(a.get(rel), b.get(rel), "mismatch at rel {rel}");
+                }
+            }
+        }
     }
 }

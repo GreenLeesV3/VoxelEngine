@@ -331,7 +331,10 @@ impl Tools {
     /// detach whatever becomes unsupported, and give the debris a blast
     /// impulse. `power` is the live-tunable blast strength; `seed` drives
     /// both the crater's shape and per-body spin variation — pass a
-    /// different value each call. See [`CarveOutcome`].
+    /// different value each call. The blast is directional (shaped-charge):
+    /// `look` biases spike reach and debris impulse toward the player's aim,
+    /// cutting a focused cone through walls rather than a uniform sphere.
+    /// See [`CarveOutcome`].
     #[allow(
         clippy::too_many_arguments,
         reason = "plain parameter list is clearer here than a params struct"
@@ -349,6 +352,7 @@ impl Tools {
         let Some((hit, hit_point_m)) = raycast_scene(world, phys, eye_m, look, REACH) else {
             return CarveOutcome::default();
         };
+        let dir = look.try_normalize();
         let material = hit_material(world, phys, &hit);
         let mut outcome = match hit {
             SceneHit::World(_) => {
@@ -360,6 +364,7 @@ impl Tools {
                     self.radius_m,
                     power,
                     seed,
+                    dir,
                 );
                 CarveOutcome {
                     spawned: result.spawned,
@@ -375,9 +380,10 @@ impl Tools {
                     hit_point_m,
                     self.radius_m,
                     seed,
+                    dir,
                 );
                 let outcome = body_outcome(phys, id, spawned);
-                vox_physics::apply_blast_impulse(phys, &outcome.spawned, hit_point_m, power, seed);
+                vox_physics::apply_blast_impulse(phys, &outcome.spawned, hit_point_m, power, seed, dir);
                 outcome
             }
         };

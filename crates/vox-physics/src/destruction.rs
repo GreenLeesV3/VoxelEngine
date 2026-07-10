@@ -165,9 +165,15 @@ pub(crate) struct ExplosionShape {
 }
 
 impl ExplosionShape {
-    pub(crate) fn new(center: Vec3, radius_m: f32, seed: u32) -> Self {
+    /// Build a jagged explosion shape. `direction`, when `Some`, biases the
+    /// spike starburst toward that direction: forward-cone spikes are given
+    /// longer reach (up to the full `EXPLOSION_SPIKE_LENGTH_RANGE`), while
+    /// backward-facing spikes are shortened. `None` produces the original
+    /// uniform starburst — identical to the pre-directional blast.
+    pub(crate) fn new(center: Vec3, radius_m: f32, seed: u32, direction: Option<Vec3>) -> Self {
         let golden_angle = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
         let n = EXPLOSION_SPIKE_COUNT;
+        let dir_norm = direction.map(|d| d.normalize_or_zero()).filter(|d| d.length() > 0.5);
         let mut spikes = Vec::with_capacity(n);
         let mut max_reach_m: f32 = radius_m;
         for i in 0..n {
@@ -195,7 +201,18 @@ impl ExplosionShape {
             let unit = |bits: u32, range: (f32, f32)| {
                 range.0 + (bits as f32 / 255.0) * (range.1 - range.0)
             };
-            let length = radius_m * unit(h2 & 0xFF, EXPLOSION_SPIKE_LENGTH_RANGE);
+
+            // Directional bias: when a blast direction is given, scale each
+            // spike's length by how aligned it is with that direction
+            // (dot in [-1, 1] → factor in [0.35, 1.65]). Forward spikes
+            // reach ~65% farther; backward spikes shrink to ~35% — a cone
+            // of focused destruction rather than a uniform starburst. With
+            // no direction the factor is 1.0 and length is unchanged.
+            let length_factor = match dir_norm {
+                Some(d) => 1.0 + d.dot(dir) * 0.65,
+                None => 1.0,
+            };
+            let length = radius_m * unit(h2 & 0xFF, EXPLOSION_SPIKE_LENGTH_RANGE) * length_factor;
             let spike_radius = radius_m * unit((h2 >> 8) & 0xFF, EXPLOSION_SPIKE_RADIUS_RANGE);
 
             max_reach_m = max_reach_m.max(length + spike_radius);
@@ -236,8 +253,16 @@ impl ExplosionShape {
 /// Same return shape as [`carve_sphere`]. `seed` should be the blast's own
 /// per-shot seed (also driving debris spin), so the crater shape and the
 /// debris that flies out of it are both deterministic from the same call.
-pub fn carve_explosion(world: &mut World, center_m: Vec3, radius_m: f32, seed: u32) -> CarveResult {
-    let shape = ExplosionShape::new(center_m, radius_m, seed);
+/// `direction`, when `Some`, biases the spike starburst toward that
+/// direction for a shaped-charge effect; `None` is a uniform starburst.
+pub fn carve_explosion(
+    world: &mut World,
+    center_m: Vec3,
+    radius_m: f32,
+    seed: u32,
+    direction: Option<Vec3>,
+) -> CarveResult {
+    let shape = ExplosionShape::new(center_m, radius_m, seed, direction);
     let s = world.cfg.voxel_size_m;
     let (bmin, bmax) = shape.bounds_m();
     let box_min = voxel_at(bmin, s);
@@ -510,20 +535,35 @@ pub(crate) fn small_hash(a: u32, b: u32) -> u32 {
 /// ([`vox_core::Tunables::blast_power`], typically). Public so callers can
 /// apply the same "explosion" feel to bodies carved directly (e.g. the Bomb
 /// tool hitting an existing debris body, not just the static world).
+/// `direction`, when `Some`, cone-weights the impulse: full power forward,
+/// reduced lateral, minimal backward (a shaped charge). `None` is the
+/// original uniform radial impulse.
 pub fn apply_blast_impulse(
     phys: &mut PhysicsWorld,
     ids: &[BodyId],
     center_m: Vec3,
     power: f32,
     seed: u32,
+    direction: Option<Vec3>,
 ) {
+    let dir_norm = direction
+        .map(|d| d.normalize_or_zero())
+        .filter(|d| d.length() > 0.5);
     for (i, &id) in ids.iter().enumerate() {
         let Some(body) = phys.get(id) else { continue };
         let offset = body.pos - center_m;
         let dist = offset.length();
         let dir = if dist > 1e-6 { offset / dist } else { Vec3::Y };
         let mass = body.mass();
-        let speed = power / dist.max(BLAST_MIN_DIST_M) / mass.sqrt();
+        let mut speed = power / dist.max(BLAST_MIN_DIST_M) / mass.sqrt();
+
+        // Cone-weighted impulse: scale by dot(impulse_dir, direction) mapped
+        // from [-1, 1] to [0.15, 1.0] — forward gets full power, backward
+        // gets ~15%, lateral gets ~57%. Without a direction, no scaling.
+        if let Some(d) = dir_norm {
+            let cone = (d.dot(dir) * 0.5 + 0.5).clamp(0.0, 1.0);
+            speed *= 0.15 + cone * 0.85;
+        }
 
         let h = small_hash(seed, i as u32);
         let spin = Vec3::new(
@@ -658,7 +698,10 @@ fn spawn_debris_chips(
 /// strength (pass [`vox_core::Tunables::blast_power`] for the live-tunable
 /// default); `seed` drives the crater's shape, the debris chip sample and
 /// their spin, and the detached-fragment impulse, so the whole blast is
-/// reproducible from one seed.
+/// reproducible from one seed. `direction`, when `Some`, biases both the
+/// crater shape and the debris impulse toward that direction — a shaped
+/// charge that cuts a focused cone through walls; `None` is the original
+/// uniform blast.
 pub fn blast(
     world: &mut World,
     phys: &mut PhysicsWorld,
@@ -667,11 +710,12 @@ pub fn blast(
     radius_m: f32,
     power: f32,
     seed: u32,
+    direction: Option<Vec3>,
 ) -> CarveResult {
-    let mut carve = carve_explosion(world, center_m, radius_m, seed);
+    let mut carve = carve_explosion(world, center_m, radius_m, seed, direction);
     let removed_positions: Vec<IVec3> = carve.removed.iter().map(|&(v, _)| v).collect();
     let mut ids = detach_unsupported(world, phys, registry, &removed_positions);
-    apply_blast_impulse(phys, &ids, center_m, power, seed);
+    apply_blast_impulse(phys, &ids, center_m, power, seed, direction);
 
     let s = world.cfg.voxel_size_m;
     ids.extend(spawn_debris_chips(
@@ -1083,7 +1127,7 @@ mod tests {
         let center = Vec3::new(10.0, 10.0, 10.0);
         let radius = 3.0;
         let plain = carve_sphere(&mut world_sphere, center, radius);
-        let jagged = carve_explosion(&mut world_explosion, center, radius, 42);
+        let jagged = carve_explosion(&mut world_explosion, center, radius, 42, None);
 
         assert!(
             jagged.removed.len() > plain.removed.len(),
@@ -1109,8 +1153,8 @@ mod tests {
         world_b.fill_box(IVec3::new(0, 0, 0), IVec3::new(20, 20, 20), STONE);
 
         let center = Vec3::new(10.0, 10.0, 10.0);
-        let a = carve_explosion(&mut world_a, center, 3.0, 1234);
-        let b = carve_explosion(&mut world_b, center, 3.0, 1234);
+        let a = carve_explosion(&mut world_a, center, 3.0, 1234, None);
+        let b = carve_explosion(&mut world_b, center, 3.0, 1234, None);
 
         let mut a_sorted: Vec<IVec3> = a.removed.iter().map(|&(v, _)| v).collect();
         let mut b_sorted: Vec<IVec3> = b.removed.iter().map(|&(v, _)| v).collect();
@@ -1173,7 +1217,7 @@ mod tests {
 
         let found_a_severing_seed = (0..40u32).any(|seed| {
             let mut probe = build_world(hub);
-            let carve = carve_explosion(&mut probe, center_m, RADIUS, seed);
+            let carve = carve_explosion(&mut probe, center_m, RADIUS, seed, None);
             let removed: Vec<IVec3> = carve.removed.iter().map(|&(v, _)| v).collect();
             let mut phys = PhysicsWorld::new();
             !detach_unsupported(&mut probe, &mut phys, &reg, &removed).is_empty()
@@ -1202,6 +1246,7 @@ mod tests {
             12.0,
             40.0,
             7,
+            None,
         );
         assert!(carve.removed.len() > 10, "must remove a large chunk");
         // Both pillars and the slab are gone or detached; whatever spawned
@@ -1223,7 +1268,7 @@ mod tests {
         let reg = registry();
         let mut phys = PhysicsWorld::new();
 
-        let carve = blast(&mut world, &mut phys, &reg, Vec3::new(10.0, 10.0, 10.0), 3.0, 40.0, 5);
+        let carve = blast(&mut world, &mut phys, &reg, Vec3::new(10.0, 10.0, 10.0), 3.0, 40.0, 5, None);
 
         assert!(!carve.removed.is_empty(), "must carve something");
         assert!(
