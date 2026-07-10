@@ -6,9 +6,6 @@ use crate::RenderError;
 /// Depth buffer format used by the main render pass.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-/// HDR offscreen format: 16-bit float per channel for tone-mapping headroom.
-/// Requires no special features on Vulkan/DX12; GL backend may not support it.
-pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Owns the wgpu device, queue, window surface, and depth buffer.
 pub struct Gpu {
@@ -18,8 +15,6 @@ pub struct Gpu {
     config: wgpu::SurfaceConfiguration,
     depth_view: wgpu::TextureView,
     adapter_info: wgpu::AdapterInfo,
-    /// HDR offscreen color target (Rgba16Float) for post-processing.
-    hdr_view: wgpu::TextureView,
 }
 
 impl Gpu {
@@ -103,7 +98,6 @@ impl Gpu {
         };
         surface.configure(&device, &config);
         let depth_view = create_depth_view(&device, config.width, config.height);
-        let hdr_view = create_hdr_view(&device, config.width, config.height);
 
         Ok(Self {
             surface,
@@ -112,7 +106,6 @@ impl Gpu {
             config,
             depth_view,
             adapter_info,
-            hdr_view,
         })
     }
 
@@ -130,7 +123,6 @@ impl Gpu {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.depth_view = create_depth_view(&self.device, width, height);
-        self.hdr_view = create_hdr_view(&self.device, width, height);
     }
 
     /// Acquire the next swapchain frame.
@@ -187,12 +179,6 @@ impl Gpu {
         (self.config.width, self.config.height)
     }
 
-    /// HDR offscreen color target view (Rgba16Float) for post-processing.
-    /// Render the scene into this, then run the post-process pass to tone-map
-    /// onto the swapchain frame.
-    pub fn hdr_view(&self) -> &wgpu::TextureView {
-        &self.hdr_view
-    }
 }
 
 /// One acquired swapchain frame: render into [`Frame::view`], then call
@@ -234,26 +220,6 @@ fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-/// Create an HDR color attachment view (Rgba16Float). Used as the
-/// offscreen render target for the scene pass; the post-process pass
-/// then tone-maps from this to the swapchain frame.
-fn create_hdr_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("vox-hdr"),
-        size: wgpu::Extent3d {
-            width: width.max(1),
-            height: height.max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
-}
 
 /// Select the wgpu backend from the `WGPU_BACKEND` environment variable,
 /// falling back to `Backends::PRIMARY` (Vulkan + DX12 + Metal) so the

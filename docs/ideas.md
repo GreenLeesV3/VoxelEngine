@@ -39,7 +39,7 @@ structure standing wins. Needs networking or AI opponents.
 
 ## Technical Systems
 
-### 6. vox-sim — Cellular Automata (fire / water / falling sand)
+### 6. vox-sim — Cellular Automata (fire / water / falling sand) — 🔄 PARTIAL (fire done)
 New sibling crate at physics tier. Depends on vox-core + vox-world. Per-voxel state
 as sidecar arrays (not packed into Voxel — design doc §4 reserves this). Fire
 spreads through flammable materials, water flows downhill and carves channels,
@@ -61,7 +61,7 @@ New crate at gen/physics tier. Creatures with simple AI (wander, flee, hunt).
 Populations that grow and die. Could spawn enemies for Storm Survivor, opponents
 for Voxel Rally, or wildlife. Typed arenas grow into ECS when needed.
 
-### 10. Weather & Day/Night System
+### 10. Weather & Day/Night System — ✅ DONE
 Rotating sun via Tunables + egui. Modulates sky color, ambient, sun strength, fog.
 Wind applies impulses to debris bodies. Rain could feed the water sim. Foundation
 that shadows and volumetric fog depend on.
@@ -70,27 +70,27 @@ that shadows and volumetric fog depend on.
 
 ## Rendering
 
-### 11. Grass Sway & Animated Foliage
+### 11. Grass Sway & Animated Foliage — ✅ DONE (3D blade geometry + wind sway)
 Displace grass-top faces in vertex shader using world XZ + time. No vertex format
 change, no new pass. Uses spare CameraUniform.fog.w as time uniform. Cheap,
 immediate visual win.
 
-### 12. Day/Night Sky + Sun Uniform
+### 12. Day/Night Sky + Sun Uniform — ✅ DONE (subsumed by #10, all uniforms threaded)
 Replace hardcoded sun_dir with time-of-day-driven rotation. Modulate SKY_COLOR,
 AMBIENT_SKY, SUN_STRENGTH, CLEAR_COLOR by sun elevation. Prerequisite for shadow
 mapping and volumetric fog.
 
-### 13. Transparent Water Voxels with Refraction
+### 13. Transparent Water Voxels with Refraction — ✅ DONE (alpha 0.85, blue tint, depth_write off)
 Requires material schema change (new render flags in MaterialDef + TOML + storage
 buffer). Second blended pass sorted back-to-front. Fake refraction via sin ripple
 on fog mix avoids framebuffer sampling. First structural new render pass.
 
-### 14. Cascaded Directional Shadow Mapping
+### 14. Cascaded Directional Shadow Mapping — ✅ DONE (2048x2048, PCF 3x3, ortho sun cam)
 Depth-only pass from sun's viewpoint, reusing draw_chunks/draw_bodies with depth
 bias. Main pass samples with PCF 3x3. Cascades via array texture. Most invasive
 rendering change, depends on day/night sun uniform.
 
-### 15. HDR Post-Processing (tone mapping + bloom + SSAO + volumetric fog)
+### 15. HDR Post-Processing (tone mapping + bloom + SSAO + volumetric fog) — ✅ DONE (offscreen Rgba16Float + cel-shading + saturation/grading; bloom/SSAO/volumetric fog are future phases)
 Rgba16Float offscreen intermediate as new voxel-pass target, then fullscreen post
 pass. Current direct-to-sRGB path makes tone mapping impossible without this.
 SSAO needs depth texture binding + normals MRT. Structural keystone that unlocks
@@ -122,7 +122,7 @@ Water carves channels through weak materials over time. Sand washes away, stone
 resists. Creates natural canyons and riverbeds. The carve pipeline already exists —
 erosion is a slow, automated version driven by fluid sim.
 
-### 20. Buoyancy & Floating Structures
+### 20. Buoyancy & Floating Structures — ✅ DONE (from upstream merge, debris floats)
 Debris bodies float or sink based on material density vs water density. Wood floats
 (density 700), stone sinks (density 2600). Build a raft, watch it bob. Extends the
 existing rigidbody solver with buoyant force calculation.
@@ -131,17 +131,17 @@ existing rigidbody solver with buoyant force calculation.
 
 ## Mario Side Features
 
-### 21. Wall Collision via Surface Objects
+### 21. Wall Collision via Surface Objects — ✅ DONE (all 6 FACES, surface objects)
 Use libsm64's sm64_surface_object_create/move/delete API for wall collision instead
 of the monolithic static surface array. Incremental cell-based updates. Unlocks
 wall-kicks, wall-slides, ledge grabs — the biggest gameplay gap for Mario.
 
-### 22. SM64 Audio Integration
+### 22. SM64 Audio Integration — ✅ DONE (cpal resampled 32→48kHz, volume 0.5)
 Wire sm64_audio_init + sm64_audio_tick for Mario's sound effects (jump "wahoo!",
 footsteps, ground pound) and background music. FFI already declared but unused.
 Would add huge personality to the mode.
 
-### 23. Mario ↔ Debris Interaction
+### 23. Mario ↔ Debris Interaction — ✅ DONE (surface objects for debris)
 Register awake debris bodies as SM64 surface objects so Mario can stomp falling
 chunks (they shatter, he bounces), kick them (impulse), or ride them as they fall.
 Bridges the two physics systems.
@@ -219,7 +219,7 @@ already returns removed voxels — roll a chance there). Self-limits by the
 invincibility timer and the debris budget. Heaviest of the five, but the
 only one that makes an SM64 *power-up* feel like a voxel-engine *verb*.
 
-### 27. Mario as a Fifth Destruction Tool — Mario Bomb
+### 27. Mario as a Fifth Destruction Tool — Mario Bomb — ✅ DONE (ACT_GROUND_POUND_LAND → blast)
 Strongest, fully feasible today. Mario is already toggleable with M; this
 makes him *useful* in the non-Mario sandbox too. Detect
 `ACT_GROUND_POUND_LAND` (0x0080023C, sm64.h:208) from
@@ -279,7 +279,7 @@ coin where debris shatters, rewarding the wrecking-ball playstyle. This
 gives Mario-mode a *goal* (collect N stars) for the first time, all with
 position checks and a counter. No new FFI.
 
-### 30. Ground-Pound Craters — Mario as a Terrain Sculptor
+### 30. Ground-Pound Craters — Mario as a Terrain Sculptor — ✅ DONE (carve_sphere + triple-jump mound)
 Distinct from #27's *explosive* pound (which uses `blast` and spawns
 debris): this is the *constructive* version where the pound edits terrain
 *gently* for traversal and sculpting. A ground pound carves a shallow
@@ -339,12 +339,12 @@ read-only flood probe in vox-physics + vox-debug overlay.
 
 ## Technical Systems (Round 2)
 
-### 36. vox-cmd — Command Queue and Tiered Undo/Redo
+### 36. vox-cmd — Command Queue and Tiered Undo/Redo — ✅ DONE (Tier 1: voxel diffs, Ctrl+Z/Y)
 Two-tier undo. Tier 1: world-edit undo (voxel diffs, ~400 LOC). Tier 2: destruction
 undo via physics snapshots (~600 LOC). edit_box already computes the diff but
 discards it — the undo data is right there.
 
-### 37. vox-edit — In-Engine Editor with Brush Tools and Prefab Stamping
+### 37. vox-edit — In-Engine Editor with Brush Tools and Prefab Stamping — ✅ DONE (E to toggle, LMB/RMB sphere brush)
 Brush = operation (Paint/Replace/Erase/Smooth/Noise) x shape (Sphere/Box/Line/
 Cylinder). Prefab stamping reuses VoxelSlab::extract. Editor is a separate mode
 (toggled like Mario mode). Depends on #36 for undo.
@@ -355,7 +355,7 @@ flammable — currently blocked by deny_unknown_fields), (2) data-described tool
 TOML recipes composing native Rust effectors, (3) data-driven gen hooks. NO
 scripting runtime — mods compose our primitives.
 
-### 39. vox-determinism — Replay and Lockstep Networking Foundation
+### 39. vox-determinism — Replay and Lockstep Networking Foundation — ✅ DONE (snapshot replay, R/P)
 One system, not two. Replay (snapshot-based, ships first) and lockstep networking
 (deterministic, ships second) share a single determinism seam. Prerequisite for
 Destruction Derby (#5).
@@ -373,11 +373,11 @@ first. Hot-reload shaders comes near-free as groundwork.
 Reflection, not refraction. Needs the HDR color+depth sampling that #15 unlocks.
 New pass, composes with water (#13).
 
-### 42. GPU Particle System
+### 42. GPU Particle System — 🔄 PARTIAL (ParticleSystem for smoke/debris; no separate crate)
 New render-tier crate. Coarse voxel debris already exists but no fire/smoke/spark
 layer. Emitters wire to existing destruction outcomes + ImpactEvents.
 
-### 43. Progressive Block-Break Crack Decals
+### 43. Progressive Block-Break Crack Decals — ✅ DONE (procedural shader, crack_intensity in ambient_sky.w)
 Makes the PROCESS of destruction visible (pre-fracture damage), not just the result.
 New pass + meshing extension. Pairs with sustained-load #17.
 

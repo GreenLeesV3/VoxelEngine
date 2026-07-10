@@ -243,9 +243,10 @@ struct VoxApp {
     /// CPU-simulated destruction feedback particles (see `particles`).
     particles: ParticleSystem,
     particle_pipeline: ParticlePipeline,
-    /// HDR post-processing pipeline: tone-maps the HDR offscreen render
-    /// target to the swapchain format using ACES filmic tone mapping.
-    post_pipeline: vox_render::PostPipeline,
+    /// Cel-shading + post-process pipeline: offscreen HDR color + depth
+    /// textures, fullscreen edge-detection/saturation/grading pass that
+    /// composites the scene to the swapchain.
+    postprocess: vox_render::PostProcessPipeline,
     /// Grass blade render pipeline.
     grass_pipeline: vox_render::GrassPipeline,
     /// Cached grass blade vertices (throttled regeneration).
@@ -309,7 +310,7 @@ impl VoxApp {
         let shader = std::fs::read_to_string(assets.join("shaders/voxel.wgsl"))?;
         let shadow_shader = std::fs::read_to_string(assets.join("shaders/shadow.wgsl"))?;
         let particle_shader = std::fs::read_to_string(assets.join("shaders/particle.wgsl"))?;
-        let post_shader = std::fs::read_to_string(assets.join("shaders/post.wgsl"))?;
+        let post_shader = std::fs::read_to_string(assets.join("shaders/postprocess.wgsl"))?;
         let grass_shader = std::fs::read_to_string(assets.join("shaders/grass.wgsl"))?;
 
         let build_start = Instant::now();
@@ -334,12 +335,13 @@ impl VoxApp {
         );
         let particle_pipeline = ParticlePipeline::new(&gpu, &particle_shader);
         let tools = Tools::new(&registry);
-        let post_pipeline = vox_render::PostPipeline::new(&gpu, gpu.hdr_view(), &post_shader);
+        let (surf_w, surf_h) = gpu.surface_size();
+        let postprocess = vox_render::PostProcessPipeline::new(&gpu, &post_shader, surf_w, surf_h);
         let grass_pipeline = vox_render::GrassPipeline::new(&gpu, &grass_shader);
         let debug_overlay = DebugOverlay::new(
             gpu.device(),
             gpu.surface_format(),
-            Some(vox_render::DEPTH_FORMAT),
+            None,
             &window,
         );
         // Air (id 0) is never player-selectable; the picker mirrors that.
@@ -403,7 +405,7 @@ impl VoxApp {
             replay: replay::ReplayState::default(),
             particles: ParticleSystem::new(),
             particle_pipeline,
-            post_pipeline,
+            postprocess,
             grass_pipeline,
             grass_cache: grass::GrassCache::new(),
         };
@@ -1568,7 +1570,7 @@ impl App for VoxApp {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("voxel-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: frame.view(),
+                    view: self.postprocess.color_view(),
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(day_night::clear_color(&dn)),
@@ -1576,7 +1578,7 @@ impl App for VoxApp {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: self.gpu.depth_view(),
+                    view: self.postprocess.depth_view(),
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -1640,7 +1642,32 @@ impl App for VoxApp {
             self.grass_pipeline.draw(self.gpu.queue(), &mut pass, grass_verts);
             // Water last — alpha-blends over terrain, grass, and particles.
             self.pipeline.draw_water(&mut pass, &frustum);
-            self.debug_overlay.paint(&mut pass, &prepared_overlay);
+        }
+
+        // Post-process pass: composite the offscreen HDR color + depth
+        // through the fullscreen edge-detection/saturation/grading shader
+        // onto the swapchain frame.
+        self.postprocess.process(&mut encoder, frame.view());
+
+        // UI pass: debug overlay drawn directly on the swapchain, on top
+        // of the post-processed scene. No depth attachment — egui's
+        // pipeline is built against None in its constructor.
+        {
+            let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: frame.view(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.debug_overlay.paint(&mut ui_pass, &prepared_overlay);
         }
         self.gpu.queue().submit([encoder.finish()]);
         frame.present();
@@ -1655,6 +1682,7 @@ impl App for VoxApp {
 
     fn resize(&mut self, width: u32, height: u32) {
         self.gpu.resize(width, height);
+        self.postprocess.resize(&self.gpu, width, height);
     }
 
     fn window_event(&mut self, event: &winit::event::WindowEvent) -> bool {

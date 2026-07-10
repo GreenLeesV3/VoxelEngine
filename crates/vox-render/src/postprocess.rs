@@ -262,6 +262,27 @@ impl PostProcessPipeline {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
+
+    /// Run the post-process fullscreen pass into `target_view` (the
+    /// swapchain frame). Call after the scene render pass has completed
+    /// (the encoder must still be open, but the scene pass must be dropped).
+    pub fn process(&self, encoder: &mut wgpu::CommandEncoder, target_view: &wgpu::TextureView) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("postprocess-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        self.draw(&mut pass);
+    }
 }
 
 fn create_color_texture(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::TextureView {

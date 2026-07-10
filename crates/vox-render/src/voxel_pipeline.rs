@@ -242,7 +242,7 @@ impl VoxelPipeline {
                 entry_point: "fs",
                 compilation_options: opaque_constants,
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
+                    format: crate::postprocess::COLOR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -286,7 +286,7 @@ impl VoxelPipeline {
                 entry_point: "fs",
                 compilation_options: water_constants,
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
+                    format: crate::postprocess::COLOR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

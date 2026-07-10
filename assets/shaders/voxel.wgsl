@@ -206,7 +206,13 @@ fn fs(in: VOut) -> @location(0) vec4f {
     let n = normalize(in.world_normal);
     let ndotl = dot(n, -cam.sun_dir.xyz);
     // Half-Lambert wrap: softens the sun terminator into a gradient.
-    var sun = pow(clamp(ndotl * 0.5 + 0.5, 0.0, 1.0), 1.5) * cam.sun_dir.w * cam.sun_color.xyz;
+    // Cel-shading: quantize into 4 bands with smooth transitions for a
+    // painterly, comic-book look (design doc §3).
+    let raw = clamp(ndotl * 0.5 + 0.5, 0.0, 1.0);
+    let bands = 4.0;
+    let quantized = floor(raw * bands + 0.5) / bands;
+    let smooth_q = mix(quantized, raw, smoothstep(0.45, 0.55, fract(raw * bands)));
+    var sun = pow(smooth_q, 1.5) * cam.sun_dir.w * cam.sun_color.xyz;
     let fill = max(-ndotl, 0.0) * cam.sky_color.w;
 
     // Shadow mapping (#14): sample the directional shadow map and attenuate

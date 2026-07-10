@@ -75,7 +75,7 @@ impl MarioPipeline {
         tex_h: u32,
     ) -> Self {
         let device = gpu.device();
-        let format = gpu.surface_format();
+        let format = crate::postprocess::COLOR_FORMAT;
 
         // ── Shaders ───────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
