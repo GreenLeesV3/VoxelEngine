@@ -516,7 +516,7 @@ soft contact shadows. New fullscreen pass between scene and postprocess, outputt
 an R8 occlusion texture. ~16-32 taps per pixel, gateable via Tunables.
 Feasibility: **medium**. Depends on #64.
 
-### 66. Procedural Sky Dome with Rayleigh/Mie Scattering and Sun Disc
+### 66. Procedural Sky Dome with Rayleigh/Mie Scattering and Sun Disc — ✅ DONE
 The sky is currently a flat clear color. A procedural sky dome replaces it with a
 Rayleigh + Mie scattering approximation: horizon gradient, visible sun disc
 (gaussian falloff at sun_dir), warm sunset/sunrise tint, star field at night.
@@ -551,7 +551,7 @@ gaps. ~32 samples per pixel in a fullscreen pass. Requires #66's sun disc for th
 ray origin. Most impactful at dawn/dusk.
 Feasibility: **medium**. Depends on #66.
 
-### 70. Soft Particles with Depth-Aware Surface Fade
+### 70. Soft Particles with Depth-Aware Surface Fade — ✅ DONE
 Particles hard-cut at depth boundaries — smoke on the ground shows a crisp slice
 line. Fix: bind the scene depth texture in the particle fragment shader, compute
 the depth difference, fade alpha to zero as the difference approaches zero. Makes
@@ -560,7 +560,7 @@ binding in the particle bind group layout, sample in particle.wgsl fs(). Small,
 high-impact change — particle pipeline is ~200 lines.
 Feasibility: **easy**.
 
-### 71. Unified Cel Quantization Across All Pipelines + Fire Point Lights
+### 71. Unified Cel Quantization Across All Pipelines + Fire Point Lights — ✅ DONE (cel quantization in grass + mario; fire point lights deferred)
 (1) Voxel shader has 4-band cel quantization but grass.wgsl and mario.wgsl use
 plain half-Lambert — grass and Mario render with smooth gradients that clash with
 banded terrain. Copy the quantization block into both shaders. (2) The fire system
@@ -573,27 +573,27 @@ Feasibility: **medium**.
 
 ## Physics Performance (PerfAgent)
 
-### 72. Hoist Broadphase Build to Once-Per-Step
+### 72. Hoist Broadphase Build to Once-Per-Step — ✅ DONE
 Broadphase.candidate_pairs() calls build() inside the substep loop AND in
 islands() — (SUBSTEPS+1) full grid rebuilds per step instead of 1. AABBs only
 move after position integration at end of substep. Fix: build once at top of
 step(), use pairs() everywhere. Turns (SUBSTEPS+1) grid builds into 1.
 Feasibility: **easy**.
 
-### 73. Persistent Contacts Vec and Warm-Start Map Across Substeps
+### 73. Persistent Contacts Vec and Warm-Start Map Across Substeps — ✅ DONE
 substep() allocates a fresh Vec<Contact> (~112 bytes each) every substep. With 50
 bodies × 20-40 contacts × 2 substeps = ~2000 heap allocs/drops per step. Hoist
 into PhysicsWorld as persistent fields, .clear() preserves capacity. Warm-start
 map: use .retain() instead of .clear()+rebuild.
 Feasibility: **easy**.
 
-### 74. Reuse SolidLookup Across Substeps
+### 74. Reuse SolidLookup Across Substeps — ✅ DONE
 SolidLookup caches the last-queried chunk, but a fresh one is constructed every
 substep — cache starts cold each time. Construct once in step(), pass &mut into
 substep(). Substep 2's first query likely hits the same chunk substep 1 ended on.
 Feasibility: **easy**.
 
-### 75. Avoid Per-Substep Resize of contact_flags and pos_corr
+### 75. Avoid Per-Substep Resize of contact_flags and pos_corr — ✅ DONE
 contact_flags and pos_corr are .clear()+.resize(slots.len()) every substep —
 rewrites every byte even if length is unchanged. For 500 slots that's 6KB zeroed
 per substep. Keep as persistent fields, reset only dirty indices via a small
@@ -608,7 +608,7 @@ Option<Body> arena with Vec<Body> + Vec<bool> bitmap, precompute into SOA contac
 buffers. Standard approach in Box2D v3 and Bullet's MLCP solvers.
 Feasibility: **hard**.
 
-### 77. Chunk-Local Bitset for Flood-Fill Visited Set
+### 77. Chunk-Local Bitset for Flood-Fill Visited Set — ✅ DONE
 flood_from uses FxHashSet<IVec3> for visited — 200k hash insertions with poor
 cache behavior for large severed components. Replace with a per-chunk bitset
 (FxHashMap<IVec3, Box<[u8; 32768]>>): turns the inner-loop check from a hash
@@ -616,7 +616,7 @@ operation into a chunk-cache lookup + bit test. O(1) with far better locality.
 Worst-case memory ~375KB of bitsets.
 Feasibility: **medium**.
 
-### 78. split_components: Reuse Visited Buffer and Indexed BFS
+### 78. split_components: Reuse Visited Buffer and Indexed BFS — ✅ DONE
 split_components allocates vec![false; len] for visited, VecDeque per component,
 fresh VoxelGrid per component. Use a flat Vec ring buffer for BFS, bitset over
 existing voxels array instead of separate visited, pre-size component Vec from
@@ -964,7 +964,7 @@ Feasibility: **medium**.
 
 ## Meshing & Rendering Performance (MeshAgent)
 
-### 118. Reuse Mask Buffer + Skip Empty Slices in Greedy Mesher
+### 118. Reuse Mask Buffer + Skip Empty Slices in Greedy Mesher — ✅ DONE
 mesh_slab allocates a fresh Vec<Option<Cell>> for each of 6 face directions and
 iterates every voxel unconditionally. Chunk::solid_slice_masks() already computes
 per-axis occupancy (used by vox-sm64 but NOT by the mesher). Hoist mask buffer
@@ -972,7 +972,7 @@ outside the face loop, skip slices where mask is false. Skips 70-90% of Y slices
 for typical terrain chunks, eliminates 6 heap allocations per remesh.
 Feasibility: **easy**.
 
-### 119. Skip Slab Extraction for Uniform Chunks
+### 119. Skip Slab Extraction for Uniform Chunks — ✅ DONE
 VoxelSlab::extract copies the entire 34³ region (~39K voxels) per chunk on the main
 thread. For Uniform all-air/all-solid chunks (the majority), this is a 39K-iteration
 loop producing trivial output. Fast-path: if chunk is Uniform, construct slab
@@ -1132,7 +1132,7 @@ carve_body_sphere_at, splitting the body as fire eats through it. A burning wood
 beam breaks apart as consumed, fragments inherit velocity and continue burning.
 Feasibility: **medium**.
 
-### 138. Directional Blasts & Shaped Charges
+### 138. Directional Blasts & Shaped Charges — ✅ DONE
 ExplosionShape is a uniform spike starburst; impulse is radial. Add a direction
 vector: spikes biased toward the direction, impulse falloff is cone-weighted.
 A shaped charge cuts a focused hole through a wall instead of a crater. Implemented
