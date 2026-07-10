@@ -247,6 +247,16 @@ impl PhysicsWorld {
         }
     }
 
+    /// Mutable counterpart to [`get`](Self::get).
+    pub fn get_mut(&mut self, id: BodyId) -> Option<&mut Body> {
+        let slot = id.slot as usize;
+        if self.generations.get(slot) == Some(&id.generation) {
+            self.slots[slot].as_mut()
+        } else {
+            None
+        }
+    }
+
     /// Iterate live bodies with their ids.
     pub fn iter(&self) -> impl Iterator<Item = (BodyId, &Body)> {
         self.slots.iter().enumerate().filter_map(|(slot, b)| {

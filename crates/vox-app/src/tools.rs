@@ -170,6 +170,37 @@ fn body_outcome(phys: &PhysicsWorld, id: BodyId, spawned: Vec<BodyId>) -> CarveO
     }
 }
 
+/// Fill a voxel sphere of `radius_vox` centered at `center` with `material`,
+/// recording the (pos, old_voxel) diff of every voxel that actually changed
+/// (same-value writes are no-ops in `World::set_voxel` and skipped here).
+/// Voxels outside the world bounds are silently skipped by `set_voxel`.
+/// Used by the editor brush — a simple, safe, fully-undoable world edit with
+/// no physics body carving or debris spawning.
+fn sphere_edit(world: &mut World, center: IVec3, radius_vox: i32, material: Voxel) -> Vec<(IVec3, Voxel)> {
+    let mut diff = Vec::new();
+    let r2 = (radius_vox as f32).powi(2);
+    for dz in -radius_vox..=radius_vox {
+        for dy in -radius_vox..=radius_vox {
+            for dx in -radius_vox..=radius_vox {
+                if (dx * dx + dy * dy + dz * dz) as f32 > r2 {
+                    continue;
+                }
+                let pos = center + IVec3::new(dx, dy, dz);
+                if !world.in_bounds(pos) {
+                    continue;
+                }
+                let old = world.get_voxel(pos);
+                if old == material {
+                    continue;
+                }
+                world.set_voxel(pos, material);
+                diff.push((pos, old));
+            }
+        }
+    }
+    diff
+}
+
 /// Carve a sphere out of body `id` and report the outcome (see
 /// [`body_outcome`]).
 fn carve_body_sphere(
@@ -522,6 +553,41 @@ impl Tools {
         let center_vox = hit.voxel + face;
         let radius_vox = (self.water_radius_m / s).round() as i32;
         fluid.place_blob(world, center_vox, radius_vox, Voxel(water_id.0));
+    }
+
+    /// Editor paint brush: fill a sphere of `radius_m` centered at the
+    /// crosshair target with `material`, returning the (pos, old_voxel) diff
+    /// of every changed voxel for undo. Only touches the static world (no
+    /// body carving, no debris) — the editor is a safe, undoable overlay on
+    /// the existing FPS controls.
+    pub fn editor_brush(
+        &self,
+        world: &mut World,
+        eye_m: Vec3,
+        look: Vec3,
+        radius_m: f32,
+        material: Voxel,
+    ) -> Vec<(IVec3, Voxel)> {
+        let dir = look.normalize_or_zero();
+        if dir == Vec3::ZERO {
+            return Vec::new();
+        }
+        let Some(hit) = raycast(world, eye_m, dir, REACH) else {
+            return Vec::new();
+        };
+        let s = world.cfg.voxel_size_m;
+        // Erase centers on the solid voxel the crosshair actually hit;
+        // paint centers on the empty face in front of it (same as
+        // place_voxel), so building out from a surface lands on the surface,
+        // not buried inside it. When the eye starts inside solid (no face),
+        // both fall back to the hit voxel itself.
+        let center_vox = if material == AIR {
+            hit.voxel
+        } else {
+            hit.voxel + hit.face.unwrap_or(IVec3::ZERO)
+        };
+        let radius_vox = (radius_m / s).round() as i32;
+        sphere_edit(world, center_vox, radius_vox, material)
     }
 }
 

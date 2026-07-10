@@ -107,6 +107,15 @@ impl Player {
         }
     }
 
+    /// Snap the render-interpolation snapshot to the current position so
+    /// `eye()` returns exactly `ctrl.pos` (plus eye height). Used by the
+    /// replay system during playback, where `fixed_steps` is skipped and
+    /// `prev_pos` would otherwise lag behind snapshots written directly to
+    /// `ctrl.pos`.
+    pub fn sync_prev_pos(&mut self) {
+        self.prev_pos = self.ctrl.pos;
+    }
+
     /// Interpolated eye position for rendering.
     pub fn eye(&self, alpha: f32) -> Vec3 {
         self.prev_pos.lerp(self.ctrl.pos, alpha) + Vec3::new(0.0, PLAYER_EYE, 0.0)

@@ -9,6 +9,7 @@ mod audio;
 mod day_night;
 mod remesh;
 mod tools;
+mod replay;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -209,10 +210,22 @@ struct VoxApp {
     /// CPU-simulated destruction feedback particles (see `particles`).
     particles: ParticleSystem,
     particle_pipeline: ParticlePipeline,
+    /// In-engine editor mode: when active, LMB paints a sphere of the
+    /// selected material at the crosshair target and RMB erases a sphere of
+    /// AIR, instead of the normal hotbar tools. Toggled with E. The player
+    /// still flies/looks normally — only mouse-button meaning changes.
+    editor_active: bool,
+    /// Brush radius in meters for editor paint/erase, adjustable with the
+    /// mouse wheel while editor mode is active.
+    editor_radius: f32,
     /// Undo stack: each entry is a voxel diff (pos, old_voxel) from a world edit.
     undo_stack: Vec<Vec<(IVec3, Voxel)>>,
     /// Redo stack: entries popped from undo_stack by Ctrl+Z, re-applied by Ctrl+Y.
     redo_stack: Vec<Vec<(IVec3, Voxel)>>,
+    /// Snapshot-based replay state (record with R, play back with P).
+    /// Only captures player + camera + debris body transforms, not the
+    /// voxel world -- see `replay` module docs.
+    replay: replay::ReplayState,
 }
 
 /// Hard cap on total debris bodies alive at once. Past this, the oldest
@@ -317,8 +330,11 @@ impl VoxApp {
             mario_units_per_meter,
             game_time: 60.0, // Start at noon (halfway through 120s cycle)
             pending_body_removal: HashMap::new(),
+            editor_active: false,
+            editor_radius: 2.0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            replay: replay::ReplayState::default(),
             particles: ParticleSystem::new(),
             particle_pipeline,
         };
@@ -641,10 +657,58 @@ impl VoxApp {
         }
     }
 
+    /// Editor brush input (only called when `editor_active`): LMB paints a
+    /// sphere of the selected material at the crosshair target, RMB erases a
+    /// sphere of AIR. The wheel adjusts `editor_radius` directly (bypassing
+    /// the tool hotbar's radius, which routes through `active_radius_mut`
+    /// and would resize water or cycle material depending on the active
+    /// tool). Every changed voxel is recorded as a (pos, old_voxel) diff and
+    /// pushed onto the undo stack — fully undoable with Ctrl+Z, since the
+    /// brush only touches the static world (no debris is ever spawned).
+    fn apply_editor_brush(&mut self, input: &InputState, eye: Vec3, look: Vec3) {
+        let radius = self.editor_radius;
+        if input.mouse_clicked(MouseButton::Left) {
+            // selected_material is 0-based into material_names (air
+            // excluded); +1 converts to the registry id the tools use.
+            let material = Voxel((self.selected_material + 1) as u16);
+            let diff = self
+                .tools
+                .editor_brush(&mut self.world, eye, look, radius, material);
+            if !diff.is_empty() {
+                self.undo_stack.push(diff);
+                self.redo_stack.clear();
+                if self.undo_stack.len() > 50 {
+                    self.undo_stack.remove(0);
+                }
+            }
+        }
+        if input.mouse_clicked(MouseButton::Right) {
+            let diff = self
+                .tools
+                .editor_brush(&mut self.world, eye, look, radius, AIR);
+            if !diff.is_empty() {
+                self.undo_stack.push(diff);
+                self.redo_stack.clear();
+                if self.undo_stack.len() > 50 {
+                    self.undo_stack.remove(0);
+                }
+            }
+        }
+        if input.wheel_delta.abs() >= 1.0 {
+            let steps = input.wheel_delta as i32;
+            self.editor_radius =
+                (self.editor_radius + steps as f32 * 0.25).clamp(0.5, 8.0);
+        }
+    }
+
     /// Tool input: LMB uses the active hotbar tool, RMB places.
     fn apply_tools(&mut self, input: &InputState) {
         let eye = self.player.eye(1.0);
         let look = self.player.look_dir();
+        if self.editor_active {
+            self.apply_editor_brush(input, eye, look);
+            return;
+        }
         if input.mouse_clicked(MouseButton::Left) {
             let outcome = match self.tools.tool {
                 Tool::Dig => self
@@ -1054,6 +1118,16 @@ impl App for VoxApp {
         if input.key_pressed(KeyCode::KeyM) {
             self.toggle_mario_mode();
         }
+        if input.key_pressed(KeyCode::KeyE) {
+            self.editor_active = !self.editor_active;
+            tracing::info!("editor mode toggled active={}", self.editor_active);
+        }
+        if input.key_pressed(KeyCode::KeyR) {
+            self.replay.toggle_recording();
+        }
+        if input.key_pressed(KeyCode::KeyP) {
+            self.replay.start_playback();
+        }
         if input.key_down(KeyCode::ControlLeft) && input.key_pressed(KeyCode::KeyZ) {
             self.undo();
         }
@@ -1093,6 +1167,10 @@ impl App for VoxApp {
             if let Some(impact_m) = self.mario_mode.as_mut().unwrap().pending_ground_pound() {
                 self.apply_ground_pound(impact_m);
             }
+        } else if self.replay.is_playing() {
+            // Replay playback: the snapshot drives the player + camera, so
+            // skip the normal mouse-look + fixed_steps input handling. The
+            // snapshot is applied after the physics step below.
         } else {
             // FPS mode: existing player controller
             if self.grabbed {
@@ -1104,7 +1182,7 @@ impl App for VoxApp {
                     .fixed_steps(&self.world, input, timing.physics_steps);
             }
         }
-        if self.grabbed && !grabbed_this_frame && !mario_active {
+        if self.grabbed && !grabbed_this_frame && !mario_active && !self.replay.is_playing() {
             // Manual timing: apply_tools takes &mut self as a whole, which
             // would conflict with a live &mut self.profile.tools borrow.
             let tools_start = Instant::now();
@@ -1124,6 +1202,20 @@ impl App for VoxApp {
         self.apply_impact_fracture(impacts);
         self.enforce_debris_budget();
         self.expire_clutter(timing.physics_steps as f32 * vox_core::consts::PHYSICS_DT);
+        // Replay: record (throttled internally to 1/sec) or apply the next
+        // playback snapshot to the player + debris bodies. Runs after the
+        // physics step so recorded body transforms are this frame's final
+        // state, and after debris eviction so evicted bodies aren't captured.
+        if self.replay.recording {
+            self.replay.record(&self.player, self.game_time, &self.phys);
+        } else if self.replay.is_playing() {
+            if self.replay.playback_step(&mut self.player, &mut self.phys, &mut self.game_time) {
+                // Keep the render-interpolated eye exactly on the snapshot
+                // (fixed_steps is skipped during playback, so prev_pos would
+                // otherwise lag the directly-written ctrl.pos).
+                self.player.sync_prev_pos();
+            }
+        }
         // Feed nearby debris bodies to Mario as moving collision surfaces.
         // Must run after the physics step (fresh transforms) and after
         // debris eviction/lifetime expiry (so we don't register surfaces
