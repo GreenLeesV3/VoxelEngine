@@ -809,4 +809,63 @@ mod tests {
         assert_eq!(weathering.polluting_count(), 0);
         assert_eq!(weathering.settling_count(), 0);
     }
+    #[test]
+    fn full_pollution_lifecycle_mud_to_muddy_water_to_water_plus_sand() {
+        // Integration test: a single muddy_water cell on a stone floor
+        // settles to water + sand, verified end-to-end with the fluid sim.
+        // We seed muddy_water directly (bypassing dissolve) to isolate the
+        // settle phase, and use a single cell with no water above to avoid
+        // the limit cycle (water ↔ muddy_water re-pollution loop).
+        //
+        // The dissolve phase is tested by mud_adjacent_to_water_dissolves,
+        // the polluting phase by clean_water_adjacent_to_muddy_water.
+        // This test verifies the settle phase end-to-end with the fluid sim.
+        let mut world = world_with_floor(STONE);
+        let mut weathering = Weathering::new(table());
+        let mut sim = crate::FluidSim::with_fluids_and_powders(
+            vec![WATER, MUDDY_WATER],
+            Vec::new(),
+        );
+
+        // Place a single muddy_water cell at y=5 (one above the stone floor
+        // surface at y=4). The floor below (y=4) is STONE.
+        let muddy_cell = IVec3::new(8, 5, 8);
+        let floor_cell = IVec3::new(8, 4, 8); // STONE (floor surface)
+        world.set_voxel(muddy_cell, MUDDY_WATER);
+        world.set_solid_table(vec![false, false, true, true, true, true, true, false]);
+
+        // Wake the muddy_water cell so the fluid sim processes it and
+        // emits Settled events (needed for the settling timer).
+        sim.wake_region(&world, muddy_cell - IVec3::ONE, muddy_cell + IVec3::ONE * 2);
+
+        // Run: the muddy_water cell is supported (stone floor below, stone
+        // walls from world_with_floor) so it can't move → emits Settled
+        // each tick → settling timer advances → at MUDDY_SETTLE_TICKS,
+        // clarifies to WATER and deposits SAND on the cell below.
+        let mut settled = false;
+        for _ in 0..(MUDDY_SETTLE_TICKS * 2) {
+            sim.tick(&mut world);
+            let events = sim.drain_events();
+            weathering.tick(&mut world, &events);
+            for (min, max) in world.drain_dirty_regions() {
+                sim.wake_region(&world, min, max);
+            }
+            if world.get_voxel(muddy_cell) == WATER {
+                settled = true;
+                break;
+            }
+        }
+
+        assert!(settled, "muddy_water must settle to water within 2x threshold");
+        assert_eq!(
+            world.get_voxel(muddy_cell),
+            WATER,
+            "muddy_water must clarify to water after settling"
+        );
+        assert_eq!(
+            world.get_voxel(floor_cell),
+            SAND,
+            "sand must be deposited on the floor below the settled muddy_water"
+        );
+    }
 }
