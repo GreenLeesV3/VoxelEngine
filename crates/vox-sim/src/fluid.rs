@@ -50,10 +50,11 @@ pub struct FluidSim {
     /// tick. Rebuilt every tick alongside the active set -- empty whenever
     /// the water sleeps, so settled cost is still zero.
     momentum: FxHashMap<IVec3, IVec3>,
-    /// The single voxel material this sim treats as water. Set once at
-    /// construction -- never inferred from the active set (see `tick` and
-    /// `wake_region` doc comments for why inference was fragile).
-    water: Voxel,
+    /// All voxel materials this sim treats as fluids (water, muddy_water, ...).
+    /// Each flows with the full CA rule. Set once at construction -- never
+    /// inferred from the active set. A single entry reproduces the original
+    /// single-water behavior exactly.
+    fluids: Vec<Voxel>,
     /// Materials this sim treats as powders (fall + diagonal slide, no
     /// spreading). Empty if the asset set defines no powders -- the sim
     /// behaves as water-only. Set once at construction.
@@ -69,7 +70,7 @@ pub struct FluidSim {
 
 impl FluidSim {
     pub fn new(water: Voxel) -> Self {
-        Self::with_powders(water, Vec::new())
+        Self::with_fluids_and_powders(vec![water], Vec::new())
     }
 
     /// Create a sim that also handles the given powder materials. Water
@@ -77,10 +78,16 @@ impl FluidSim {
     /// `step_powder` (fall + diagonal slide only). One active set, one tick
     /// loop -- the material at each cell determines which rule applies.
     pub fn with_powders(water: Voxel, powders: Vec<Voxel>) -> Self {
+        Self::with_fluids_and_powders(vec![water], powders)
+    }
+
+    /// Create a sim handling multiple fluid materials and powder materials.
+    /// Each fluid flows with the full CA rule; each powder falls and piles.
+    pub fn with_fluids_and_powders(fluids: Vec<Voxel>, powders: Vec<Voxel>) -> Self {
         Self {
             active: FxHashSet::default(),
             momentum: FxHashMap::default(),
-            water,
+            fluids,
             powders,
             rng: 0x9E37_79B9_7F4A_7C15,
             events: Vec::new(),
@@ -92,9 +99,14 @@ impl FluidSim {
         std::mem::take(&mut self.events)
     }
 
-    /// Whether `v` is a material this sim handles (water or a powder).
+    /// Whether `v` is a fluid material this sim handles.
+    fn is_fluid(&self, v: Voxel) -> bool {
+        self.fluids.contains(&v)
+    }
+
+    /// Whether `v` is a material this sim handles (fluid or a powder).
     fn is_simmed(&self, v: Voxel) -> bool {
-        v == self.water || self.powders.contains(&v)
+        self.is_fluid(v) || self.powders.contains(&v)
     }
 
     /// Whether `v` is a powder material this sim handles.
@@ -162,7 +174,8 @@ impl FluidSim {
     /// propagation pass needed.
     pub fn tick(&mut self, world: &mut World) -> usize {
         self.events.clear();
-        let water = self.water;
+        let fluids = self.fluids.clone();
+        let is_fluid = |v: Voxel| fluids.contains(&v);
 
         // Snapshot exactly the positions that hold a simmed material *before*
         // any mutation this tick, and process only those. A live re-check
@@ -205,14 +218,14 @@ impl FluidSim {
                     step_powder(pos, &mut is_open, coin, coin2)
                 } else {
                     let mut is_supported = |p: IVec3| {
-                        world.in_bounds(p) && (world.solid(p) || world.get_voxel(p) == water)
+                        world.in_bounds(p) && (world.solid(p) || is_fluid(world.get_voxel(p)))
                     };
-                    let has_water_above = world.get_voxel(pos + IVec3::Y) == water;
+                    let has_fluid_above = is_fluid(world.get_voxel(pos + IVec3::Y));
                     step_cell_with_momentum(
                         pos,
                         &mut is_open,
                         &mut is_supported,
-                        has_water_above,
+                        has_fluid_above,
                         coin,
                         coin2,
                         self.momentum.get(&pos).copied(),
@@ -254,7 +267,7 @@ impl FluidSim {
                         if self.is_simmed(nv) {
                             next_active.insert(neighbor);
                             // Only water inherits momentum.
-                            if !is_powder && nv == water {
+                            if !is_powder && is_fluid(nv) {
                                 let hdir = IVec3::new(dest.x - pos.x, 0, dest.z - pos.z);
                                 let carried = if hdir != IVec3::ZERO {
                                     Some(hdir)
@@ -308,7 +321,7 @@ fn step_cell(
     pos: IVec3,
     is_open: &mut impl FnMut(IVec3) -> bool,
     is_supported: &mut impl FnMut(IVec3) -> bool,
-    has_water_above: bool,
+    has_fluid_above: bool,
     coin: bool,
     coin2: bool,
 ) -> Option<IVec3> {
@@ -316,19 +329,19 @@ fn step_cell(
         pos,
         is_open,
         is_supported,
-        has_water_above,
+        has_fluid_above,
         coin,
         coin2,
         None,
     )
 }
 
-/// Where a water cell at `pos` wants to move this tick, or `None` if it has
+/// Where a fluid cell at `pos` wants to move this tick, or `None` if it has
 /// nowhere to go (should settle). `is_open` reports whether a cell can be
 /// flowed into: empty (air) and in-bounds. Order of preference: straight
 /// down, then diagonal-down (randomized left/right), then one step toward
 /// the first drop reachable within `FLOW_HORIZON` cells sideways, then
-/// pressure-gated sideways leveling onto supported terrain or water
+/// pressure-gated sideways leveling onto supported terrain or fluid
 /// (randomized left/right, then front/back) -- see the design doc §4 for
 /// why this shape and not fractional pressure levels.
 ///
@@ -341,7 +354,7 @@ fn step_cell_with_momentum(
     pos: IVec3,
     is_open: &mut impl FnMut(IVec3) -> bool,
     is_supported: &mut impl FnMut(IVec3) -> bool,
-    has_water_above: bool,
+    has_fluid_above: bool,
     coin: bool,
     coin2: bool,
     momentum: Option<IVec3>,
@@ -414,11 +427,11 @@ fn step_cell_with_momentum(
     // A full/empty grid cannot represent a fractional, one-cell-deep water
     // surface. Letting an unpressurized surface cell trade places with any
     // equally-high air cell makes a partially filled puddle random-walk
-    // forever. Require water directly above the source, and support below
+    // forever. Require fluid directly above the source, and support below
     // the destination, so a stack can level across a shorter neighboring
-    // water column while a shallow resting surface can sleep instead of
+    // fluid column while a shallow resting surface can sleep instead of
     // shuffling indefinitely.
-    if !has_water_above {
+    if !has_fluid_above {
         return None;
     }
     let (sx1, sx2) = if m.x != 0 {
@@ -1251,5 +1264,114 @@ mod tests {
             }
         }
         n
+    }
+
+    #[test]
+    fn sim_with_multiple_fluids_treats_both_as_fluid() {
+        const MUDDY: Voxel = Voxel(3);
+        let mut world = test_world();
+        world.set_solid_table(vec![false, false, true, false]);
+        let mut sim = FluidSim::with_fluids_and_powders(vec![WATER, MUDDY], Vec::new());
+        sim.place_blob(&mut world, IVec3::new(8, 10, 8), 0, MUDDY);
+        for _ in 0..5 {
+            sim.tick(&mut world);
+        }
+        assert_eq!(
+            world.get_voxel(IVec3::new(8, 10, 8)),
+            AIR,
+            "muddy_water must fall under gravity like water"
+        );
+        assert_eq!(
+            world.get_voxel(IVec3::new(8, 5, 8)),
+            MUDDY,
+            "muddy_water must land on the floor"
+        );
+    }
+
+    #[test]
+    fn muddy_water_levels_sideways_when_diagonal_fall_is_blocked() {
+        // Isolates the sideways leveling path (the `has_water_above` +
+        // `is_supported` gate at the tail of `step_cell_with_momentum`)
+        // which, before the fix, compared against a single `water` voxel
+        // and so never recognized muddy_water as fluid.
+        //
+        // A 1-wide container walls off every fall/diagonal/flow route from
+        // the leveling cell so the ONLY move available is sideways onto a
+        // supported fluid neighbor. `has_water_above` reads world state
+        // (not the active set), so the muddy cell at (8,8,8) satisfies the
+        // gate even though a narrow `wake_region` deliberately leaves it
+        // un-processed this tick -- preventing it from diagonal-falling
+        // into the target and masking the leveling path.
+        //
+        // A full stone floor at y=5 (not just under the puddle) keeps the
+        // y=6 muddy support columns from falling or sliding away.
+        //
+        // Before the fix: `is_simmed(MUDDY)` is false, so `wake_region`
+        // wakes nothing, the cell never moves, and both assertions fail.
+        // After the fix: the cell levels to (9,7,8) in a single tick.
+        const MUDDY: Voxel = Voxel(3);
+        const WALL: Voxel = Voxel(2); // stone is solid (id 2 in test_world)
+        let mut world = test_world();
+        // solid table: [air=false, water=false, stone=true, muddy=false]
+        world.set_solid_table(vec![false, false, true, false]);
+        let mut sim = FluidSim::with_fluids_and_powders(vec![WATER, MUDDY], Vec::new());
+
+        // Full stone floor across the container footprint at y=5 so the
+        // y=6 muddy supports rest on solid ground (test_world leaves y=5
+        // as air -- half-open [0,5) fill).
+        for x in 5..=12 {
+            for z in 7..=10 {
+                world.set_voxel(IVec3::new(x, 5, z), WALL);
+            }
+        }
+        // y=6: muddy supports at (8,6,8) and (9,6,8); walls everywhere
+        // else in the footprint to block diagonal fall and the
+        // flow-horizon scan from the leveling cell.
+        world.set_voxel(IVec3::new(8, 6, 8), MUDDY);
+        world.set_voxel(IVec3::new(9, 6, 8), MUDDY);
+        for x in 5..=12 {
+            for z in 7..=10 {
+                if (x, z) != (8, 8) && (x, z) != (9, 8) {
+                    world.set_voxel(IVec3::new(x, 6, z), WALL);
+                }
+            }
+        }
+        // y=7: the cell to level at (8,7,8); (9,7,8) stays AIR as the
+        // leveling target; walls elsewhere block all other moves.
+        world.set_voxel(IVec3::new(8, 7, 8), MUDDY);
+        for x in 5..=12 {
+            for z in 7..=10 {
+                if (x, z) != (8, 8) && (x, z) != (9, 8) {
+                    world.set_voxel(IVec3::new(x, 7, z), WALL);
+                }
+            }
+        }
+        // y=8: muddy directly above the leveling cell -- satisfies
+        // `has_water_above`. NOT woken (see narrow wake below) so it can't
+        // diagonal-fall into the target during this single tick.
+        world.set_voxel(IVec3::new(8, 8, 8), MUDDY);
+
+        // Narrow wake: scans y in [6,8) (wake_region expands by one on each
+        // side, so [7,7,7..10,7,8) -> effective y=6..8). Wakes the two
+        // supports and the leveling cell, but NOT (8,8,8).
+        sim.wake_region(&world, IVec3::new(7, 7, 7), IVec3::new(10, 7, 8));
+
+        // A single tick. Only the three woken cells are in the snapshot;
+        // (8,8,8) is not processed, so it cannot fall into the target. The
+        // supports settle (all diagonal-downs walled), and (8,7,8) levels
+        // to (9,7,8): straight-down/diagonal/flow all blocked,
+        // has_water_above=true (reads world), is_supported(9,6)=is_fluid(MUDDY)=true.
+        sim.tick(&mut world);
+
+        assert_eq!(
+            world.get_voxel(IVec3::new(9, 7, 8)),
+            MUDDY,
+            "muddy_water must level sideways -- has_water_above and is_supported must recognize muddy as fluid"
+        );
+        assert_eq!(
+            world.get_voxel(IVec3::new(8, 7, 8)),
+            AIR,
+            "the source cell must have moved (and not been refilled this tick)"
+        );
     }
 }
