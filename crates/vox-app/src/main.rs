@@ -1312,6 +1312,7 @@ impl App for VoxApp {
             dn.sun_color,
             dn.ambient_sky,
             dn.ambient_ground,
+            self.game_time,
         );
         // Billboard basis: camera right and true up (right x forward).
         let cam_right = self.camera.right();

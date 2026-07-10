@@ -387,6 +387,7 @@ impl VoxelPipeline {
         sun_color: Vec3,
         ambient_sky: Vec3,
         ambient_ground: Vec3,
+        game_time: f32,
     ) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
@@ -394,7 +395,7 @@ impl VoxelPipeline {
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, sun_strength],
             fog: [fog_end_m * 0.55, fog_end_m, self.voxel_size_m, ambient_strength],
             sky_color: [sky_color.x, sky_color.y, sky_color.z, fill_strength],
-            sun_color: [sun_color.x, sun_color.y, sun_color.z, 0.0],
+            sun_color: [sun_color.x, sun_color.y, sun_color.z, game_time],
             ambient_sky: [ambient_sky.x, ambient_sky.y, ambient_sky.z, 0.0],
             ambient_ground: [ambient_ground.x, ambient_ground.y, ambient_ground.z, 0.0],
         };

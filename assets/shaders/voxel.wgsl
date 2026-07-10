@@ -9,7 +9,7 @@ struct Camera {
     sun_dir: vec4f,          // xyz = sun direction (unit), w = sun strength
     fog: vec4f,              // x = start (m), y = end (m), z = voxel size (m), w = ambient strength
     sky_color: vec4f,        // xyz = sky/fog color, w = fill light strength
-    sun_color: vec4f,        // xyz = sun color (linear RGB), w = unused
+    sun_color: vec4f,        // xyz = sun color (linear RGB), w = game time (seconds)
     ambient_sky: vec4f,      // xyz = ambient sky tint, w = unused
     ambient_ground: vec4f,   // xyz = ambient ground tint, w = unused
 };
@@ -58,9 +58,23 @@ fn face_normal(id: u32) -> vec3f {
 fn vs(v: VIn, inst: Inst) -> VOut {
     let model = mat4x4f(inst.m0, inst.m1, inst.m2, inst.m3);
     let local = vec3f(f32(v.pos_ao.x), f32(v.pos_ao.y), f32(v.pos_ao.z)) * cam.fog.z;
-    let wp = (model * vec4f(local, 1.0)).xyz;
+    var wp = (model * vec4f(local, 1.0)).xyz;
 
+    // Grass sway: displace top-face vertices of grass material (ID 3)
+    // with a sin wave based on world XZ + time. Only +Y faces (normal id 2)
+    // sway — sides and bottom stay fixed. Amplitude scales with height
+    // above the voxel base so the root stays planted.
     let mat_id = v.norm_mat.z | (v.norm_mat.w << 8u);
+    let normal_id = v.norm_mat.x;
+    if (mat_id == 3u && normal_id == 2u) {
+        let t = cam.sun_color.w; // game time
+        let phase = wp.x * 0.8 + wp.z * 0.6 + t * 2.0;
+        let sway = sin(phase) * 0.03 + sin(phase * 2.3 + 1.0) * 0.015;
+        wp.x += sway;
+        wp.z += cos(phase * 0.9) * 0.02;
+    }
+
+
     let base = palette[mat_id];
     // Jitter is baked into the mesh once at build time (see vox-mesh's
     // `jitter_hash`), not recomputed here from world position: hashing a
