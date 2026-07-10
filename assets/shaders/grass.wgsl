@@ -58,7 +58,12 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
     // Grass faces up (+Y), so hemi_t ≈ 1.0 (full sky ambient).
     let ambient = cam.ambient_sky.xyz * cam.fog.w;
     let ndotl = dot(vec3f(0.0, 1.0, 0.0), -cam.sun_dir.xyz);
-    let sun = pow(clamp(ndotl * 0.5 + 0.5, 0.0, 1.0), 1.5) * cam.sun_dir.w * cam.sun_color.xyz;
+    // Cel-shading: 4-band quantization matching voxel.wgsl (#71).
+    let raw = clamp(ndotl * 0.5 + 0.5, 0.0, 1.0);
+    let bands = 4.0;
+    let quantized = floor(raw * bands + 0.5) / bands;
+    let smooth_q = mix(quantized, raw, smoothstep(0.45, 0.55, fract(raw * bands)));
+    let sun = pow(smooth_q, 1.5) * cam.sun_dir.w * cam.sun_color.xyz;
     let lit = color * (ambient + sun);
 
     // Distance fog — matches the voxel pipeline.
