@@ -43,6 +43,15 @@ pub struct WeatherTable {
     pub dirt: Voxel,
     pub mud: Voxel,
     pub sand: Voxel,
+    pub muddy_water: Voxel,
+}
+
+impl WeatherTable {
+    /// Whether `v` is a water-like fluid (water or muddy_water).
+    #[inline]
+    pub fn is_wet(&self, v: Voxel) -> bool {
+        v == self.water || v == self.muddy_water
+    }
 }
 
 pub struct Weathering {
@@ -127,7 +136,7 @@ impl Weathering {
             // Water gone -> the soak dries up without converting.
             if !NEIGHBORS_6
                 .iter()
-                .any(|&n| world.get_voxel(pos + n) == t.water)
+                .any(|&n| t.is_wet(world.get_voxel(pos + n)))
             {
                 return false;
             }
@@ -167,7 +176,7 @@ impl Weathering {
             }
             if NEIGHBORS_6
                 .iter()
-                .any(|&n| world.get_voxel(pos + n) == t.water)
+                .any(|&n| t.is_wet(world.get_voxel(pos + n)))
             {
                 return false; // wet again
             }
@@ -197,6 +206,7 @@ mod tests {
     const DIRT: Voxel = Voxel(4);
     const MUD: Voxel = Voxel(5);
     const SAND: Voxel = Voxel(6);
+    const MUDDY_WATER: Voxel = Voxel(7);
 
     fn table() -> WeatherTable {
         WeatherTable {
@@ -206,6 +216,7 @@ mod tests {
             dirt: DIRT,
             mud: MUD,
             sand: SAND,
+            muddy_water: MUDDY_WATER,
         }
     }
 
@@ -259,6 +270,29 @@ mod tests {
             weathering.tick(&mut world, &[]);
         }
         assert_eq!(world.get_voxel(cell), MUD, "soaked dirt must become mud");
+    }
+
+    #[test]
+    fn mud_under_muddy_water_still_soaks() {
+        // The is_wet generalization: dirt under muddy_water must still soak
+        // toward mud. This tests that the soak water-adjacency check (line 130)
+        // recognizes muddy_water as "wet".
+        let mut world = world_with_floor(DIRT);
+        let mut weathering = Weathering::new(table());
+        let cell = IVec3::new(8, 4, 8);
+        world.set_voxel(cell + IVec3::Y, MUDDY_WATER);
+        // Update solid table: [air, water, stone, grass, dirt, mud, sand, muddy_water]
+        world.set_solid_table(vec![false, false, true, true, true, true, true, false]);
+        let events = vec![ContactEvent::Settled(cell + IVec3::Y)];
+        weathering.tick(&mut world, &events);
+        for _ in 0..DIRT_SOAK_TICKS {
+            weathering.tick(&mut world, &[]);
+        }
+        assert_eq!(
+            world.get_voxel(cell),
+            MUD,
+            "dirt under muddy_water must soak to mud — muddy_water is wet"
+        );
     }
 
     #[test]
