@@ -77,8 +77,14 @@ fn fs(@builtin(position) frag_pos: vec4f) -> @location(0) vec4f {
     c = c / (c + vec3f(0.6));
     c = clamp(c, vec3f(0.0), vec3f(1.0));
 
-    // Subtle warm tint.
-    c = c * vec3f(1.01, 1.0, 0.99);
+    // Saturation boost (+30%) — luminance-weighted mix toward the
+    // original color so colors pop without going neon (design doc §2.4).
+    let lum = dot(c, vec3f(0.299, 0.587, 0.114));
+    c = mix(vec3f(lum), c, 1.3);
 
-    return vec4f(c, 1.0);
+    // Color grading: slight lift in shadows, warm tint, gentle contrast.
+    c = c + vec3f(0.03);
+    c = c * vec3f(1.02, 1.0, 0.98);
+
+    return vec4f(clamp(c, vec3f(0.0), vec3f(1.0)), 1.0);
 }

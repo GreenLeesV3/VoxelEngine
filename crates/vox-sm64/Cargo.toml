@@ -1,0 +1,19 @@
+[package]
+name = "vox-sm64"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+
+[features]
+default = []
+native = ["dep:sha1"]
+
+[dependencies]
+glam = { workspace = true }
+vox-core = { workspace = true }
+vox-world = { workspace = true }
+tracing = { workspace = true }
+sha1 = { version = "0.10", optional = true }
+
+[build-dependencies]
+cc = "1.2"

@@ -104,14 +104,8 @@ fn stress_physics_pile(reg: &MaterialRegistry, body_count: usize, cube_vox: i32)
             settled.push(dt);
         }
     }
-    report(
-        &format!("physics/{body_count}-bodies-settling"),
-        settling,
-    );
-    report(
-        &format!("physics/{body_count}-bodies-settled"),
-        settled,
-    );
+    report(&format!("physics/{body_count}-bodies-settling"), settling);
+    report(&format!("physics/{body_count}-bodies-settled"), settled);
     println!(
         "  (awake={}, total={})",
         phys.awake_count(),
@@ -169,7 +163,7 @@ fn stress_meshing(sizes: &[i32]) {
         for _ in 0..20 {
             let t0 = Instant::now();
             let slab = VoxelSlab::from_grid(dims, &voxels);
-            let _mesh = mesh_slab(&slab, IVec3::ZERO);
+            let _mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(9));
             times.push(t0.elapsed().as_secs_f32() * 1000.0);
         }
         report(&format!("mesh-slab/{n}^3-cube"), times);

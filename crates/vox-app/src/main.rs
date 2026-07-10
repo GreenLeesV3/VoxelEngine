@@ -1,10 +1,20 @@
 //! Voxel engine application: world, player, tools, threaded remeshing, render.
 
 mod args;
+#[cfg(feature = "mario")]
+mod audio;
 mod body_mesh;
+mod day_night;
+mod grass;
+#[cfg(feature = "mario")]
+mod mario;
+#[cfg(not(feature = "mario"))]
+#[path = "mario_disabled.rs"]
+mod mario;
 mod particles;
 mod player;
 mod remesh;
+mod replay;
 mod tools;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -15,16 +25,16 @@ use std::time::Instant;
 use glam::{IVec3, Mat4, Vec3};
 use rayon::prelude::*;
 
-use player::Player;
 use body_mesh::BodyMeshQueue;
 use particles::{Burst, ParticleSystem};
+use player::Player;
 use remesh::RemeshQueue;
 use tools::{CarveOutcome, HOTBAR, Tool, Tools};
 
 use vox_core::consts::CHUNK_SIZE;
 use vox_core::{
-    FrameProfile, FxHashSet, MaterialId, MaterialRegistry, ScopedTimer, Tunables, WorldConfig,
-    chunk_origin, voxel_at,
+    FrameProfile, FxHashMap, FxHashSet, MaterialId, MaterialRegistry, ScopedTimer, Tunables,
+    WorldConfig, chunk_origin, voxel_at,
 };
 use vox_debug::hud::HudState;
 use vox_debug::{DebugOverlay, OverlayState};
@@ -32,19 +42,13 @@ use vox_gen::{TerrainGen, TerrainMaterials, TreeMaterials, generate_trees};
 use vox_mesh::{VoxelSlab, mesh_slab};
 use vox_physics::{Body, BodyId, ImpactEvent, PhysicsWorld, VoxelGrid};
 use vox_platform::{App, FrameControl, FrameTiming, InputState, run_app};
-use vox_render::{BodyMeshKey, Camera, Frustum, Gpu, ParticlePipeline, VoxelPipeline};
+use vox_render::{
+    BodyMeshKey, Camera, Frustum, Gpu, ParticlePipeline, ShadowPipeline, VoxelPipeline,
+};
 use vox_world::{AIR, Voxel, World};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
-
-/// Sky-blue clear color (linear-space RGBA); must match the shader's fog sky.
-const CLEAR_COLOR: wgpu::Color = wgpu::Color {
-    r: 0.45,
-    g: 0.66,
-    b: 0.90,
-    a: 1.0,
-};
 
 /// Fog end distance in meters.
 const FOG_END_M: f32 = 220.0;
@@ -117,36 +121,22 @@ fn weather_table(registry: &MaterialRegistry) -> Option<vox_sim::WeatherTable> {
     })
 }
 
-/// All materials the registry marks as powders, as `Voxel` ids. Empty if
-/// the asset set defines no powders -- the sim runs water-only. The sim
-/// handles each powder with `step_powder` (fall + diagonal slide, no
-/// spreading); see `FluidSim::with_powders`.
-fn powder_materials(registry: &MaterialRegistry) -> Vec<Voxel> {
-    (1..registry.len())
-        .filter_map(|i| {
-            let def = registry.get(vox_core::MaterialId(i as u16))?;
-            def.powder.then(|| Voxel(i as u16))
-        })
-        .collect()
-}
-
 /// Fire material table, or `None` (fire disabled) if any required material
-/// is missing from the asset set. Mirrors `weather_table`'s pattern.
+/// is missing from the asset set.
 fn fire_table(registry: &MaterialRegistry) -> Option<vox_sim::FireTable> {
     let id = |name: &str| registry.id_by_name(name).map(|m| Voxel(m.0));
     let water = id("water")?;
-    let ember = id("ember")?;
-    let char = id("char")?;
-    let ash = id("ash")?;
-    let dark_ash = id("dark_ash")?;
     let wood = id("wood")?;
     let leaves = id("leaves")?;
     let planks = id("planks")?;
     let grass = id("grass")?;
-    // Collect all flammable material ids from the registry.
-    let flammable: Vec<Voxel> = (1..registry.len())
+    let ember = id("ember")?;
+    let char = id("char")?;
+    let ash = id("ash")?;
+    let dark_ash = id("dark_ash")?;
+    let flammable = (1..registry.len())
         .filter_map(|i| {
-            let def = registry.get(vox_core::MaterialId(i as u16))?;
+            let def = registry.get(MaterialId(i as u16))?;
             def.flammable.then(|| Voxel(i as u16))
         })
         .collect();
@@ -162,6 +152,19 @@ fn fire_table(registry: &MaterialRegistry) -> Option<vox_sim::FireTable> {
         grass,
         flammable,
     })
+}
+
+/// All materials the registry marks as powders, as `Voxel` ids. Empty if
+/// the asset set defines no powders -- the sim runs water-only. The sim
+/// handles each powder with `step_powder` (fall + diagonal slide, no
+/// spreading); see `FluidSim::with_powders`.
+fn powder_materials(registry: &MaterialRegistry) -> Vec<Voxel> {
+    (1..registry.len())
+        .filter_map(|i| {
+            let def = registry.get(vox_core::MaterialId(i as u16))?;
+            def.powder.then(|| Voxel(i as u16))
+        })
+        .collect()
 }
 
 /// Place smoke just inside the face-adjacent air voxel selected by FireSim,
@@ -188,12 +191,10 @@ fn fire_smoke_origin(pos: IVec3, face: IVec3, voxel_size_m: f32, salt: u32) -> V
         x ^ (x >> 16)
     }
 
-    let seed = mix(
-        (pos.x as u32).wrapping_mul(0x9e37_79b9)
-            ^ (pos.y as u32).wrapping_mul(0x85eb_ca6b)
-            ^ (pos.z as u32).wrapping_mul(0xc2b2_ae35)
-            ^ salt.wrapping_mul(0x27d4_eb2d),
-    );
+    let seed = mix((pos.x as u32).wrapping_mul(0x9e37_79b9)
+        ^ (pos.y as u32).wrapping_mul(0x85eb_ca6b)
+        ^ (pos.z as u32).wrapping_mul(0xc2b2_ae35)
+        ^ salt.wrapping_mul(0x27d4_eb2d));
     let jitter_a = (seed & 0xffff) as f32 / 65_535.0 - 0.5;
     let jitter_b = (mix(seed ^ 0xa511_e9b3) & 0xffff) as f32 / 65_535.0 - 0.5;
     let normal = face.as_vec3();
@@ -206,11 +207,125 @@ fn fire_smoke_origin(pos: IVec3, face: IVec3, voxel_size_m: f32, salt: u32) -> V
         + tangent_b * (jitter_b * voxel_size_m * 0.4)
 }
 
+/// One exposed ember outlet on a detached body. The local center is a voxel
+/// center in body coordinates; only faces whose adjacent body voxel is air
+/// are retained, so interior embers never become smoke sources.
+#[derive(Clone, Debug)]
+struct BodySmokeOutlet {
+    local_center: Vec3,
+    open_faces: Vec<IVec3>,
+}
+
+#[derive(Clone, Debug)]
+struct BodyFireVisual {
+    outlets: Vec<BodySmokeOutlet>,
+    cursor: usize,
+    cooldown: u8,
+}
+
+fn body_smoke_outlets(body: &Body, ember: Voxel, voxel_size_m: f32) -> Vec<BodySmokeOutlet> {
+    let faces = [
+        IVec3::X,
+        IVec3::NEG_X,
+        IVec3::Y,
+        IVec3::NEG_Y,
+        IVec3::Z,
+        IVec3::NEG_Z,
+    ];
+    body.surface
+        .iter()
+        .filter_map(|sample| {
+            let local_voxel = ((*sample - body.grid_offset) / voxel_size_m)
+                .floor()
+                .as_ivec3();
+            (body.grid.get(local_voxel) == ember).then(|| BodySmokeOutlet {
+                local_center: *sample,
+                open_faces: faces
+                    .iter()
+                    .copied()
+                    .filter(|face| body.grid.get(local_voxel + *face) == AIR)
+                    .collect(),
+            })
+        })
+        .filter(|outlet| !outlet.open_faces.is_empty())
+        .collect()
+}
+
+fn body_smoke_origin(
+    body: &Body,
+    outlet: &BodySmokeOutlet,
+    face: IVec3,
+    voxel_size_m: f32,
+    salt: u32,
+) -> Vec3 {
+    fn mix(mut x: u32) -> u32 {
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x7feb_352d);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x846c_a68b);
+        x ^ (x >> 16)
+    }
+    let seed = mix(salt.wrapping_mul(0x27d4_eb2d));
+    let jitter_a = (seed & 0xffff) as f32 / 65_535.0 - 0.5;
+    let jitter_b = (mix(seed ^ 0xa511_e9b3) & 0xffff) as f32 / 65_535.0 - 0.5;
+    let normal = face.as_vec3();
+    let tangent_a = if face.y != 0 { Vec3::X } else { Vec3::Y };
+    let tangent_b = normal.cross(tangent_a);
+    let local = outlet.local_center
+        + normal * (voxel_size_m * 0.55)
+        + tangent_a * (jitter_a * voxel_size_m * 0.4)
+        + tangent_b * (jitter_b * voxel_size_m * 0.4);
+    body.pos + body.rot * local
+}
+
+fn next_body_smoke_origin(
+    body: &Body,
+    visual: &mut BodyFireVisual,
+    world: &World,
+    voxel_size_m: f32,
+) -> Option<Vec3> {
+    if visual.outlets.is_empty() {
+        return None;
+    }
+    let start = visual.cursor % visual.outlets.len();
+    for outlet_offset in 0..visual.outlets.len() {
+        let outlet_index = (start + outlet_offset) % visual.outlets.len();
+        let outlet = &visual.outlets[outlet_index];
+        let mut faces = outlet.open_faces.clone();
+        faces.sort_by(|a, b| {
+            (body.rot * b.as_vec3())
+                .y
+                .total_cmp(&(body.rot * a.as_vec3()).y)
+        });
+        for (face_index, face) in faces.into_iter().enumerate() {
+            let origin = body_smoke_origin(
+                body,
+                outlet,
+                face,
+                voxel_size_m,
+                (start + outlet_offset * 7 + face_index) as u32,
+            );
+            let voxel = voxel_at(origin, voxel_size_m);
+            if world.in_bounds(voxel) && world.get_voxel(voxel) == AIR {
+                visual.cursor = (outlet_index + 1) % visual.outlets.len();
+                return Some(origin);
+            }
+        }
+    }
+    visual.cursor = (start + 1) % visual.outlets.len();
+    None
+}
+
 /// The engine application.
 struct VoxApp {
     window: Arc<Window>,
     gpu: Gpu,
     pipeline: VoxelPipeline,
+    /// Directional shadow pipeline (#14): renders chunks to a 2048x2048
+    /// depth-only shadow map each frame; the main voxel pass samples it to
+    /// attenuate sunlight on occluded terrain. Follows the player position
+    /// and re-orients with the sun each frame.
+    shadow_pipeline: ShadowPipeline,
     world: World,
     registry: MaterialRegistry,
     player: Player,
@@ -229,14 +344,12 @@ struct VoxApp {
     /// fed by the fluid tick's contact events. `None` when the asset set
     /// is missing a material weathering needs (see `weather_table`).
     weathering: Option<vox_sim::Weathering>,
-    /// Fire spreading and consumption, ticked alongside the fluid sim.
+    /// Fire simulation: ember ignition, fire spread, consumption to char.
     /// `None` when the asset set is missing a material fire needs.
     fire: Option<vox_sim::FireSim>,
-    /// Debris bodies known to carry at least one ember voxel. This avoids a
-    /// full dense-grid search every fire tick merely to discover whether a
-    /// body can transfer fire back to the world. Stale generational ids are
-    /// pruned before each transfer pass.
-    burning_bodies: FxHashSet<BodyId>,
+    /// Debris bodies known to carry an ember. Keeping this sparse avoids a
+    /// dense scan of every body on each fire tick.
+    burning_bodies: FxHashMap<BodyId, BodyFireVisual>,
     /// Incrementing seed so repeated blasts get varied debris spin.
     blast_seed: u32,
     /// Incrementing seed so repeated impact-fracture chips get varied
@@ -279,6 +392,16 @@ struct VoxApp {
     /// `enforce_debris_budget` to evict the oldest *settled* debris once the
     /// total exceeds `MAX_DEBRIS_BODIES`.
     debris_order: VecDeque<BodyId>,
+    /// Mario mode state. `None` = not initialized yet (ROM not loaded).
+    /// `Some` with `is_active() == false` = initialized but Mario not
+    /// spawned. `Some` with `is_active() == true` = Mario is running.
+    mario_mode: Option<mario::MarioMode>,
+    /// SM64 units per meter for Mario mode. Higher = smaller Mario.
+    /// Set once from CLI, read when initializing MarioMode.
+    #[cfg(feature = "mario")]
+    mario_units_per_meter: f32,
+    /// Game time accumulator for day/night cycle (seconds).
+    game_time: f32,
     /// Old debris meshes kept alive past their body's despawn, each waiting
     /// on the set of its replacement fragments' async mesh jobs still in
     /// flight -- see `replace_body`'s doc comment for why this exists (a
@@ -288,8 +411,35 @@ struct VoxApp {
     /// CPU-simulated destruction feedback particles (see `particles`).
     particles: ParticleSystem,
     particle_pipeline: ParticlePipeline,
-    /// Post-processing pipeline (edge detection + saturation + color grading).
-    postprocess: vox_render::postprocess::PostProcessPipeline,
+    /// Cel-shading + post-process pipeline: offscreen HDR color + depth
+    /// textures, fullscreen edge-detection/saturation/grading pass that
+    /// composites the scene to the swapchain.
+    postprocess: vox_render::PostProcessPipeline,
+    /// Grass blade render pipeline.
+    grass_pipeline: vox_render::GrassPipeline,
+    /// Cached grass blade vertices (throttled regeneration).
+    grass_cache: grass::GrassCache,
+    /// In-engine editor mode: when active, LMB paints a sphere of the
+    /// selected material at the crosshair target and RMB erases a sphere of
+    /// AIR, instead of the normal hotbar tools. Toggled with E. The player
+    /// still flies/looks normally — only mouse-button meaning changes.
+    editor_active: bool,
+    /// Brush radius in meters for editor paint/erase, adjustable with the
+    /// mouse wheel while editor mode is active.
+    editor_radius: f32,
+    /// Undo stack: each entry is a voxel diff (pos, old_voxel) from a world edit.
+    undo_stack: Vec<Vec<(IVec3, Voxel)>>,
+    /// Redo stack: entries popped from undo_stack by Ctrl+Z, re-applied by Ctrl+Y.
+    redo_stack: Vec<Vec<(IVec3, Voxel)>>,
+    /// Snapshot-based replay state (record with R, play back with P).
+    /// Only captures player + camera + debris body transforms, not the
+    /// voxel world -- see `replay` module docs.
+    replay: replay::ReplayState,
+    /// Procedural crack-decal intensity (0 = off, >0 = visible cracks).
+    /// Foundation for damage visualization; not yet wired to actual voxel
+    /// damage state — set to 0 by default so cracks are invisible until a
+    /// future change drives this from per-voxel damage.
+    crack_intensity: f32,
 }
 
 /// Hard cap on total debris bodies alive at once. Past this, the oldest
@@ -321,12 +471,15 @@ impl VoxApp {
     fn new(
         window: Arc<Window>,
         cfg: WorldConfig,
+        mario_units_per_meter: f32,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let assets = assets_dir();
         let registry = MaterialRegistry::load_dir(&assets.join("materials"))?;
         let shader = std::fs::read_to_string(assets.join("shaders/voxel.wgsl"))?;
+        let shadow_shader = std::fs::read_to_string(assets.join("shaders/shadow.wgsl"))?;
         let particle_shader = std::fs::read_to_string(assets.join("shaders/particle.wgsl"))?;
-        let postprocess_shader = std::fs::read_to_string(assets.join("shaders/postprocess.wgsl"))?;
+        let post_shader = std::fs::read_to_string(assets.join("shaders/postprocess.wgsl"))?;
+        let grass_shader = std::fs::read_to_string(assets.join("shaders/grass.wgsl"))?;
 
         let build_start = Instant::now();
         let world = build_terrain_world(cfg, &registry)?;
@@ -338,18 +491,22 @@ impl VoxApp {
 
         let size = window.inner_size();
         let gpu = Gpu::new(window.clone(), size.width, size.height)?;
-        let pipeline = VoxelPipeline::new(&gpu, &shader, &registry, world.cfg.voxel_size_m);
+        // Shadow pipeline must be created before the voxel pipeline so its
+        // shadow-sample bind group layout can be wired in as group 1.
+        let shadow_pipeline = ShadowPipeline::new(&gpu, &shadow_shader, world.cfg.voxel_size_m);
+        let pipeline = VoxelPipeline::new(
+            &gpu,
+            &shader,
+            &registry,
+            world.cfg.voxel_size_m,
+            Some(shadow_pipeline.sample_bind_group_layout()),
+        );
         let particle_pipeline = ParticlePipeline::new(&gpu, &particle_shader);
-        let postprocess = vox_render::postprocess::PostProcessPipeline::new(
-            &gpu, &postprocess_shader, size.width, size.height,
-        );
-        let debug_overlay = DebugOverlay::new(
-            gpu.device(),
-            gpu.surface_format(),
-            Some(vox_render::DEPTH_FORMAT),
-            &window,
-        );
         let tools = Tools::new(&registry);
+        let (surf_w, surf_h) = gpu.surface_size();
+        let postprocess = vox_render::PostProcessPipeline::new(&gpu, &post_shader, surf_w, surf_h);
+        let grass_pipeline = vox_render::GrassPipeline::new(&gpu, &grass_shader);
+        let debug_overlay = DebugOverlay::new(gpu.device(), gpu.surface_format(), None, &window);
         // Air (id 0) is never player-selectable; the picker mirrors that.
         let material_names: Vec<String> = registry
             .iter()
@@ -361,20 +518,32 @@ impl VoxApp {
         let selected_material = tools.material_index() - 1;
         let weathering = weather_table(&registry).map(vox_sim::Weathering::new);
         if weathering.is_none() {
-            tracing::info!("weathering disabled -- a required material is missing from the asset set");
+            tracing::info!(
+                "weathering disabled -- a required material is missing from the asset set"
+            );
         }
+        let fire = fire_table(&registry).map(vox_sim::FireSim::new);
+        if fire.is_none() {
+            tracing::info!("fire disabled -- a required material is missing from the asset set");
+        }
+        #[cfg(not(feature = "mario"))]
+        let _ = mario_units_per_meter;
         let water_voxel = registry.id_by_name("water").map(|m| Voxel(m.0));
 
         let mut app = Self {
             window,
             gpu,
             pipeline,
+            shadow_pipeline,
             world,
-            fluid: vox_sim::FluidSim::with_powders(water_material(&registry), powder_materials(&registry)),
+            fluid: vox_sim::FluidSim::with_powders(
+                water_material(&registry),
+                powder_materials(&registry),
+            ),
             fluid_clock: vox_platform::FrameClock::new(vox_core::consts::FLUID_DT),
             weathering,
-            fire: fire_table(&registry).map(vox_sim::FireSim::new),
-            burning_bodies: FxHashSet::default(),
+            fire,
+            burning_bodies: FxHashMap::default(),
             registry,
             player: Player::new(Vec3::ZERO),
             camera: Camera::new(Vec3::ZERO),
@@ -382,11 +551,11 @@ impl VoxApp {
             remesh: RemeshQueue::new(),
             body_mesh: BodyMeshQueue::new(),
             phys: {
-                let mut p = PhysicsWorld::new();
-                if let Some(wv) = water_voxel {
-                    p.set_water_voxel(wv);
+                let mut phys = PhysicsWorld::new();
+                if let Some(water) = water_voxel {
+                    phys.set_water_voxel(water);
                 }
-                p
+                phys
             },
             blast_seed: 0,
             impact_seed: 0,
@@ -402,14 +571,25 @@ impl VoxApp {
             selected_material,
             last_draw_stats: vox_render::DrawStats::default(),
             debris_order: VecDeque::new(),
+            mario_mode: None,
+            #[cfg(feature = "mario")]
+            mario_units_per_meter,
+            game_time: 60.0, // Start at noon (halfway through 120s cycle)
             pending_body_removal: HashMap::new(),
+            editor_active: false,
+            editor_radius: 2.0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            crack_intensity: 0.0,
+            replay: replay::ReplayState::default(),
             particles: ParticleSystem::new(),
             particle_pipeline,
             postprocess,
+            grass_pipeline,
+            grass_cache: grass::GrassCache::new(),
         };
         app.initial_mesh();
 
-        // Spawn on the terrain surface at the world center.
         let center = Vec3::from(app.world.cfg.extent_m) * 0.5;
         let surface = TerrainGen::surface_height_m(&app.world, center.x, center.z)
             .unwrap_or(app.world.cfg.extent_m[1] * 0.5);
@@ -423,13 +603,14 @@ impl VoxApp {
         let _ = self.world.drain_dirty_regions();
         let start = Instant::now();
         let world = &self.world;
+        let water = water_material(&self.registry);
         let meshes: Vec<(IVec3, vox_mesh::MeshData)> = keys
             .par_iter()
             .filter(|key| world.chunk_at(**key).is_some())
             .map(|key| {
                 let origin = chunk_origin(*key);
                 let slab = VoxelSlab::extract(world, origin, IVec3::splat(CHUNK_SIZE as i32));
-                (*key, mesh_slab(&slab, origin))
+                (*key, mesh_slab(&slab, origin, water))
             })
             .collect();
         let meshed = meshes.len();
@@ -491,15 +672,15 @@ impl VoxApp {
         let Some(body) = self.phys.get(id) else {
             return MeshDispatch::Sync;
         };
-        let carries_fire = self
+        let body_outlets = self
             .registry
             .id_by_name("ember")
-            .map(|m| Voxel(m.0))
-            .is_some_and(|ember| body.grid.voxels.contains(&ember));
+            .map(|m| body_smoke_outlets(body, Voxel(m.0), self.world.cfg.voxel_size_m));
+        let water = water_material(&self.registry);
         let voxel_count = (body.grid.dims.x * body.grid.dims.y * body.grid.dims.z) as usize;
         let dispatch = if voxel_count <= INLINE_MESH_VOXEL_BUDGET {
             let slab = VoxelSlab::from_grid(body.grid.dims, &body.grid.voxels);
-            let mesh = mesh_slab(&slab, IVec3::ZERO);
+            let mesh = mesh_slab(&slab, IVec3::ZERO, water);
             self.pipeline
                 .upload_body(&self.gpu, (id.slot, id.generation), &mesh);
             MeshDispatch::Sync
@@ -508,16 +689,22 @@ impl VoxApp {
                 (id.slot, id.generation),
                 body.grid.dims,
                 body.grid.voxels.clone(),
+                water,
             );
             MeshDispatch::Async
         };
-        if carries_fire {
-            self.burning_bodies.insert(id);
+        if let Some(outlets) = body_outlets.filter(|outlets| !outlets.is_empty()) {
+            self.burning_bodies.insert(
+                id,
+                BodyFireVisual {
+                    outlets,
+                    cursor: 0,
+                    cooldown: 0,
+                },
+            );
         } else {
             self.burning_bodies.remove(&id);
         }
-        // Re-meshing an existing burning body must not add a second budget
-        // entry for the same generational id.
         if !self.debris_order.contains(&id) {
             self.debris_order.push_back(id);
         }
@@ -585,7 +772,9 @@ impl VoxApp {
     /// oldest already-settled debris (see `evict_oldest_asleep_debris`) and
     /// drop each evicted body's GPU mesh too.
     fn enforce_debris_budget(&mut self) {
-        for id in evict_oldest_asleep_debris(&mut self.phys, &mut self.debris_order, MAX_DEBRIS_BODIES) {
+        for id in
+            evict_oldest_asleep_debris(&mut self.phys, &mut self.debris_order, MAX_DEBRIS_BODIES)
+        {
             self.burning_bodies.remove(&id);
             self.pipeline.remove_body((id.slot, id.generation));
         }
@@ -639,9 +828,11 @@ impl VoxApp {
             let Some(def) = self.registry.get(MaterialId(material.0)) else {
                 continue;
             };
-            let Some(radius_vox) =
-                fracture_radius_vox(def.strength, impact_speed, self.tunables.fracture_sensitivity)
-            else {
+            let Some(radius_vox) = fracture_radius_vox(
+                def.strength,
+                impact_speed,
+                self.tunables.fracture_sensitivity,
+            ) else {
                 continue;
             };
             let radius_m = voxel_size_m * radius_vox;
@@ -744,19 +935,70 @@ impl VoxApp {
         }
     }
 
+    /// Editor brush input (only called when `editor_active`): LMB paints a
+    /// sphere of the selected material at the crosshair target, RMB erases a
+    /// sphere of AIR. The wheel adjusts `editor_radius` directly (bypassing
+    /// the tool hotbar's radius, which routes through `active_radius_mut`
+    /// and would resize water or cycle material depending on the active
+    /// tool). Every changed voxel is recorded as a (pos, old_voxel) diff and
+    /// pushed onto the undo stack — fully undoable with Ctrl+Z, since the
+    /// brush only touches the static world (no debris is ever spawned).
+    fn apply_editor_brush(&mut self, input: &InputState, eye: Vec3, look: Vec3) {
+        let radius = self.editor_radius;
+        if input.mouse_clicked(MouseButton::Left) {
+            // selected_material is 0-based into material_names (air
+            // excluded); +1 converts to the registry id the tools use.
+            let material = Voxel((self.selected_material + 1) as u16);
+            let diff = self
+                .tools
+                .editor_brush(&mut self.world, eye, look, radius, material);
+            if !diff.is_empty() {
+                self.undo_stack.push(diff);
+                self.redo_stack.clear();
+                if self.undo_stack.len() > 50 {
+                    self.undo_stack.remove(0);
+                }
+            }
+        }
+        if input.mouse_clicked(MouseButton::Right) {
+            let diff = self
+                .tools
+                .editor_brush(&mut self.world, eye, look, radius, AIR);
+            if !diff.is_empty() {
+                self.undo_stack.push(diff);
+                self.redo_stack.clear();
+                if self.undo_stack.len() > 50 {
+                    self.undo_stack.remove(0);
+                }
+            }
+        }
+        if input.wheel_delta.abs() >= 1.0 {
+            let steps = input.wheel_delta as i32;
+            self.editor_radius = (self.editor_radius + steps as f32 * 0.25).clamp(0.5, 8.0);
+        }
+    }
+
     /// Tool input: LMB uses the active hotbar tool, RMB places.
     fn apply_tools(&mut self, input: &InputState) {
         let eye = self.player.eye(1.0);
         let look = self.player.look_dir();
+        if self.editor_active {
+            self.apply_editor_brush(input, eye, look);
+            return;
+        }
         if input.mouse_clicked(MouseButton::Left) {
             let outcome = match self.tools.tool {
-                Tool::Dig => self
-                    .tools
-                    .dig(&mut self.world, &mut self.phys, &self.registry, eye, look),
-                Tool::ScalableDig => {
+                Tool::Dig => {
                     self.tools
-                        .scalable_dig(&mut self.world, &mut self.phys, &self.registry, eye, look)
+                        .dig(&mut self.world, &mut self.phys, &self.registry, eye, look)
                 }
+                Tool::ScalableDig => self.tools.scalable_dig(
+                    &mut self.world,
+                    &mut self.phys,
+                    &self.registry,
+                    eye,
+                    look,
+                ),
                 Tool::Bomb => {
                     let seed = self.blast_seed;
                     self.blast_seed = self.blast_seed.wrapping_add(1);
@@ -770,30 +1012,33 @@ impl VoxApp {
                         seed,
                     )
                 }
-                Tool::DeathLaser => {
-                    self.tools
-                        .death_laser(&mut self.world, &mut self.phys, &self.registry, eye, look)
-                }
+                Tool::DeathLaser => self.tools.death_laser(
+                    &mut self.world,
+                    &mut self.phys,
+                    &self.registry,
+                    eye,
+                    look,
+                ),
                 Tool::PlaceWater => {
-                    self.tools
-                        .place_water(&mut self.world, &mut self.fluid, &self.registry, eye, look);
+                    self.tools.place_water(
+                        &mut self.world,
+                        &mut self.fluid,
+                        &self.registry,
+                        eye,
+                        look,
+                    );
                     CarveOutcome::default()
                 }
                 Tool::Ember => {
-                    self.tools.place_ember(
+                    if let Some(pos) = self.tools.place_ember(
                         &mut self.world,
                         &self.registry,
                         eye,
                         look,
                         self.player.ctrl.aabb(),
-                    );
-                    if let Some(f) = &mut self.fire {
-                        // Wake fire sim at the placement so it ignites the ember.
-                        if let Some(hit) = vox_world::raycast(&self.world, eye, look, vox_core::consts::REACH) {
-                            if let Some(face) = hit.face {
-                                let pos = hit.voxel + face;
-                                f.ignite(&mut self.world, pos);
-                            }
+                    ) {
+                        if let Some(f) = &mut self.fire {
+                            f.ignite(&mut self.world, pos);
                         }
                     }
                     CarveOutcome::default()
@@ -809,6 +1054,20 @@ impl VoxApp {
             // until every replacement fragment is ready (see its own doc
             // comment).
             self.emit_tool_particles(&outcome);
+            // Push voxel diff onto undo stack — but only for operations that
+            // didn't spawn debris bodies. Destruction tools (blast, scalable_dig,
+            // laser) call detach_unsupported which deletes voxels NOT in the
+            // diff and spawns physics bodies we can't despawn on undo. So we
+            // only undo safe operations: dig (single voxel, no debris) and
+            // place_voxel. This is an honest limitation — destruction undo
+            // needs body despawning + full diff capture, deferred.
+            if !outcome.voxel_diff.is_empty() && outcome.spawned.is_empty() {
+                self.undo_stack.push(outcome.voxel_diff);
+                self.redo_stack.clear();
+                if self.undo_stack.len() > 50 {
+                    self.undo_stack.remove(0);
+                }
+            }
             match outcome.removed.first() {
                 Some(&old_id) => self.replace_body(old_id, outcome.spawned),
                 None => {
@@ -819,8 +1078,16 @@ impl VoxApp {
             }
         }
         if input.mouse_clicked(MouseButton::Right) {
-            self.tools
-                .place_voxel(&mut self.world, eye, look, self.player.ctrl.aabb());
+            if let Some(diff) =
+                self.tools
+                    .place_voxel(&mut self.world, eye, look, self.player.ctrl.aabb())
+            {
+                self.undo_stack.push(vec![diff]);
+                self.redo_stack.clear();
+                if self.undo_stack.len() > 50 {
+                    self.undo_stack.remove(0);
+                }
+            }
         }
         if input.wheel_delta.abs() >= 1.0 {
             let steps = input.wheel_delta as i32;
@@ -830,6 +1097,86 @@ impl VoxApp {
                 self.tools.cycle_material(steps, &self.registry);
             }
         }
+    }
+
+    /// Undo the last world edit: restore old voxel values, clear redo stack
+    /// entry for this undo (push current values for redo).
+    fn undo(&mut self) {
+        let Some(diff) = self.undo_stack.pop() else {
+            return;
+        };
+        // Capture current values for redo (voxels may have been re-edited).
+        let redo_diff: Vec<(IVec3, Voxel)> = diff
+            .iter()
+            .map(|&(pos, _)| (pos, self.world.get_voxel(pos)))
+            .collect();
+        // Restore old values (set_voxel marks dirty + dirty_regions).
+        for &(pos, old_voxel) in &diff {
+            self.world.set_voxel(pos, old_voxel);
+        }
+        self.redo_stack.push(redo_diff);
+        // Wake physics for the edited regions.
+        let s = self.world.cfg.voxel_size_m;
+        for (min, max) in self.world.drain_dirty_regions() {
+            self.phys.wake_region(min.as_vec3() * s, max.as_vec3() * s);
+        }
+        tracing::info!(voxels = diff.len(), "undo");
+    }
+
+    /// Redo the last undone edit: re-apply the saved current values.
+    fn redo(&mut self) {
+        let Some(diff) = self.redo_stack.pop() else {
+            return;
+        };
+        // Capture current values for undo (so undo can undo the redo).
+        let undo_diff: Vec<(IVec3, Voxel)> = diff
+            .iter()
+            .map(|&(pos, _)| (pos, self.world.get_voxel(pos)))
+            .collect();
+        // Re-apply the redo values.
+        for &(pos, voxel) in &diff {
+            self.world.set_voxel(pos, voxel);
+        }
+        self.undo_stack.push(undo_diff);
+        // Wake physics for the edited regions (set_voxel marks dirty).
+        let s = self.world.cfg.voxel_size_m;
+        for (min, max) in self.world.drain_dirty_regions() {
+            self.phys.wake_region(min.as_vec3() * s, max.as_vec3() * s);
+        }
+        tracing::info!(voxels = diff.len(), "redo");
+    }
+
+    /// Carve a crater where Mario's ground pound landed, detach any
+    /// material left unsupported, spawn it as debris, and give the
+    /// fragments an outward blast impulse — the same pipeline a bomb uses,
+    /// but centered on Mario's impact point with a fixed crater radius.
+    /// The wake + remesh pass later in the frame picks up the dirty region
+    /// automatically (same as `Tools::blast`).
+    fn apply_ground_pound(&mut self, impact_m: Vec3) {
+        const CRATER_RADIUS_M: f32 = 1.5;
+        const POUND_POWER: f32 = 12.0;
+        let seed = self.blast_seed;
+        self.blast_seed = self.blast_seed.wrapping_add(1);
+        let result = vox_physics::blast(
+            &mut self.world,
+            &mut self.phys,
+            &self.registry,
+            impact_m,
+            CRATER_RADIUS_M,
+            POUND_POWER,
+            seed,
+        );
+        // Upload meshes for every debris fragment the blast spawned, so
+        // they're visible immediately (mirrors `apply_tools`'s post-blast
+        // handling for a world-only hit, where `removed` is empty).
+        for id in result.spawned {
+            self.upload_debris_mesh(id);
+        }
+        tracing::info!(
+            ?impact_m,
+            radius = CRATER_RADIUS_M,
+            "ground pound crater carved"
+        );
     }
 
     /// The palette color of `v`, for destruction-feedback particles; a
@@ -901,12 +1248,12 @@ impl VoxApp {
                 });
                 self.particles.burst(Burst {
                     center,
-                    count: 24,
+                    count: 14,
                     color: [0.35, 0.34, 0.33],
-                    speed: 0.8,
-                    upward: 0.5,
-                    life: 4.0,
-                    size: 0.25,
+                    speed: 1.2,
+                    upward: 0.8,
+                    life: 2.4,
+                    size: 0.30,
                     buoyant: true,
                 });
             }
@@ -932,10 +1279,12 @@ impl VoxApp {
                     buoyant: false,
                 });
             }
-            // Placing water or ember never carves anything — `impact_m`
-            // is always `None` for them, so the early return above already
-            // exits before this match runs; kept here to stay exhaustive.
-            Tool::PlaceWater | Tool::Ember => {}
+            // Placing water never carves anything -- `outcome.impact_m` is
+            // always `None` for it, so the early return above already
+            // exits before this match runs; kept here only to stay
+            // exhaustive.
+            Tool::PlaceWater => {}
+            Tool::Ember => {}
         }
     }
 
@@ -958,6 +1307,71 @@ impl VoxApp {
             self.frames = 0;
             self.last_report = Instant::now();
         }
+    }
+
+    /// Toggle Mario mode on/off. On first activation, lazily loads the
+    /// SM64 ROM and builds the Mario render pipeline. Subsequent
+    /// toggles spawn/despawn Mario at the player's position.
+    #[cfg(feature = "mario")]
+    fn toggle_mario_mode(&mut self) {
+        // Initialize Mario mode if not yet done
+        if self.mario_mode.is_none() {
+            let assets = assets_dir();
+            let rom_path = match mario::MarioMode::find_rom(&assets) {
+                Some(p) => p,
+                None => {
+                    tracing::warn!(
+                        "SM64 ROM not found — run enable_mario.bat with your SM64 US ROM, or place baserom.us.z64 in the roms/ directory"
+                    );
+                    return;
+                }
+            };
+            let mario_shader = match std::fs::read_to_string(assets.join("shaders/mario.wgsl")) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("mario.wgsl not found: {e}");
+                    return;
+                }
+            };
+            match mario::MarioMode::init(
+                &self.gpu,
+                &rom_path,
+                &mario_shader,
+                self.mario_units_per_meter,
+            ) {
+                Ok(mode) => self.mario_mode = Some(mode),
+                Err(e) => {
+                    tracing::error!("Mario mode init failed: {e}");
+                    return;
+                }
+            }
+        }
+
+        // Toggle spawn/despawn
+        if let Some(mode) = self.mario_mode.as_mut() {
+            if mode.is_active() {
+                mode.despawn();
+            } else {
+                // Spawn Mario just above the player's current position.
+                // The player is already grounded, so this is right above
+                // the terrain surface.
+                let pos = self.player.ctrl.pos;
+                let spawn_pos = Vec3::new(pos.x, pos.y + 1.0, pos.z);
+                mode.cam_yaw = self.player.yaw;
+                mode.cam_pitch = self.player.pitch;
+
+                if let Err(e) = mode.spawn(spawn_pos, &self.world) {
+                    tracing::warn!("Mario spawn failed: {e}");
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "mario"))]
+    fn toggle_mario_mode(&mut self) {
+        tracing::warn!(
+            "Mario support is disabled; run with `cargo run -p vox-app --features mario`"
+        );
     }
 }
 
@@ -989,6 +1403,7 @@ impl App for VoxApp {
         if input.key_pressed(KeyCode::KeyX) {
             let removed = self.phys.clear_sleeping();
             for id in &removed {
+                self.burning_bodies.remove(id);
                 self.pipeline.remove_body((id.slot, id.generation));
             }
             if !removed.is_empty() {
@@ -1024,6 +1439,25 @@ impl App for VoxApp {
         if input.key_pressed(KeyCode::F3) {
             self.debug_visible = !self.debug_visible;
         }
+        if input.key_pressed(KeyCode::KeyM) {
+            self.toggle_mario_mode();
+        }
+        if input.key_pressed(KeyCode::KeyE) {
+            self.editor_active = !self.editor_active;
+            tracing::info!("editor mode toggled active={}", self.editor_active);
+        }
+        if input.key_pressed(KeyCode::KeyR) {
+            self.replay.toggle_recording();
+        }
+        if input.key_pressed(KeyCode::KeyP) {
+            self.replay.start_playback();
+        }
+        if input.key_down(KeyCode::ControlLeft) && input.key_pressed(KeyCode::KeyZ) {
+            self.undo();
+        }
+        if input.key_down(KeyCode::ControlLeft) && input.key_pressed(KeyCode::KeyY) {
+            self.redo();
+        }
         self.profile
             .input
             .push(input_start.elapsed().as_secs_f32() * 1000.0);
@@ -1034,15 +1468,42 @@ impl App for VoxApp {
         self.player.fly_speed = self.tunables.fly_speed;
         self.phys.tunables = self.tunables;
 
-        if self.grabbed {
-            self.player.look(input.mouse_delta);
+        let mario_active = self.mario_mode.as_ref().is_some_and(|m| m.is_active());
+
+        let mut mario_pos = Vec3::ZERO;
+
+        if mario_active {
+            // Mario mode: mouse look controls the third-person camera
+            if self.grabbed {
+                self.mario_mode.as_mut().unwrap().look(input.mouse_delta);
+            }
+            // Tick Mario's simulation
+            mario_pos = self
+                .mario_mode
+                .as_mut()
+                .map(|m| m.tick(&self.world, input, timing.dt_frame))
+                .unwrap_or(Vec3::ZERO);
+            // A ground pound may have landed this frame — carve a crater
+            // at the impact point and detach/spawn debris like a blast.
+            if let Some(impact_m) = self.mario_mode.as_mut().unwrap().pending_ground_pound() {
+                self.apply_ground_pound(impact_m);
+            }
+        } else if self.replay.is_playing() {
+            // Replay playback: the snapshot drives the player + camera, so
+            // skip the normal mouse-look + fixed_steps input handling. The
+            // snapshot is applied after the physics step below.
+        } else {
+            // FPS mode: existing player controller
+            if self.grabbed {
+                self.player.look(input.mouse_delta);
+            }
+            {
+                let _t = ScopedTimer::new(&mut self.profile.player);
+                self.player
+                    .fixed_steps(&self.world, input, timing.physics_steps);
+            }
         }
-        {
-            let _t = ScopedTimer::new(&mut self.profile.player);
-            self.player
-                .fixed_steps(&self.world, input, timing.physics_steps);
-        }
-        if self.grabbed && !grabbed_this_frame {
+        if self.grabbed && !grabbed_this_frame && !mario_active && !self.replay.is_playing() {
             // Manual timing: apply_tools takes &mut self as a whole, which
             // would conflict with a live &mut self.profile.tools borrow.
             let tools_start = Instant::now();
@@ -1062,6 +1523,59 @@ impl App for VoxApp {
         self.apply_impact_fracture(impacts);
         self.enforce_debris_budget();
         self.expire_clutter(timing.physics_steps as f32 * vox_core::consts::PHYSICS_DT);
+        // Replay: record (throttled internally to 1/sec) or apply the next
+        // playback snapshot to the player + debris bodies. Runs after the
+        // physics step so recorded body transforms are this frame's final
+        // state, and after debris eviction so evicted bodies aren't captured.
+        if self.replay.recording {
+            self.replay.record(&self.player, self.game_time, &self.phys);
+        } else if self.replay.is_playing() {
+            if self
+                .replay
+                .playback_step(&mut self.player, &mut self.phys, &mut self.game_time)
+            {
+                // Keep the render-interpolated eye exactly on the snapshot
+                // (fixed_steps is skipped during playback, so prev_pos would
+                // otherwise lag the directly-written ctrl.pos).
+                self.player.sync_prev_pos();
+            }
+        }
+        // Feed nearby debris bodies to Mario as moving collision surfaces.
+        // Must run after the physics step (fresh transforms) and after
+        // debris eviction/lifetime expiry (so we don't register surfaces
+        // for bodies that are already gone this frame).
+        if mario_active {
+            let mario_pos = self.mario_mode.as_ref().unwrap().mario_pos_m();
+            let radius = mario::SURFACE_RADIUS_M + 2.0;
+            let mut nearby: Vec<(u64, Vec3, glam::Quat, Vec3, Vec3)> = Vec::new();
+            for (_id, body) in self.phys.iter() {
+                let voxel_size = body.half_voxel * 2.0;
+                let grid_min = body.grid_offset;
+                let grid_max = body.grid_offset + body.grid.dims.as_vec3() * voxel_size;
+                // Cheap world-AABB vs Mario distance pre-filter.
+                let wmin = body.pos + grid_min.min(grid_max);
+                let wmax = body.pos + grid_max.max(grid_min);
+                let d = Vec3::new(
+                    (mario_pos.x - wmin.x).max(0.0).max(wmax.x - mario_pos.x),
+                    (mario_pos.y - wmin.y).max(0.0).max(wmax.y - mario_pos.y),
+                    (mario_pos.z - wmin.z).max(0.0).max(wmax.z - mario_pos.z),
+                );
+                if d.length_squared() > radius * radius {
+                    continue;
+                }
+                // Stable key: hash the BodyId (slot + generation).
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                _id.hash(&mut h);
+                let key = h.finish();
+                nearby.push((key, body.pos, body.rot, grid_min, grid_max));
+            }
+            self.mario_mode
+                .as_mut()
+                .unwrap()
+                .update_debris(nearby.into_iter());
+        }
 
         let fluid_timing = self.fluid_clock.advance(timing.dt_frame);
         for _ in 0..fluid_timing.physics_steps {
@@ -1070,16 +1584,14 @@ impl App for VoxApp {
                 let events = self.fluid.drain_events();
                 w.tick(&mut self.world, &events);
             }
-            let mut spawned_ids: Vec<vox_physics::BodyId> = Vec::new();
-            let mut remesh_ids: FxHashSet<vox_physics::BodyId> = FxHashSet::default();
+            let mut spawned_ids = Vec::new();
+            let mut remesh_ids: FxHashSet<BodyId> = FxHashSet::default();
             if let Some(f) = &mut self.fire {
                 f.tick(&mut self.world);
-                // Collect consumed positions for debris detach, and emit
-                // smoke particles from fire events.
                 let s = self.world.cfg.voxel_size_m;
-                let mut consumed_positions: Vec<IVec3> = Vec::new();
-                for ev in f.drain_events() {
-                    match ev {
+                let mut consumed_positions = Vec::new();
+                for event in f.drain_events() {
+                    match event {
                         vox_sim::FireEvent::Smoke { pos, face, kind } => {
                             let (count, color, speed, upward, life, size, salt) = match kind {
                                 vox_sim::SmokeKind::Burning => {
@@ -1113,12 +1625,7 @@ impl App for VoxApp {
                         vox_sim::FireEvent::Extinguished(_) => {}
                     }
                 }
-                // After consumption, check if any solid neighbors lost
-                // their support — e.g. fire burned through a tree trunk.
-                // The existing detach pipeline extracts the disconnected
-                // section as a tumbling debris body carrying ember (still
-                // visually burning). When/if re-freezing is added, the
-                // fire sim's wake_region will re-ignite those cells.
+
                 if !consumed_positions.is_empty() {
                     spawned_ids = vox_physics::detach_unsupported(
                         &mut self.world,
@@ -1127,39 +1634,25 @@ impl App for VoxApp {
                         &consumed_positions,
                     );
                 }
-                // Fire spread between debris bodies and the world, in
-                // both directions:
-                //   body→world: ember voxels in a body ignite flammable
-                //     world neighbors (a burning tree falls on a house).
-                //   world→body: ember voxels in the world ignite flammable
-                //     voxels in nearby bodies (a burning floor ignites a
-                //     falling tree that lands on it).
-                let s = self.world.cfg.voxel_size_m;
-                let ember_vox = self.registry.id_by_name("ember").map(|m| Voxel(m.0));
-                let mut ignite_world: FxHashSet<IVec3> = FxHashSet::default();
-                let mut ignite_body: FxHashSet<(vox_physics::BodyId, IVec3)> =
-                    FxHashSet::default();
-                if let Some(ember_vox) = ember_vox {
-                    // Generational ids make stale entries harmless, but
-                    // pruning them keeps the set proportional to live fire.
-                    let phys = &self.phys;
-                    self.burning_bodies.retain(|id| phys.get(*id).is_some());
 
-                    // Cull bodies that neither contain fire nor overlap the
-                    // world's sparse burning bounds. The old path scanned
-                    // every voxel of every awake body at 15 Hz even when the
-                    // nearest flame was hundreds of metres away.
+                let ember = self.registry.id_by_name("ember").map(|m| Voxel(m.0));
+                let mut ignite_world: FxHashSet<IVec3> = FxHashSet::default();
+                let mut ignite_body: FxHashSet<(BodyId, IVec3)> = FxHashSet::default();
+                if let Some(ember) = ember {
+                    let phys = &self.phys;
+                    self.burning_bodies.retain(|id, _| phys.get(*id).is_some());
+
                     let world_fire_bounds_m = f.burning_bounds().map(|(min, max)| {
                         (
                             (min - IVec3::ONE).as_vec3() * s,
                             (max + IVec3::ONE).as_vec3() * s,
                         )
                     });
-                    for (bid, body) in self.phys.iter() {
+                    for (body_id, body) in self.phys.iter() {
                         if body.sleep.asleep {
                             continue;
                         }
-                        let carries_fire = self.burning_bodies.contains(&bid);
+                        let carries_fire = self.burning_bodies.contains_key(&body_id);
                         let near_world_fire = world_fire_bounds_m.is_some_and(|(min, max)| {
                             body.aabb_max.cmpge(min).all() && body.aabb_min.cmple(max).all()
                         });
@@ -1167,18 +1660,12 @@ impl App for VoxApp {
                             continue;
                         }
 
-                        // `surface` is already cached for collision. Fire can
-                        // cross a body/world boundary only through these
-                        // voxels, so dense interior-grid scans do no useful
-                        // work and can be skipped entirely.
                         for sample in &body.surface {
-                            let local_vox = ((*sample - body.grid_offset) / s).floor().as_ivec3();
-                            let bv = body.grid.get(local_vox);
-                            let world_vox = vox_core::voxel_at(body.pos + body.rot * *sample, s);
-                            if bv == ember_vox && carries_fire {
-                                // Body→world: this surface ember may ignite a
-                                // face-adjacent flammable world voxel.
-                                for n in [
+                            let local_voxel = ((*sample - body.grid_offset) / s).floor().as_ivec3();
+                            let body_voxel = body.grid.get(local_voxel);
+                            let world_voxel = voxel_at(body.pos + body.rot * *sample, s);
+                            if body_voxel == ember && carries_fire {
+                                for face in [
                                     IVec3::X,
                                     IVec3::NEG_X,
                                     IVec3::Y,
@@ -1186,22 +1673,23 @@ impl App for VoxApp {
                                     IVec3::Z,
                                     IVec3::NEG_Z,
                                 ] {
-                                    let neighbor = world_vox + n;
-                                    let nv = self.world.get_voxel(neighbor);
-                                    if nv != ember_vox
+                                    let neighbor = world_voxel + face;
+                                    let neighbor_voxel = self.world.get_voxel(neighbor);
+                                    if neighbor_voxel != ember
                                         && self
                                             .registry
-                                            .get(vox_core::MaterialId(nv.0))
+                                            .get(MaterialId(neighbor_voxel.0))
                                             .is_some_and(|def| def.flammable)
                                     {
                                         ignite_world.insert(neighbor);
                                     }
                                 }
                             } else if near_world_fire
-                                && bv != vox_world::AIR
+                                && body_voxel != AIR
+                                && body_voxel != ember
                                 && self
                                     .registry
-                                    .get(vox_core::MaterialId(bv.0))
+                                    .get(MaterialId(body_voxel.0))
                                     .is_some_and(|def| def.flammable)
                                 && [
                                     IVec3::X,
@@ -1212,39 +1700,66 @@ impl App for VoxApp {
                                     IVec3::NEG_Z,
                                 ]
                                 .iter()
-                                .any(|&n| f.is_burning(world_vox + n))
+                                .any(|&face| f.is_burning(world_voxel + face))
                             {
-                                ignite_body.insert((bid, local_vox));
+                                ignite_body.insert((body_id, local_voxel));
                             }
                         }
                     }
 
-                    // Apply body ignitions once per unique voxel and remesh
-                    // each changed body once, regardless of contact count.
-                    for (bid, local) in ignite_body {
-                        if let Some(body) = self.phys.get_mut(bid) {
-                            body.grid.set(local, ember_vox);
-                            self.burning_bodies.insert(bid);
-                            remesh_ids.insert(bid);
+                    for (body_id, local_voxel) in ignite_body {
+                        if let Some(body) = self.phys.get_mut(body_id) {
+                            body.grid.set(local_voxel, ember);
+                            remesh_ids.insert(body_id);
                         }
                     }
                 }
-                // Apply unique world ignitions (fire sim handles the swap).
                 for pos in ignite_world {
                     f.ignite(&mut self.world, pos);
                 }
             }
-            // Upload meshes for newly spawned debris and re-mesh bodies
-            // whose voxels changed (ember swap) — outside the fire borrow
-            // scope since upload_debris_mesh needs &mut self.
-            for id in &spawned_ids {
-                self.upload_debris_mesh(*id);
+
+            for id in spawned_ids {
+                self.upload_debris_mesh(id);
             }
-            // Re-mesh bodies whose voxels changed (ember swap from
-            // world→body fire spread). Don't push to debris_order —
-            // the body is already tracked from its initial spawn.
-            for id in &remesh_ids {
-                self.upload_debris_mesh(*id);
+            for id in remesh_ids {
+                self.upload_debris_mesh(id);
+            }
+
+            // Detached burning objects emit at most one restrained puff per
+            // body every ten fire ticks. Outlet topology is cached from the
+            // exposed surface, and the world-air check suppresses smoke when
+            // the chosen face is pressed into terrain.
+            let body_smoke_ids: Vec<BodyId> = self.burning_bodies.keys().copied().collect();
+            for body_id in body_smoke_ids {
+                let Some(body) = self.phys.get(body_id) else {
+                    self.burning_bodies.remove(&body_id);
+                    continue;
+                };
+                let Some(visual) = self.burning_bodies.get_mut(&body_id) else {
+                    continue;
+                };
+                if visual.cooldown > 0 {
+                    visual.cooldown -= 1;
+                    continue;
+                }
+                if let Some(origin) =
+                    next_body_smoke_origin(body, visual, &self.world, self.world.cfg.voxel_size_m)
+                {
+                    visual.cooldown = 10;
+                    self.particles.burst(Burst {
+                        center: origin,
+                        count: 1,
+                        color: [0.35, 0.34, 0.33],
+                        speed: 0.03,
+                        upward: 0.07,
+                        life: 4.5,
+                        size: self.world.cfg.voxel_size_m * 0.35,
+                        buoyant: true,
+                    });
+                } else {
+                    visual.cooldown = 2;
+                }
             }
         }
 
@@ -1255,33 +1770,63 @@ impl App for VoxApp {
             let _t = ScopedTimer::new(&mut self.profile.remesh);
             let s = self.world.cfg.voxel_size_m;
             let dirty = self.world.drain_dirty_regions();
+            if !dirty.is_empty() {
+                self.grass_cache.invalidate();
+            }
             for (min, max) in &dirty {
                 self.phys.wake_region(min.as_vec3() * s, max.as_vec3() * s);
                 self.fluid.wake_region(&self.world, *min, *max);
             }
-            for (min, max) in &dirty {
-                if let Some(f) = &mut self.fire {
-                    f.wake_region(&mut self.world, *min, *max);
+            for (min, max) in dirty {
+                if let Some(fire) = &mut self.fire {
+                    fire.wake_region(&mut self.world, min, max);
                 }
             }
             self.remesh.absorb_dirty(&mut self.world);
-            self.remesh.dispatch(&self.world, eye);
+            self.remesh
+                .dispatch(&self.world, eye, water_material(&self.registry));
             self.remesh.collect(&self.gpu, &mut self.pipeline);
             self.body_mesh.collect(&self.gpu, &mut self.pipeline)
         };
         self.resolve_pending_removals(&uploaded);
         self.sync_debris_render(timing.alpha);
-        self.particles.update(timing.dt_frame, &self.world, self.world.cfg.voxel_size_m);
+        self.particles
+            .update(timing.dt_frame, &self.world, self.world.cfg.voxel_size_m);
 
-        // Camera from the interpolated player eye.
-        self.camera.pos = eye;
-        self.camera.yaw = self.player.yaw;
-        self.camera.pitch = self.player.pitch;
+        // Advance day/night cycle.
+        self.game_time += timing.dt_frame;
+        let dn = day_night::compute(self.game_time);
+
+        // Camera: third-person around Mario in Mario mode, else player eye.
+        if mario_active {
+            let mode = self.mario_mode.as_ref().unwrap();
+            self.camera.pos = mode.camera_pos(mario_pos);
+            self.camera.yaw = mode.cam_yaw;
+            self.camera.pitch = mode.cam_pitch;
+        } else {
+            self.camera.pos = eye;
+            self.camera.yaw = self.player.yaw;
+            self.camera.pitch = self.player.pitch;
+        }
         let (w, h) = self.gpu.surface_size();
         let aspect = w as f32 / h.max(1) as f32;
         let view_proj = self.camera.view_proj(aspect);
-        self.pipeline
-            .write_camera(&self.gpu, view_proj, self.camera.pos, FOG_END_M);
+        self.pipeline.write_camera(
+            &self.gpu,
+            view_proj,
+            self.camera.pos,
+            FOG_END_M,
+            dn.sun_dir,
+            dn.sun_strength,
+            dn.sky_color,
+            dn.fill_strength,
+            dn.ambient_strength,
+            dn.sun_color,
+            dn.ambient_sky,
+            dn.ambient_ground,
+            self.crack_intensity,
+            self.game_time,
+        );
         // Billboard basis: camera right and true up (right x forward).
         let cam_right = self.camera.right();
         let cam_up = cam_right.cross(self.camera.forward()).normalize();
@@ -1291,6 +1836,24 @@ impl App for VoxApp {
         self.particle_pipeline
             .upload(&self.gpu, &particle_instances);
         let frustum = Frustum::from_view_proj(view_proj);
+
+        // Shadow camera (#14): orthographic box centered on the player,
+        // oriented along the sun direction. Updated every frame so shadows
+        // track the player and re-orient as the sun moves through the
+        // day/night cycle. The camera focus is the player/mario position
+        // (whichever is active) so the 100 m shadow box always covers the
+        // nearby terrain the eye actually sees.
+        let shadow_focus = if mario_active {
+            mario_pos
+        } else {
+            self.camera.pos
+        };
+        let shadow_frustum = self.shadow_pipeline.write_camera(
+            &self.gpu,
+            dn.sun_dir,
+            shadow_focus,
+            self.world.cfg.voxel_size_m,
+        );
 
         let render_start = Instant::now();
         let frame = match self.gpu.begin_frame() {
@@ -1368,37 +1931,46 @@ impl App for VoxApp {
         );
         self.tools.set_material_index(self.selected_material + 1);
 
+        // Shadow pass (#14): render visible chunks into the shadow map
+        // (depth-only, no color attachment) before the main pass samples it.
+        // The pass must close (drop the shadow pass encoder guard) before
+        // the main pass opens on the same encoder. Frustum culling reuses
+        // the main camera frustum -- chunks outside the view are also
+        // outside the shadow receiver region.
+        if dn.sun_strength > 0.001 {
+            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow-pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: self.shadow_pipeline.shadow_view(),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.pipeline.draw_chunks_shadow(
+                &self.shadow_pipeline,
+                &mut shadow_pass,
+                &shadow_frustum,
+            );
+        }
+
         let stats;
         {
-            // Pass 1: scene → offscreen color + normal + depth.
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scene-pass"),
-                color_attachments: &[
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: self.postprocess.color_view(),
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(CLEAR_COLOR),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: self.postprocess.normal_view(),
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: self.postprocess.depth_copy_view(),
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 1e6, g: 0.0, b: 0.0, a: 1.0 }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
-                ],
+                label: Some("voxel-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.postprocess.color_view(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(day_night::clear_color(&dn)),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: self.postprocess.depth_view(),
                     depth_ops: Some(wgpu::Operations {
@@ -1410,48 +1982,86 @@ impl App for VoxApp {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            let chunk_stats = self.pipeline.draw_chunks(&mut pass, &frustum);
-            let body_stats = self.pipeline.draw_bodies(&mut pass, &frustum);
+            pass.set_bind_group(1, self.shadow_pipeline.sample_bind_group(), &[]);
+            let chunk_stats = self.pipeline.draw_chunks_opaque(&mut pass, &frustum);
+            let body_stats =
+                self.pipeline
+                    .draw_bodies(&mut pass, &frustum, self.camera.pos, FOG_END_M);
             stats = vox_render::DrawStats {
                 drawn: chunk_stats.drawn + body_stats.drawn,
                 culled: chunk_stats.culled + body_stats.culled,
             };
-        }
-        // Particle pass: separate from scene (1 target vs 2). LOAD color
-        // and depth from the scene pass — no clear.
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("particle-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: self.postprocess.color_view(),
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: self.postprocess.depth_view(),
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+            if let Some(mode) = &self.mario_mode {
+                if mode.is_active() {
+                    mode.render(
+                        self.gpu.queue(),
+                        &mut pass,
+                        view_proj.to_cols_array_2d(),
+                        self.camera.pos,
+                        dn.sun_dir,
+                        dn.sun_strength,
+                        dn.sky_color,
+                        dn.fill_strength,
+                        dn.ambient_strength,
+                        dn.sun_color,
+                        dn.ambient_sky,
+                        dn.ambient_ground,
+                        FOG_END_M * 0.55,
+                        FOG_END_M,
+                    );
+                }
+            }
+            // Grass and particles before water so water blends on top.
             self.particle_pipeline.draw(&mut pass);
+            let grass_voxel = self
+                .registry
+                .id_by_name("grass")
+                .map(|id| Voxel(id.0))
+                .unwrap_or(Voxel(3));
+            let grass_verts = self.grass_cache.get_or_regen(
+                &self.world,
+                self.camera.pos,
+                self.world.cfg.voxel_size_m,
+                grass_voxel,
+            );
+            self.grass_pipeline.write_camera(
+                self.gpu.queue(),
+                view_proj.to_cols_array_2d(),
+                self.camera.pos,
+                dn.sun_dir,
+                dn.sun_strength,
+                dn.sky_color,
+                dn.fill_strength,
+                dn.ambient_strength,
+                dn.sun_color,
+                dn.ambient_sky,
+                dn.ambient_ground,
+                self.game_time,
+                self.world.cfg.voxel_size_m,
+                FOG_END_M,
+            );
+            self.grass_pipeline
+                .draw(self.gpu.queue(), &mut pass, grass_verts);
+            // Water last — alpha-blends over terrain, grass, and particles.
+            self.pipeline.draw_water(&mut pass, &frustum);
         }
-        // Pass 2: post-process → swapchain.
+
+        // Post-process pass: composite the offscreen HDR color + depth
+        // through the fullscreen edge-detection/saturation/grading shader
+        // onto the swapchain frame.
+        self.postprocess.process(&mut encoder, frame.view());
+
+        // UI pass: debug overlay drawn directly on the swapchain, on top
+        // of the post-processed scene. No depth attachment — egui's
+        // pipeline is built against None in its constructor.
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("postprocess-pass"),
+            let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: frame.view(),
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1459,32 +2069,7 @@ impl App for VoxApp {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.postprocess.draw(&mut pass);
-        }
-        // Pass 3: debug overlay → swapchain (on top of post-processed scene).
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("overlay-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: frame.view(),
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: self.gpu.depth_view(),
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            self.debug_overlay.paint(&mut pass, &prepared_overlay);
+            self.debug_overlay.paint(&mut ui_pass, &prepared_overlay);
         }
         self.gpu.queue().submit([encoder.finish()]);
         frame.present();
@@ -1513,13 +2098,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", args::usage());
         return Ok(());
     }
-    let cfg = match args::parse(cli_args.iter().map(String::as_str)) {
-        Ok(cfg) => cfg,
+    let cli = match args::parse(cli_args.iter().map(String::as_str)) {
+        Ok(cli) => cli,
         Err(msg) => {
             eprintln!("error: {msg}\n\n{}", args::usage());
             std::process::exit(1);
         }
     };
+    let cfg = cli.world;
+    let mario_units_per_meter = cli.mario_units_per_meter;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1531,11 +2118,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         voxel_size_m = cfg.voxel_size_m,
         seed = cfg.seed,
         extent_m = ?cfg.extent_m,
+        mario_units_per_meter,
         "world config"
     );
 
     run_app(vox_core::consts::PHYSICS_DT, |window| {
-        Ok(Box::new(VoxApp::new(window, cfg)?))
+        Ok(Box::new(VoxApp::new(window, cfg, mario_units_per_meter)?))
     })?;
     Ok(())
 }
@@ -1631,7 +2219,8 @@ fn fracture_radius_vox(strength: f32, impact_speed: f32, fracture_sensitivity: f
     if impact_speed < threshold {
         return None;
     }
-    let fragility = (FRACTURE_REFERENCE_STRENGTH / strength).clamp(CRUMBLE_SCALE_RANGE.0, CRUMBLE_SCALE_RANGE.1);
+    let fragility = (FRACTURE_REFERENCE_STRENGTH / strength)
+        .clamp(CRUMBLE_SCALE_RANGE.0, CRUMBLE_SCALE_RANGE.1);
     let excess = (impact_speed / threshold - 1.0).max(0.0);
     let growth = excess.sqrt().min(ENERGY_GROWTH_CAP);
     let radius = FRACTURE_RADIUS_VOX * (1.0 + growth * (fragility - 1.0));
@@ -1679,7 +2268,7 @@ mod fire_smoke_tests {
     #[test]
     fn smoke_origin_is_inside_the_selected_air_neighbor() {
         let pos = IVec3::new(8, 7, 6);
-        let s = 0.1;
+        let voxel_size = 0.1;
         for face in [
             IVec3::X,
             IVec3::NEG_X,
@@ -1688,13 +2277,44 @@ mod fire_smoke_tests {
             IVec3::Z,
             IVec3::NEG_Z,
         ] {
-            let origin = fire_smoke_origin(pos, face, s, 42);
+            let origin = fire_smoke_origin(pos, face, voxel_size, 42);
             assert_eq!(
-                voxel_at(origin, s),
+                voxel_at(origin, voxel_size),
                 pos + face,
                 "smoke must start in the exposed neighbor for face {face}"
             );
         }
+    }
+
+    fn body_with_ember(voxel: IVec3) -> Body {
+        let dims = IVec3::splat(3);
+        let mut voxels = vec![Voxel(1); 27];
+        let index = (voxel.x + voxel.z * dims.x + voxel.y * dims.x * dims.z) as usize;
+        voxels[index] = Voxel(2);
+        let grid = VoxelGrid::new(dims, voxels);
+        let registry = MaterialRegistry::from_toml_str(
+            "[[material]]\nname=\"stone\"\ncolor=[0.5,0.5,0.5]\ndensity=2600.0\nstrength=8.0\n\n[[material]]\nname=\"ember\"\ncolor=[0.8,0.3,0.1]\ndensity=600.0\nstrength=2.0\nflammable=true\n",
+            "fire-smoke-test.toml",
+        )
+        .expect("test registry");
+        Body::from_grid(grid, &registry, 0.1, Vec3::ZERO).expect("body mass")
+    }
+
+    #[test]
+    fn interior_ember_has_no_body_smoke_outlet() {
+        let body = body_with_ember(IVec3::ONE);
+        assert!(body_smoke_outlets(&body, Voxel(2), 0.1).is_empty());
+    }
+
+    #[test]
+    fn exposed_ember_only_emits_through_air_faces() {
+        let body = body_with_ember(IVec3::new(0, 1, 1));
+        let outlets = body_smoke_outlets(&body, Voxel(2), 0.1);
+        assert_eq!(outlets.len(), 1);
+        assert_eq!(outlets[0].open_faces, vec![IVec3::NEG_X]);
+        let origin = body_smoke_origin(&body, &outlets[0], IVec3::NEG_X, 0.1, 7);
+        let body_local = (body.rot.conjugate() * (origin - body.pos) - body.grid_offset) / 0.1;
+        assert_eq!(body_local.floor().as_ivec3(), IVec3::new(-1, 1, 1));
     }
 }
 
@@ -1727,7 +2347,11 @@ mod debris_budget_tests {
 
         let evicted = evict_oldest_asleep_debris(&mut phys, &mut order, 3);
 
-        assert_eq!(evicted, vec![ids[0], ids[1]], "must evict the two oldest, in order");
+        assert_eq!(
+            evicted,
+            vec![ids[0], ids[1]],
+            "must evict the two oldest, in order"
+        );
         assert_eq!(phys.body_count(), 3);
         assert!(phys.get(ids[2]).is_some(), "the three newest must survive");
     }
@@ -1787,8 +2411,15 @@ mod debris_budget_tests {
             !evicted.contains(&stale_id),
             "a stale id must not be reported as evicted -- it was already gone"
         );
-        assert_eq!(evicted, vec![real_id], "the real, still-alive body must still be evicted");
-        assert!(order.is_empty(), "the stale entry must still be dropped from the queue");
+        assert_eq!(
+            evicted,
+            vec![real_id],
+            "the real, still-alive body must still be evicted"
+        );
+        assert!(
+            order.is_empty(),
+            "the stale entry must still be dropped from the queue"
+        );
     }
 }
 
@@ -1849,7 +2480,10 @@ mod fracture_tests {
             wood_r > stone_r,
             "wood ({wood_r}) must crumble more than stone ({stone_r})"
         );
-        assert_eq!(stone_r, FRACTURE_RADIUS_VOX, "stone is the reference material");
+        assert_eq!(
+            stone_r, FRACTURE_RADIUS_VOX,
+            "stone is the reference material"
+        );
     }
 
     #[test]

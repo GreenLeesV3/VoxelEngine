@@ -35,7 +35,10 @@ fn stats_window(ctx: &Context, state: &OverlayState<'_>) {
                 state.chunks_drawn, state.chunks_culled
             ));
             ui.label(format!("remesh queue: {}", state.mesh_queue));
-            ui.label(format!("body mesh in-flight: {}", state.body_mesh_in_flight));
+            ui.label(format!(
+                "body mesh in-flight: {}",
+                state.body_mesh_in_flight
+            ));
             ui.label(format!(
                 "bodies awake/total: {}/{}",
                 state.bodies_awake, state.bodies_total
@@ -121,4 +124,3 @@ fn tuning_window(ctx: &Context, state: &mut OverlayState<'_>) {
                 });
         });
 }
-

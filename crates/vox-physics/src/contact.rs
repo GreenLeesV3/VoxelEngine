@@ -11,7 +11,7 @@
 
 use glam::{IVec3, Mat3, Quat, Vec3};
 use vox_core::voxel_at;
-use vox_world::World;
+use vox_world::SolidLookup;
 
 use crate::body::Body;
 
@@ -124,18 +124,11 @@ fn effective_mass(
 }
 
 /// Generate world contacts for one awake body into `out`.
-pub fn world_contacts(body: &Body, slot: usize, world: &World, out: &mut Vec<Contact>) {
-    let s = world.cfg.voxel_size_m;
+pub fn world_contacts(body: &Body, slot: usize, out: &mut Vec<Contact>, lookup: &mut SolidLookup) {
     let r_point = body.half_voxel;
     let inv_iw = body.inv_iw; // solver-refreshed cache, see the field's docs
 
-    // Chunk-caching lookup instead of `world.solid` directly: each surface
-    // point costs up to 7 solidity queries (itself + 6 neighbors), and
-    // consecutive surface points are spatially coherent (generated in grid
-    // order), so nearly all of a large awake body's thousands of per-substep
-    // queries hit the same chunk as the previous one. A falling tree is
-    // exactly this case, every substep until it sleeps.
-    let mut lookup = vox_world::SolidLookup::new(world);
+    let s = lookup.world_cfg().voxel_size_m;
 
     for (point_idx, &p_local) in body.surface.iter().enumerate() {
         let r_arm = body.rot * p_local;
@@ -338,7 +331,12 @@ pub fn pair_contacts(
             depth,
             r_arm,
             r_arm_b,
-            key: (sampler_slot as u32, target_slot as u32, point_idx as u32, face_id),
+            key: (
+                sampler_slot as u32,
+                target_slot as u32,
+                point_idx as u32,
+                face_id,
+            ),
             t1,
             t2,
             kn: effective_mass(n, sampler.inv_mass, &inv_iw_a, r_arm, b_terms),

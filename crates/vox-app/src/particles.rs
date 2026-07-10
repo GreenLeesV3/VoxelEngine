@@ -173,7 +173,11 @@ impl ParticleSystem {
 
             // Enclosure-aware drag: sample 6 neighbors, more solids = more drag.
             let solid_count = count_solid_neighbors(world, p.pos, voxel_size_m);
-            let drag = if solid_count >= 4 { DRAG * ENCLOSURE_DRAG_MULT } else { DRAG };
+            let drag = if solid_count >= 4 {
+                DRAG * ENCLOSURE_DRAG_MULT
+            } else {
+                DRAG
+            };
             p.vel /= 1.0 + drag * dt;
 
             // World collision: check the proposed next position component-wise
@@ -222,7 +226,9 @@ impl ParticleSystem {
             let (bmin, bmax) = world.bounds_voxels();
             let min_m = bmin.as_vec3() * voxel_size_m;
             let max_m = bmax.as_vec3() * voxel_size_m;
-            p.pos = p.pos.clamp(min_m + voxel_size_m * 0.5, max_m - voxel_size_m * 0.5);
+            p.pos = p
+                .pos
+                .clamp(min_m + voxel_size_m * 0.5, max_m - voxel_size_m * 0.5);
         }
         self.particles.retain(|p| p.age < p.life);
     }
@@ -331,7 +337,12 @@ fn count_solid_neighbors(world: &World, pos_m: Vec3, voxel_size_m: f32) -> u32 {
     let v = voxel_at(pos_m, voxel_size_m);
     let mut count = 0;
     for d in [
-        IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z,
+        IVec3::X,
+        IVec3::NEG_X,
+        IVec3::Y,
+        IVec3::NEG_Y,
+        IVec3::Z,
+        IVec3::NEG_Z,
     ] {
         let n = v + d;
         if world.in_bounds(n) && world.solid(n) {
@@ -406,7 +417,12 @@ mod tests {
         for _ in 0..100 {
             sys.update(dt(), &world, 1.0);
         }
-        assert_eq!(sys.len(), 0, "all particles must expire: {} left", sys.len());
+        assert_eq!(
+            sys.len(),
+            0,
+            "all particles must expire: {} left",
+            sys.len()
+        );
     }
 
     #[test]
@@ -435,7 +451,10 @@ mod tests {
         let inst = sys.instances();
         assert_eq!(inst.len(), 1);
         let alpha = inst[0].color[3];
-        assert!(alpha > 0.0 && alpha < 1.0, "mid-life alpha must be fading: {alpha}");
+        assert!(
+            alpha > 0.0 && alpha < 1.0,
+            "mid-life alpha must be fading: {alpha}"
+        );
     }
 
     #[test]
@@ -457,7 +476,11 @@ mod tests {
             sys.update(dt(), &world, 1.0);
         }
         let i = &sys.instances()[0];
-        assert!(i.center_size[1] > 32.0, "smoke must rise: y = {}", i.center_size[1]);
+        assert!(
+            i.center_size[1] > 32.0,
+            "smoke must rise: y = {}",
+            i.center_size[1]
+        );
         assert!(i.center_size[3] > size0, "smoke must swell as it ages");
     }
 
@@ -533,17 +556,40 @@ mod tests {
         });
         // Both start at the same position.
         let inst0 = sys.instances();
-        let p0 = Vec3::from_array([inst0[0].center_size[0], inst0[0].center_size[1], inst0[0].center_size[2]]);
-        let p1 = Vec3::from_array([inst0[1].center_size[0], inst0[1].center_size[1], inst0[1].center_size[2]]);
-        assert!((p0 - p1).length() < 0.01, "particles must start at the same position");
+        let p0 = Vec3::from_array([
+            inst0[0].center_size[0],
+            inst0[0].center_size[1],
+            inst0[0].center_size[2],
+        ]);
+        let p1 = Vec3::from_array([
+            inst0[1].center_size[0],
+            inst0[1].center_size[1],
+            inst0[1].center_size[2],
+        ]);
+        assert!(
+            (p0 - p1).length() < 0.01,
+            "particles must start at the same position"
+        );
         // After several steps, repulsion pushes them apart.
         for _ in 0..30 {
             sys.update(dt(), &world, 1.0);
         }
         let inst1 = sys.instances();
-        let q0 = Vec3::from_array([inst1[0].center_size[0], inst1[0].center_size[1], inst1[0].center_size[2]]);
-        let q1 = Vec3::from_array([inst1[1].center_size[0], inst1[1].center_size[1], inst1[1].center_size[2]]);
-        assert!((q0 - q1).length() > 0.05, "repulsion must push particles apart: dist = {}", (q0 - q1).length());
+        let q0 = Vec3::from_array([
+            inst1[0].center_size[0],
+            inst1[0].center_size[1],
+            inst1[0].center_size[2],
+        ]);
+        let q1 = Vec3::from_array([
+            inst1[1].center_size[0],
+            inst1[1].center_size[1],
+            inst1[1].center_size[2],
+        ]);
+        assert!(
+            (q0 - q1).length() > 0.05,
+            "repulsion must push particles apart: dist = {}",
+            (q0 - q1).length()
+        );
     }
 
     #[test]

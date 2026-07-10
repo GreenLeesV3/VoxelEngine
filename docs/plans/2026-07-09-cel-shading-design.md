@@ -1,7 +1,7 @@
 # Cel-Shading + Post-Processing Pipeline — Design Document
 
 **Date:** 2026-07-09
-**Status:** Approved
+**Status:** Implemented (Phase 1: offscreen Rgba16Float + cel-shading bands + saturation/grading; normal attachment + edge detection deferred)
 
 **User request:** "completely overhauled rendering and lighting system... outer edge
 based cel shading, higher saturations, colors being more cartoony and vibrant...

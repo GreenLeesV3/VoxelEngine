@@ -9,7 +9,9 @@ pub mod contact;
 pub mod destruction;
 pub mod solver;
 
-pub use body::{Body, BodyId, GridRayHit, MassProps, VoxelGrid, mass_props, raycast_grid, surface_points};
+pub use body::{
+    Body, BodyId, GridRayHit, MassProps, VoxelGrid, mass_props, raycast_grid, surface_points,
+};
 pub use body_destruction::{
     carve_body_capsule_at, carve_body_explosion_at, carve_body_sphere_at,
     carve_body_sphere_at_impact, carve_body_voxel_at, split_components,

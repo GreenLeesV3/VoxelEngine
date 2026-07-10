@@ -48,6 +48,7 @@ jitter = 0.05
 density = 700.0
 strength = 4.0
 flammable = true
+
 [[material]]
 name = "leaves"
 color = [0.28, 0.48, 0.22]

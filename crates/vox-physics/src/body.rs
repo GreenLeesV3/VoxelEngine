@@ -483,14 +483,8 @@ mod tests {
     #[test]
     fn raycast_grid_hits_the_near_face() {
         let grid = solid_grid(IVec3::splat(4));
-        let hit = raycast_grid(
-            &grid,
-            Vec3::new(-1.0, 0.2, 0.2),
-            Vec3::X,
-            5.0,
-            0.1,
-        )
-        .expect("must hit the near face");
+        let hit = raycast_grid(&grid, Vec3::new(-1.0, 0.2, 0.2), Vec3::X, 5.0, 0.1)
+            .expect("must hit the near face");
         assert_eq!(hit.voxel, IVec3::new(0, 2, 2));
         assert!((hit.dist_m - 1.0).abs() < 1e-4, "got {}", hit.dist_m);
     }

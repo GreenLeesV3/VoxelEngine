@@ -5,14 +5,13 @@
 //! face) so stacks converge across frames; settled bodies sleep at ~zero
 //! cost until an impulse or a nearby world edit wakes them.
 
-
 use glam::{Quat, Vec3};
-use vox_core::{FxHashMap, Tunables};
 use vox_core::consts::{
     CLUTTER_LIFETIME_MAX_S, CLUTTER_LIFETIME_MIN_S, CLUTTER_MAX_VOXELS, CONTACT_SLOP, GRAVITY,
     SLEEP_FRAMES, SOLVER_ITERS, SUBSTEPS,
 };
-use vox_world::{Voxel, World};
+use vox_core::{FxHashMap, Tunables};
+use vox_world::{SolidLookup, Voxel, World};
 
 use crate::body::{Body, BodyId};
 use crate::broadphase::Broadphase;
@@ -459,8 +458,9 @@ impl PhysicsWorld {
             body.inv_iw = body.inv_inertia_world();
         }
 
-        // Integrate velocities and collect contacts.
+        let mut lookup = SolidLookup::new(world);
         let mut contacts: Vec<Contact> = Vec::new();
+        // Integrate velocities and collect contacts.
         for (slot, entry) in self.slots.iter_mut().enumerate() {
             let Some(body) = entry else { continue };
             if body.sleep.asleep {
@@ -481,9 +481,7 @@ impl PhysicsWorld {
                 if let Some(wv) = self.water_voxel {
                     if world.get_voxel(bottom_vox) == wv {
                         let body_height = (body.aabb_max.y - body.aabb_min.y).max(1e-6);
-                        let submerge_depth = body_height.min(
-                            body.aabb_max.y - bottom.y + s
-                        );
+                        let submerge_depth = body_height.min(body.aabb_max.y - bottom.y + s);
                         let fraction = (submerge_depth / body_height).clamp(0.0, 1.0);
                         let dims = body.grid.dims;
                         let volume = (dims.x * dims.y * dims.z) as f32 * s * s * s;
@@ -506,7 +504,7 @@ impl PhysicsWorld {
                 body.omega = body.omega.normalize() * MAX_ANGULAR_SPEED_RAD_S;
             }
             debug_assert!(body.vel.is_finite() && body.pos.is_finite());
-            world_contacts(body, slot, world, &mut contacts);
+            world_contacts(body, slot, &mut contacts, &mut lookup);
         }
 
         // Body-body narrowphase over broadphase candidates. One staging
@@ -891,13 +889,19 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_impact, "a body falling 6 m onto stone must report an impact");
+        assert!(
+            saw_impact,
+            "a body falling 6 m onto stone must report an impact"
+        );
         assert!(max_impulse > 0.0);
 
         // Once settled and asleep, further steps must be quiet -- no
         // spurious impacts from steady resting contact.
         let quiet = phys.step(&world, PHYSICS_DT);
-        assert!(quiet.is_empty(), "resting body must not report an impact: {quiet:?}");
+        assert!(
+            quiet.is_empty(),
+            "resting body must not report an impact: {quiet:?}"
+        );
     }
 
     #[test]
@@ -1114,7 +1118,10 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_landing, "a body falling 6 m onto stone must report an impact");
+        assert!(
+            saw_landing,
+            "a body falling 6 m onto stone must report an impact"
+        );
         assert!(
             !saw_impact_after_landing,
             "settling under steady contact must not keep reporting fresh impacts"
@@ -1159,7 +1166,10 @@ mod tests {
                 break;
             }
         }
-        assert!(slept, "a small chip must eventually settle and sleep, not spin forever");
+        assert!(
+            slept,
+            "a small chip must eventually settle and sleep, not spin forever"
+        );
     }
 
     /// A small chip already on the ground, spun hard around the vertical
@@ -1235,7 +1245,10 @@ mod tests {
         for _ in 0..300 {
             phys.step(&world, PHYSICS_DT);
         }
-        assert!(phys.get(big).unwrap().sleep.asleep, "big cube must settle first");
+        assert!(
+            phys.get(big).unwrap().sleep.asleep,
+            "big cube must settle first"
+        );
         let rest_pos = phys.get(big).unwrap().pos;
 
         let corner = rest_pos - Vec3::new(0.95, 0.95, 0.95);
@@ -1303,7 +1316,10 @@ mod tests {
         // Push it past even the longest possible lifetime.
         let expired = phys.tick_lifetimes(CLUTTER_LIFETIME_MAX_S + 1.0);
         assert_eq!(expired, vec![clutter_id]);
-        assert!(phys.get(clutter_id).is_none(), "expired clutter must be despawned");
+        assert!(
+            phys.get(clutter_id).is_none(),
+            "expired clutter must be despawned"
+        );
         assert!(
             phys.get(permanent_id).is_some(),
             "an untimed body must survive any number of ticks"

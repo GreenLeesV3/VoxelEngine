@@ -443,7 +443,8 @@ pub fn detach_unsupported(
             if visited.contains(&seed) || !lookup.present(seed) {
                 continue;
             }
-            if let FloodResult::Bounded(component) = flood_from(world, &mut lookup, seed, &mut visited)
+            if let FloodResult::Bounded(component) =
+                flood_from(world, &mut lookup, seed, &mut visited)
             {
                 components.push(component);
             }
@@ -633,8 +634,8 @@ fn spawn_debris_chips(
         let offset = chip_center_m - center_m;
         let dist = offset.length();
         let dir = if dist > 1e-6 { offset / dist } else { Vec3::Y };
-        let speed =
-            (power * DEBRIS_CHIP_SPEED_SCALE / dist.max(BLAST_MIN_DIST_M)).min(DEBRIS_CHIP_MAX_SPEED_M_S);
+        let speed = (power * DEBRIS_CHIP_SPEED_SCALE / dist.max(BLAST_MIN_DIST_M))
+            .min(DEBRIS_CHIP_MAX_SPEED_M_S);
         body.vel = dir * speed;
 
         let h2 = small_hash(h, i as u32);
@@ -675,7 +676,13 @@ pub fn blast(
 
     let s = world.cfg.voxel_size_m;
     ids.extend(spawn_debris_chips(
-        phys, registry, &carve.removed, s, center_m, power, seed,
+        phys,
+        registry,
+        &carve.removed,
+        s,
+        center_m,
+        power,
+        seed,
     ));
 
     phys.wake_region(carve.region.0.as_vec3() * s, carve.region.1.as_vec3() * s);
@@ -843,7 +850,11 @@ mod tests {
         assert_eq!(ids.len(), 1, "the 100,000-voxel block must detach");
         let body = phys.get(ids[0]).expect("alive");
         assert_eq!(body.grid.solid_count(), 100_000);
-        assert_eq!(world.get_voxel(IVec3::new(5, 5, 5)), STONE, "floor untouched");
+        assert_eq!(
+            world.get_voxel(IVec3::new(5, 5, 5)),
+            STONE,
+            "floor untouched"
+        );
     }
 
     #[test]
@@ -872,7 +883,11 @@ mod tests {
 
         assert_eq!(ids.len(), 1, "the severed trunk top must detach");
         let body = phys.get(ids[0]).expect("alive");
-        assert_eq!(body.grid.solid_count(), 33 - 13, "must capture the full top");
+        assert_eq!(
+            body.grid.solid_count(),
+            33 - 13,
+            "must capture the full top"
+        );
         // The huge terrain slab must be completely untouched.
         assert_eq!(world.get_voxel(IVec3::new(10, 1, 10)), STONE);
         assert_eq!(world.get_voxel(IVec3::new(90, 1, 90)), STONE);
@@ -931,8 +946,16 @@ mod tests {
 
         assert!(carve.removed.len() > 20, "must carve a real tunnel");
         // The tunnel must reach clean through both faces of the wall.
-        assert_eq!(world.get_voxel(IVec3::new(31, 12, 40)), AIR, "near face open");
-        assert_eq!(world.get_voxel(IVec3::new(66, 12, 40)), AIR, "far face open");
+        assert_eq!(
+            world.get_voxel(IVec3::new(31, 12, 40)),
+            AIR,
+            "near face open"
+        );
+        assert_eq!(
+            world.get_voxel(IVec3::new(66, 12, 40)),
+            AIR,
+            "far face open"
+        );
         // Material well above and below the tunnel survives.
         assert_eq!(world.get_voxel(IVec3::new(31, 35, 40)), STONE);
         assert_eq!(world.get_voxel(IVec3::new(31, 4, 40)), STONE);
@@ -1096,7 +1119,10 @@ mod tests {
             .removed
             .iter()
             .any(|&(v, _)| (voxel_center_m(v, 1.0) - center).length() > radius + 0.5);
-        assert!(reaches_past_radius, "spikes must extend past the base crater");
+        assert!(
+            reaches_past_radius,
+            "spikes must extend past the base crater"
+        );
     }
 
     /// Same center, radius, and seed must carve an identical shape every
@@ -1223,7 +1249,15 @@ mod tests {
         let reg = registry();
         let mut phys = PhysicsWorld::new();
 
-        let carve = blast(&mut world, &mut phys, &reg, Vec3::new(10.0, 10.0, 10.0), 3.0, 40.0, 5);
+        let carve = blast(
+            &mut world,
+            &mut phys,
+            &reg,
+            Vec3::new(10.0, 10.0, 10.0),
+            3.0,
+            40.0,
+            5,
+        );
 
         assert!(!carve.removed.is_empty(), "must carve something");
         assert!(
@@ -1232,7 +1266,11 @@ mod tests {
              chips, not just vanish into air"
         );
         for (_, body) in phys.iter() {
-            assert_eq!(body.grid.solid_count(), 3, "each chip is a small L-shaped triomino");
+            assert_eq!(
+                body.grid.solid_count(),
+                3,
+                "each chip is a small L-shaped triomino"
+            );
             assert!(!body.sleep.asleep);
         }
     }

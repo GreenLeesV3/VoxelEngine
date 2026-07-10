@@ -72,13 +72,29 @@ fn ao(side1: bool, side2: bool, corner: bool) -> u8 {
     }
 }
 
-/// A meshable face cell: merged only with cells equal in both fields.
-#[derive(Copy, Clone, PartialEq, Eq)]
+/// A meshable face cell: merged only with cells equal in material AND all
+/// four corner AO values. Water depth is NOT part of the merge comparison
+/// (it varies across a surface over uneven terrain) — merged quads take
+/// the first cell's depth, which is less precise but keeps mesh density low.
+#[derive(Copy, Clone)]
 struct Cell {
     material: Voxel,
     /// Corner AO in (du, dv) order: `[ao00, ao10, ao01, ao11]`.
     ao4: [u8; 4],
+    /// Water column depth: how many voxels of the same material extend
+    /// downward from this face before a different material. 0 for
+    /// non-water materials. Used by the shader for depth-based water
+    /// darkening (stored in the jitter field for water faces).
+    water_depth: u8,
 }
+
+impl PartialEq for Cell {
+    fn eq(&self, other: &Self) -> bool {
+        self.material == other.material && self.ao4 == other.ao4
+    }
+}
+
+impl Eq for Cell {}
 
 /// Deterministic per-vertex jitter hash, baked into the mesh once here
 /// rather than recomputed from world position in the shader every frame.
@@ -100,8 +116,7 @@ struct Cell {
 #[inline]
 fn jitter_hash(seed: IVec3, local: [u8; 3]) -> u8 {
     let p = seed + IVec3::new(local[0] as i32, local[1] as i32, local[2] as i32);
-    let mut x = (p.x as u32)
-        .wrapping_mul(0x8529_7a4d)
+    let mut x = (p.x as u32).wrapping_mul(0x8529_7a4d)
         ^ (p.y as u32).wrapping_mul(0x68e3_1da4)
         ^ (p.z as u32).wrapping_mul(0x1b56_c4e9);
     x ^= x >> 15;
@@ -115,7 +130,7 @@ fn jitter_hash(seed: IVec3, local: [u8; 3]) -> u8 {
 /// Greedy-mesh a slab into quads. `jitter_seed` anchors the baked per-vertex
 /// jitter pattern (see `jitter_hash`) -- pass a chunk's world origin for
 /// chunks, `IVec3::ZERO` for a body's own local mesh.
-pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3) -> MeshData {
+pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3, water_voxel: Voxel) -> MeshData {
     let mut mesh = MeshData::default();
     let dims = slab.inner_dims;
 
@@ -144,7 +159,10 @@ pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3) -> MeshData {
                     p[axis] = slice;
                     p[u_axis] = u;
                     p[v_axis] = v;
-                    let cell = if slab.solid(p) && !slab.solid(p + normal) {
+                    let is_water = slab.get(p) == vox_world::Voxel(9);
+                    let cell = if (slab.opaque(p) && !slab.opaque(p + normal))
+                        || (is_water && !slab.solid(p + normal))
+                    {
                         let outer = p + normal;
                         let mut ao4 = [0u8; 4];
                         for (i, (cu, cv)) in
@@ -153,14 +171,33 @@ pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3) -> MeshData {
                             let u_off = if cu == 0 { -u_dir } else { u_dir };
                             let v_off = if cv == 0 { -v_dir } else { v_dir };
                             ao4[i] = ao(
-                                slab.solid(outer + u_off),
-                                slab.solid(outer + v_off),
-                                slab.solid(outer + u_off + v_off),
+                                slab.opaque(outer + u_off),
+                                slab.opaque(outer + v_off),
+                                slab.opaque(outer + u_off + v_off),
                             );
                         }
+                        // Compute water column depth: for water faces,
+                        // count same-material voxels below (Y down) until
+                        // a different material or out of bounds. This is
+                        // baked into the jitter field for the shader's
+                        // depth-based darkening.
+                        let mat = slab.get(p);
+                        let mut depth: u8 = 0;
+                        if mat == water_voxel {
+                            // Start at 1: the face voxel itself is one
+                            // layer of water. Then count additional
+                            // water voxels below.
+                            depth = 1;
+                            let mut below = p - IVec3::Y;
+                            while below.y >= 0 && slab.get(below) == mat {
+                                depth = depth.saturating_add(1);
+                                below -= IVec3::Y;
+                            }
+                        }
                         Some(Cell {
-                            material: slab.get(p),
+                            material: mat,
                             ao4,
+                            water_depth: depth,
                         })
                     } else {
                         None
@@ -193,8 +230,20 @@ pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3) -> MeshData {
                         h += 1;
                     }
                     emit_quad(
-                        &mut mesh, cell, normal_id, axis, sign, slice, u_axis, v_axis, u0, v0, w, h,
+                        &mut mesh,
+                        cell,
+                        normal_id,
+                        axis,
+                        sign,
+                        slice,
+                        u_axis,
+                        v_axis,
+                        u0,
+                        v0,
+                        w,
+                        h,
                         jitter_seed,
+                        water_voxel,
                     );
                     for vv in v0..v0 + h {
                         for uu in u0..u0 + w {
@@ -225,6 +274,7 @@ fn emit_quad(
     w: i32,
     h: i32,
     jitter_seed: IVec3,
+    water_voxel: Voxel,
 ) {
     // Corner positions on the face plane, in (du, dv) order 00, 10, 01, 11.
     let plane = if sign > 0 { slice + 1 } else { slice };
@@ -244,7 +294,11 @@ fn emit_quad(
             pos,
             ao: cell.ao4[i],
             normal: normal_id,
-            jitter: jitter_hash(jitter_seed, pos),
+            jitter: if cell.material == water_voxel {
+                cell.water_depth
+            } else {
+                jitter_hash(jitter_seed, pos)
+            },
             material: cell.material.0,
         });
     }
@@ -311,7 +365,7 @@ mod tests {
     #[test]
     fn empty_slab_zero_quads() {
         let slab = slab_of(IVec3::splat(4), &[]);
-        let mesh = mesh_slab(&slab, IVec3::ZERO);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
         assert_eq!(mesh.quads(), 0);
         assert!(mesh.is_empty());
     }
@@ -319,7 +373,7 @@ mod tests {
     #[test]
     fn single_voxel_six_quads() {
         let slab = slab_of(IVec3::splat(3), &[(IVec3::splat(1), STONE)]);
-        let mesh = mesh_slab(&slab, IVec3::ZERO);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
         assert_eq!(mesh.quads(), 6);
         assert_eq!(mesh.indices.len(), 36);
     }
@@ -345,19 +399,25 @@ mod tests {
                 (IVec3::new(1, 2, 1), STONE),
             ],
         );
-        let mesh_a = mesh_slab(&slab, IVec3::new(7, -3, 42));
-        let mesh_b = mesh_slab(&slab, IVec3::new(7, -3, 42));
+        let mesh_a = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0));
+        let mesh_b = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0));
         let jitter_a: Vec<u8> = mesh_a.vertices.iter().map(|v| v.jitter).collect();
         let jitter_b: Vec<u8> = mesh_b.vertices.iter().map(|v| v.jitter).collect();
-        assert_eq!(jitter_a, jitter_b, "same geometry + same seed must match exactly");
+        assert_eq!(
+            jitter_a, jitter_b,
+            "same geometry + same seed must match exactly"
+        );
 
         // A body (seed always zero) meshed twice must also match, and a
         // *different* seed (a different chunk's origin) must generally
         // produce a different pattern -- confirming the seed actually
         // participates, not just the local position.
-        let mesh_c = mesh_slab(&slab, IVec3::ZERO);
+        let mesh_c = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
         let jitter_c: Vec<u8> = mesh_c.vertices.iter().map(|v| v.jitter).collect();
-        assert_ne!(jitter_a, jitter_c, "different seeds should not collide onto the same pattern");
+        assert_ne!(
+            jitter_a, jitter_c,
+            "different seeds should not collide onto the same pattern"
+        );
     }
 
     #[test]
@@ -366,7 +426,7 @@ mod tests {
             IVec3::new(2, 1, 1),
             &[(IVec3::new(0, 0, 0), STONE), (IVec3::new(1, 0, 0), STONE)],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
         assert_eq!(mesh.quads(), 6, "coplanar same-material faces must merge");
     }
 
@@ -376,7 +436,7 @@ mod tests {
             IVec3::new(2, 1, 1),
             &[(IVec3::new(0, 0, 0), STONE), (IVec3::new(1, 0, 0), DIRT)],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
         // 2 end caps + 4 long sides split in two each = 2 + 8 = 10.
         assert_eq!(mesh.quads(), 10);
     }
@@ -393,7 +453,7 @@ mod tests {
             }
         }
         let slab = slab_of(dims, &solids);
-        let mesh = mesh_slab(&slab, IVec3::ZERO);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
         assert_eq!(mesh.quads(), 6, "each full face merges into one quad");
         // Corner coordinates must span the whole region.
         let max = mesh.vertices.iter().map(|v| v.pos[0]).max().unwrap();
@@ -418,7 +478,7 @@ mod tests {
                 }
             }
             let slab = slab_of(dims, &solids);
-            let mesh = mesh_slab(&slab, IVec3::ZERO);
+            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
 
             // Brute-force expected exposed faces.
             let mut expected: HashSet<(IVec3, u8)> = HashSet::new();
@@ -488,7 +548,7 @@ mod tests {
             }
         }
         let slab = slab_of(dims, &solids);
-        let mesh = mesh_slab(&slab, IVec3::ZERO);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
         assert!(!mesh.is_empty());
 
         for tri in mesh.indices.chunks_exact(3) {
@@ -521,7 +581,7 @@ mod tests {
                 (IVec3::new(0, 1, 0), STONE), // wall on top of (0,0,0)
             ],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0));
 
         // Top faces (+Y, normal id 2) of the floor at y=1 (excluding the wall
         // voxel's own top at y=2).

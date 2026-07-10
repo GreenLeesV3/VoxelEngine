@@ -2,3 +2,23 @@
 **/*.rs.bk
 *.pdb
 /.worktrees
+
+# SM64 ROM — user-provided, never committed (copyrighted content)
+*.z64
+*.n64
+*.v64
+roms/*.z64
+roms/*.n64
+roms/*.v64
+"Super Mario 64 (USA)/"
+
+# Weapon assets — local prototyping only, never committed
+assets/weapons/*.glb
+assets/weapons/*.gltf
+assets/weapons/*.fbx
+assets/weapons/*.blend
+assets/weapons/*.obj
+assets/weapons/*.mdl
+assets/weapons/*.png
+assets/weapons/*.jpg
+assets/models/

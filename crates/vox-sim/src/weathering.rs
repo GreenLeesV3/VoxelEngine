@@ -53,7 +53,11 @@ pub struct Weathering {
 
 impl Weathering {
     pub fn new(table: WeatherTable) -> Self {
-        Self { table, soaking: FxHashMap::default(), drying: FxHashMap::default() }
+        Self {
+            table,
+            soaking: FxHashMap::default(),
+            drying: FxHashMap::default(),
+        }
     }
 
     /// Debug/test stats.
@@ -121,10 +125,17 @@ impl Weathering {
                 return false;
             };
             // Water gone -> the soak dries up without converting.
-            if !NEIGHBORS_6.iter().any(|&n| world.get_voxel(pos + n) == t.water) {
+            if !NEIGHBORS_6
+                .iter()
+                .any(|&n| world.get_voxel(pos + n) == t.water)
+            {
                 return false;
             }
-            *ticks += if v == t.stone && fell_this_tick.contains(&pos) { STONE_FALL_BOOST } else { 1 };
+            *ticks += if v == t.stone && fell_this_tick.contains(&pos) {
+                STONE_FALL_BOOST
+            } else {
+                1
+            };
             if *ticks >= threshold {
                 converted.push((pos, v));
                 return false;
@@ -154,7 +165,10 @@ impl Weathering {
             if world.get_voxel(pos) != t.mud {
                 return false;
             }
-            if NEIGHBORS_6.iter().any(|&n| world.get_voxel(pos + n) == t.water) {
+            if NEIGHBORS_6
+                .iter()
+                .any(|&n| world.get_voxel(pos + n) == t.water)
+            {
                 return false; // wet again
             }
             *ticks += 1;
@@ -185,7 +199,14 @@ mod tests {
     const SAND: Voxel = Voxel(6);
 
     fn table() -> WeatherTable {
-        WeatherTable { water: WATER, stone: STONE, grass: GRASS, dirt: DIRT, mud: MUD, sand: SAND }
+        WeatherTable {
+            water: WATER,
+            stone: STONE,
+            grass: GRASS,
+            dirt: DIRT,
+            mud: MUD,
+            sand: SAND,
+        }
     }
 
     fn world_with_floor(top: Voxel) -> World {
@@ -215,8 +236,16 @@ mod tests {
             assert_eq!(world.get_voxel(cell), GRASS, "must not convert early");
         }
         weathering.tick(&mut world, &[]);
-        assert_eq!(world.get_voxel(cell), DIRT, "grass must die to dirt at the soak threshold");
-        assert_eq!(weathering.soaking_count(), 1, "the fresh dirt re-registers and keeps soaking");
+        assert_eq!(
+            world.get_voxel(cell),
+            DIRT,
+            "grass must die to dirt at the soak threshold"
+        );
+        assert_eq!(
+            weathering.soaking_count(),
+            1,
+            "the fresh dirt re-registers and keeps soaking"
+        );
     }
 
     #[test]
@@ -240,7 +269,11 @@ mod tests {
         let cell = IVec3::new(8, 4, 8);
         world.set_voxel(cell + IVec3::Y, WATER);
         weathering.tick(&mut world, &[ContactEvent::Settled(cell + IVec3::Y)]);
-        assert_eq!(weathering.soaking_count(), 0, "still water must not register stone");
+        assert_eq!(
+            weathering.soaking_count(),
+            0,
+            "still water must not register stone"
+        );
 
         // Flowing: erodes at STONE_ERODE_TICKS.
         let mut ticks_flowing = 0;
@@ -248,7 +281,10 @@ mod tests {
         while world.get_voxel(cell) == STONE {
             weathering.tick(&mut world, &[]);
             ticks_flowing += 1;
-            assert!(ticks_flowing <= STONE_ERODE_TICKS + 2, "flowing erosion must finish near its threshold");
+            assert!(
+                ticks_flowing <= STONE_ERODE_TICKS + 2,
+                "flowing erosion must finish near its threshold"
+            );
         }
         assert_eq!(world.get_voxel(cell), SAND);
 
@@ -265,9 +301,15 @@ mod tests {
         while world.get_voxel(cell) == STONE {
             weathering.tick(&mut world, &[ContactEvent::Fell(cell + IVec3::Y)]);
             ticks_falling += 1;
-            assert!(ticks_falling <= STONE_ERODE_TICKS / STONE_FALL_BOOST + 2, "continuous waterfall erosion must be ~5x faster");
+            assert!(
+                ticks_falling <= STONE_ERODE_TICKS / STONE_FALL_BOOST + 2,
+                "continuous waterfall erosion must be ~5x faster"
+            );
         }
-        assert!(ticks_falling < ticks_flowing / 3, "falling ({ticks_falling}) must be much faster than flowing ({ticks_flowing})");
+        assert!(
+            ticks_falling < ticks_flowing / 3,
+            "falling ({ticks_falling}) must be much faster than flowing ({ticks_flowing})"
+        );
     }
 
     #[test]
@@ -280,7 +322,11 @@ mod tests {
         assert_eq!(weathering.soaking_count(), 1);
         world.set_voxel(cell + IVec3::Y, AIR); // water gone before the threshold
         weathering.tick(&mut world, &[]);
-        assert_eq!(weathering.soaking_count(), 0, "no adjacent water -> entry removed");
+        assert_eq!(
+            weathering.soaking_count(),
+            0,
+            "no adjacent water -> entry removed"
+        );
         assert_eq!(world.get_voxel(cell), GRASS, "and the grass survives");
     }
 
@@ -300,15 +346,22 @@ mod tests {
 
         // One Fell registers the stone; thereafter only Settled (still water).
         weathering.tick(&mut world, &[ContactEvent::Fell(above)]);
-        assert_eq!(weathering.soaking_count(), 1, "Fell must register the stone");
+        assert_eq!(
+            weathering.soaking_count(),
+            1,
+            "Fell must register the stone"
+        );
 
         // Run under still water up to just past the boosted threshold. If the
         // boost were sticky, stone would erode by ~90 ticks. At the 1x rate
         // it must still be stone well past 90.
         for _ in 0..(STONE_ERODE_TICKS / STONE_FALL_BOOST + 10) {
             weathering.tick(&mut world, &[ContactEvent::Settled(above)]);
-            assert_eq!(world.get_voxel(cell), STONE,
-                "stone must not erode at the 5x rate once water has settled");
+            assert_eq!(
+                world.get_voxel(cell),
+                STONE,
+                "stone must not erode at the 5x rate once water has settled"
+            );
         }
         // ...but it must still erode at the normal 1x rate eventually, since
         // the entry persists (adjacency continuation is by design).
@@ -316,13 +369,18 @@ mod tests {
         while world.get_voxel(cell) == STONE {
             weathering.tick(&mut world, &[ContactEvent::Settled(above)]);
             ticks += 1;
-            assert!(ticks < STONE_ERODE_TICKS, "must erode near the normal threshold, not never");
+            assert!(
+                ticks < STONE_ERODE_TICKS,
+                "must erode near the normal threshold, not never"
+            );
         }
         assert_eq!(world.get_voxel(cell), SAND);
         // Total ticks (excluding the seed) is close to STONE_ERODE_TICKS, the
         // 1x rate -- NOT STONE_ERODE_TICKS / 5.
-        assert!(ticks > STONE_ERODE_TICKS / 2,
-            "settled-water erosion must run at ~1x, not the 5x waterfall rate: {ticks}");
+        assert!(
+            ticks > STONE_ERODE_TICKS / 2,
+            "settled-water erosion must run at ~1x, not the 5x waterfall rate: {ticks}"
+        );
     }
 
     #[test]
@@ -335,7 +393,11 @@ mod tests {
 
         // Wet mud is untracked and stable.
         weathering.tick(&mut world, &[ContactEvent::Settled(above)]);
-        assert_eq!(weathering.drying_count(), 0, "wet mud must not be on the drying clock");
+        assert_eq!(
+            weathering.drying_count(),
+            0,
+            "wet mud must not be on the drying clock"
+        );
 
         // Water leaves -> drying starts.
         world.set_voxel(above, AIR);
@@ -346,7 +408,11 @@ mod tests {
             assert_eq!(world.get_voxel(cell), MUD, "must not dry early");
         }
         weathering.tick(&mut world, &[]);
-        assert_eq!(world.get_voxel(cell), DIRT, "dry mud must firm back to dirt");
+        assert_eq!(
+            world.get_voxel(cell),
+            DIRT,
+            "dry mud must firm back to dirt"
+        );
         assert_eq!(weathering.drying_count(), 0);
     }
 
@@ -363,7 +429,11 @@ mod tests {
         }
         world.set_voxel(above, WATER); // water returns halfway
         weathering.tick(&mut world, &[ContactEvent::Fell(above)]);
-        assert_eq!(weathering.drying_count(), 0, "re-wetted mud must leave the drying clock");
+        assert_eq!(
+            weathering.drying_count(),
+            0,
+            "re-wetted mud must leave the drying clock"
+        );
         assert_eq!(world.get_voxel(cell), MUD, "and stays mud");
     }
 
@@ -383,13 +453,24 @@ mod tests {
             for (min, max) in world.drain_dirty_regions() {
                 sim.wake_region(&world, min, max);
             }
-            if sim.active_count() == 0 && weathering.soaking_count() == 0 && weathering.drying_count() == 0 {
+            if sim.active_count() == 0
+                && weathering.soaking_count() == 0
+                && weathering.drying_count() == 0
+            {
                 break;
             }
         }
         assert_eq!(sim.active_count(), 0, "water must sleep");
-        assert_eq!(weathering.soaking_count(), 0, "soak map must drain to empty");
-        assert_eq!(weathering.drying_count(), 0, "drying map must drain to empty");
+        assert_eq!(
+            weathering.soaking_count(),
+            0,
+            "soak map must drain to empty"
+        );
+        assert_eq!(
+            weathering.drying_count(),
+            0,
+            "drying map must drain to empty"
+        );
         // And the ground under the pool actually transformed.
         let mut mud_count = 0;
         let (min, max) = world.bounds_voxels();

@@ -35,7 +35,11 @@ pub fn build(ctx: &Context, state: &HudState<'_>) {
 fn crosshair(ctx: &Context) {
     let center = ctx.screen_rect().center();
     let painter = ctx.layer_painter(egui::LayerId::background());
-    painter.circle_filled(center, 2.5, Color32::from_rgba_unmultiplied(255, 255, 255, 220));
+    painter.circle_filled(
+        center,
+        2.5,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 220),
+    );
     painter.circle_stroke(
         center,
         2.5,

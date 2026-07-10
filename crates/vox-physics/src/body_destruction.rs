@@ -13,8 +13,8 @@
 use std::collections::VecDeque;
 
 use glam::{IVec3, Quat, Vec3};
-use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
 use vox_core::MaterialRegistry;
+use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
 use vox_world::{AIR, Voxel};
 
 use vox_core::voxel_center_m;
@@ -151,8 +151,12 @@ pub fn carve_body_capsule(
     let seg = end_local_m - start_local_m;
     let seg_len_sq = seg.length_squared();
     let pad = Vec3::splat(radius_m);
-    let min = ((start_local_m.min(end_local_m) - pad) / s).floor().as_ivec3();
-    let max = ((start_local_m.max(end_local_m) + pad) / s).ceil().as_ivec3();
+    let min = ((start_local_m.min(end_local_m) - pad) / s)
+        .floor()
+        .as_ivec3();
+    let max = ((start_local_m.max(end_local_m) + pad) / s)
+        .ceil()
+        .as_ivec3();
     edit_grid_box(grid, min, max, |p, cur| {
         if cur == AIR {
             return None;
@@ -268,7 +272,8 @@ fn finish_carve(
             continue;
         }
         let sub_com_world = parent.pos
-            + parent.rot * (sub_min.as_vec3() * voxel_size_m + parent.grid_offset + props.com_local);
+            + parent.rot
+                * (sub_min.as_vec3() * voxel_size_m + parent.grid_offset + props.com_local);
         if let Some(mut body) = Body::from_grid(sub_grid, registry, voxel_size_m, sub_com_world) {
             body.rot = parent.rot;
             body.prev_rot = parent.rot;
@@ -633,9 +638,16 @@ mod tests {
         let spawned = carve_body_sphere_at(&mut phys, &reg, id, corner_world, 0.6);
 
         assert!(phys.get(id).is_none());
-        assert_eq!(spawned.len(), 1, "chipping a corner must not split the cube");
+        assert_eq!(
+            spawned.len(),
+            1,
+            "chipping a corner must not split the cube"
+        );
         let f = phys.get(spawned[0]).unwrap();
-        assert!(f.grid.solid_count() < 6 * 6 * 6, "must have lost some voxels");
+        assert!(
+            f.grid.solid_count() < 6 * 6 * 6,
+            "must have lost some voxels"
+        );
     }
 
     #[test]
@@ -684,7 +696,11 @@ mod tests {
         let spawned = carve_body_capsule_at(&mut phys, &reg, id, start, end, 0.15);
 
         assert!(phys.get(id).is_none(), "the original body must be gone");
-        assert_eq!(spawned.len(), 1, "hollowing the core must not split the tube");
+        assert_eq!(
+            spawned.len(),
+            1,
+            "hollowing the core must not split the tube"
+        );
         let remaining = phys.get(spawned[0]).unwrap().grid.solid_count();
         assert!(
             remaining < original_count,

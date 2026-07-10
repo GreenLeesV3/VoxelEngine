@@ -17,6 +17,7 @@ vox-physics = { path = "crates/vox-physics" }
 vox-sim = { path = "crates/vox-sim" }
 vox-render = { path = "crates/vox-render" }
 vox-platform = { path = "crates/vox-platform" }
+vox-sm64 = { path = "crates/vox-sm64" }
 vox-debug = { path = "crates/vox-debug" }
 
 wgpu = { version = "0.20.1", features = ["wgsl"] }
