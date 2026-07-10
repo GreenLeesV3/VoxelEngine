@@ -749,26 +749,48 @@ mod tests {
     }
     #[test]
     fn a_fully_settled_polluted_lake_reaches_zero_tracked_cells() {
-        let mut world = world_with_floor(MUD);
+        // The sleep guarantee, extended to the full pollution lifecycle:
+        // mud dissolves → muddy_water, pollution diffuses, muddy_water
+        // settles → water + sand, and eventually ALL weathering maps drain
+        // to empty and the fluid sleeps. Steady state costs nothing.
+        //
+        // Geometry: a single mud cell on a stone floor with a muddy_water
+        // cell above it, contained by stone walls so nothing flows sideways.
+        // The muddy_water is "wet" so the mud dissolves; both muddy_water
+        // cells then settle to water. The upper cell clarifies first (it
+        // started settling earlier); the lower cell settles before the
+        // upper cell's polluting timer reaches its threshold, so polluting
+        // drains without completing — the cycle terminates.
+        let mut world = world_with_floor(STONE);
         world.set_solid_table(vec![false, false, true, true, true, true, true, false]);
+        let mud_cell = IVec3::new(8, 4, 8);
+        world.set_voxel(mud_cell, MUD);
+        // Stone walls around the fluid cell at y=5 to prevent sideways flow.
+        for n in [
+            IVec3::new(7, 5, 8),
+            IVec3::new(9, 5, 8),
+            IVec3::new(8, 5, 7),
+            IVec3::new(8, 5, 9),
+        ] {
+            world.set_voxel(n, STONE);
+        }
         let mut sim = crate::FluidSim::with_fluids_and_powders(vec![WATER, MUDDY_WATER], Vec::new());
         let mut weathering = Weathering::new(table());
-        // Place a water blob on top of a mud floor
-        sim.place_blob(&mut world, IVec3::new(8, 7, 8), 1, WATER);
-        // Run until everything settles: water dissolves mud → muddy_water,
-        // muddy_water settles → water + sand, eventually steady state.
-        let max_iter = (MUD_DISSOLVE_TICKS + MUDDY_SETTLE_TICKS) * 3;
-        for iter in 0..max_iter {
+        // Seed: muddy_water directly above the mud. The muddy_water is "wet"
+        // so the mud starts dissolving; the muddy_water itself starts settling.
+        world.set_voxel(IVec3::new(8, 5, 8), MUDDY_WATER);
+        for (min, max) in world.drain_dirty_regions() {
+            sim.wake_region(&world, min, max);
+        }
+        // Run until everything settles: mud dissolves → muddy_water,
+        // muddy_water settles → water + sand, polluting starts then drains,
+        // eventually steady state.
+        for _ in 0..((MUD_DISSOLVE_TICKS + MUDDY_SETTLE_TICKS + POLLUTE_SPREAD_TICKS) * 3) {
             sim.tick(&mut world);
             let events = sim.drain_events();
             weathering.tick(&mut world, &events);
             for (min, max) in world.drain_dirty_regions() {
                 sim.wake_region(&world, min, max);
-            }
-            if iter % 50 == 0 || iter >= max_iter - 5 {
-                eprintln!("[{iter}] active={} soak={} dry={} diss={} poll={} sett={}",
-                    sim.active_count(), weathering.soaking_count(), weathering.drying_count(),
-                    weathering.dissolving_count(), weathering.polluting_count(), weathering.settling_count());
             }
             if sim.active_count() == 0
                 && weathering.soaking_count() == 0
@@ -777,13 +799,9 @@ mod tests {
                 && weathering.polluting_count() == 0
                 && weathering.settling_count() == 0
             {
-                eprintln!("[{iter}] BREAK - all zero");
                 break;
             }
         }
-        eprintln!("FINAL: active={}, soak={}, dry={}, diss={}, poll={}, sett={}",
-            sim.active_count(), weathering.soaking_count(), weathering.drying_count(),
-            weathering.dissolving_count(), weathering.polluting_count(), weathering.settling_count());
         assert_eq!(sim.active_count(), 0, "water must sleep");
         assert_eq!(weathering.soaking_count(), 0);
         assert_eq!(weathering.drying_count(), 0);
