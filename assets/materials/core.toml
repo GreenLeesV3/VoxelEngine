@@ -17,7 +17,6 @@ color = [0.55, 0.55, 0.57]
 jitter = 0.04
 density = 2600.0
 strength = 8.0
-conductivity = 0.1
 
 [[material]]
 name = "dirt"

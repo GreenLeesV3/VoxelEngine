@@ -115,6 +115,30 @@ fn weather_table(registry: &MaterialRegistry) -> Option<vox_sim::WeatherTable> {
     })
 }
 
+/// Fire material table, or `None` (fire disabled) if any required material
+/// is missing from the asset set.
+fn fire_table(registry: &MaterialRegistry) -> Option<vox_sim::FireTable> {
+    let id = |name: &str| registry.id_by_name(name).map(|m| Voxel(m.0));
+    let wood = id("wood")?;
+    let leaves = id("leaves")?;
+    let planks = id("planks")?;
+    let grass = id("grass")?;
+    let ember = id("ember")?;
+    let flammable = vec![wood, leaves, planks, grass, ember];
+    Some(vox_sim::FireTable {
+        water: id("water")?,
+        ember,
+        char: id("char")?,
+        ash: id("ash")?,
+        dark_ash: id("dark_ash")?,
+        wood,
+        leaves,
+        planks,
+        grass,
+        flammable,
+    })
+}
+
 /// All materials the registry marks as powders, as `Voxel` ids. Empty if
 /// the asset set defines no powders -- the sim runs water-only. The sim
 /// handles each powder with `step_powder` (fall + diagonal slide, no
@@ -156,6 +180,9 @@ struct VoxApp {
     /// fed by the fluid tick's contact events. `None` when the asset set
     /// is missing a material weathering needs (see `weather_table`).
     weathering: Option<vox_sim::Weathering>,
+    /// Fire simulation: ember ignition, fire spread, consumption to char.
+    /// `None` when the asset set is missing a material fire needs.
+    fire: Option<vox_sim::FireSim>,
     /// Incrementing seed so repeated blasts get varied debris spin.
     blast_seed: u32,
     /// Incrementing seed so repeated impact-fracture chips get varied
@@ -328,6 +355,10 @@ impl VoxApp {
         if weathering.is_none() {
             tracing::info!("weathering disabled -- a required material is missing from the asset set");
         }
+        let fire = fire_table(&registry).map(vox_sim::FireSim::new);
+        if fire.is_none() {
+            tracing::info!("fire disabled -- a required material is missing from the asset set");
+        }
 
         let mut app = Self {
             window,
@@ -338,6 +369,7 @@ impl VoxApp {
             fluid: vox_sim::FluidSim::with_powders(water_material(&registry), powder_materials(&registry)),
             fluid_clock: vox_platform::FrameClock::new(vox_core::consts::FLUID_DT),
             weathering,
+            fire,
             registry,
             player: Player::new(Vec3::ZERO),
             camera: Camera::new(Vec3::ZERO),
@@ -1303,6 +1335,49 @@ impl App for VoxApp {
             if let Some(w) = &mut self.weathering {
                 let events = self.fluid.drain_events();
                 w.tick(&mut self.world, &events);
+            }
+        }
+
+        // Fire tick: spread, consume, emit smoke + detach burning structures.
+        if let Some(f) = &mut self.fire {
+            f.tick(&mut self.world);
+            let s = self.world.cfg.voxel_size_m;
+            let mut consumed_positions: Vec<IVec3> = Vec::new();
+            for ev in f.drain_events() {
+                match ev {
+                    vox_sim::FireEvent::Burning(pos, _) => {
+                        let mut center = vox_core::voxel_center_m(pos, s);
+                        center.y += s * 0.5;
+                        center.x += (pos.x as f32 * 0.37).fract() * s * 0.6 - s * 0.3;
+                        center.z += (pos.z as f32 * 0.61).fract() * s * 0.6 - s * 0.3;
+                        self.particles.burst(Burst {
+                            center,
+                            count: 1,
+                            color: [0.5, 0.5, 0.5],
+                            speed: 0.3,
+                            upward: 1.5,
+                            life: 2.0,
+                            size: 0.18,
+                            buoyant: true,
+                        });
+                    }
+                    vox_sim::FireEvent::Consumed(pos) => {
+                        consumed_positions.push(pos);
+                    }
+                    vox_sim::FireEvent::Extinguished(_) => {}
+                }
+            }
+            if !consumed_positions.is_empty() {
+                let spawned = vox_physics::detach_unsupported(
+                    &mut self.world,
+                    &mut self.phys,
+                    &self.registry,
+                    &consumed_positions,
+                );
+                for id in &spawned {
+                    self.upload_debris_mesh(*id);
+                    self.debris_order.push_back(*id);
+                }
             }
         }
 
