@@ -99,7 +99,7 @@ fn vs(v: VIn, inst: Inst) -> VOut {
 struct FOut {
     @location(0) color: vec4f,
     @location(1) normal: vec4f,  // world normal encoded to 0..1 for edge detection
-    @location(2) depth_out: vec4f, // linear depth for edge detection (R32Float)
+    @location(2) depth_out: vec4f, // linear depth for edge detection (Rgba16Float)
 };
 
 @fragment

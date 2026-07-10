@@ -15,7 +15,7 @@ struct Params {
 @group(0) @binding(3) var normal_tex: texture_2d<f32>;
 @group(0) @binding(4) var samp: sampler;
 
-// Sobel edge detection on depth (rendered to R32Float color texture).
+// Sobel edge detection on depth (rendered to Rgba16Float color texture).
 fn sobel_depth(uv: vec2f, ts: vec2f) -> f32 {
     let tl = textureSample(depth_tex, samp, uv + vec2f(-ts.x, -ts.y)).r;
     let tm = textureSample(depth_tex, samp, uv + vec2f(0.0,  -ts.y)).r;

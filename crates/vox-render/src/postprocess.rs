@@ -16,7 +16,7 @@ use crate::gpu::{DEPTH_FORMAT, Gpu};
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Offscreen texture format for the normal buffer.
 pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// Offscreen texture format for the linear depth copy (R32Float color
+/// Offscreen texture format for the linear depth copy (Rgba16Float color
 /// texture, used for edge detection — sampled as texture_2d<f32>).
 pub const DEPTH_COPY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
