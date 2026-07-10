@@ -50,7 +50,7 @@ use std::collections::BinaryHeap;
 
 use glam::{IVec3, Vec3};
 use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
-use vox_core::{FxHashSet, MaterialRegistry, voxel_at, voxel_center_m};
+use vox_core::{FxHashMap, MaterialRegistry, voxel_at, voxel_center_m};
 use vox_world::{AIR, SolidLookup, Voxel, World};
 
 use crate::BodyId;
@@ -406,11 +406,46 @@ enum FloodResult {
 /// a `Bounded` result still explores every reachable voxel regardless of
 /// order (there's nowhere left to go before the queue/heap empties either
 /// way) — only how fast an `Anchored` result is reached changes.
+/// Chunk-local bitset for flood-fill visited tracking (#77).
+/// Replaces FxHashSet<IVec3> with per-chunk 32³ bit arrays — O(1) bit
+/// test/set with far better cache locality than hash insert/probe.
+struct ChunkBitSet {
+    chunks: FxHashMap<IVec3, Box<[u8; 4096]>>,
+}
+
+impl ChunkBitSet {
+    fn new() -> Self {
+        Self { chunks: FxHashMap::default() }
+    }
+    #[inline]
+    fn pos_to_key(v: IVec3) -> (IVec3, usize) {
+        let chunk = IVec3::new(v.x.div_euclid(32), v.y.div_euclid(32), v.z.div_euclid(32));
+        let local = IVec3::new(v.x.rem_euclid(32), v.y.rem_euclid(32), v.z.rem_euclid(32));
+        let bit = (local.y as usize * 32 + local.z as usize) * 32 + local.x as usize;
+        (chunk, bit)
+    }
+    #[inline]
+    fn contains(&self, v: IVec3) -> bool {
+        let (chunk, bit) = Self::pos_to_key(v);
+        match self.chunks.get(&chunk) {
+            Some(bits) => (bits[bit >> 3] & (1 << (bit & 7))) != 0,
+            None => false,
+        }
+    }
+    #[inline]
+    fn insert(&mut self, v: IVec3) -> bool {
+        let (chunk, bit) = Self::pos_to_key(v);
+        let bits = self.chunks.entry(chunk).or_insert_with(|| Box::new([0u8; 4096]));
+        let mask = 1u8 << (bit & 7);
+        if (bits[bit >> 3] & mask) != 0 { false } else { bits[bit >> 3] |= mask; true }
+    }
+}
+
 fn flood_from(
     world: &World,
     lookup: &mut SolidLookup<'_>,
     start: IVec3,
-    visited: &mut FxHashSet<IVec3>,
+    visited: &mut ChunkBitSet,
 ) -> FloodResult {
     let floor_y = world.bounds_voxels().0.y;
     // Keyed by (distance-to-floor, x, y, z) -- IVec3 isn't Ord, so the voxel
@@ -456,7 +491,7 @@ pub fn detach_unsupported(
     registry: &MaterialRegistry,
     removed: &[IVec3],
 ) -> Vec<BodyId> {
-    let mut visited: FxHashSet<IVec3> = FxHashSet::default();
+    let mut visited = ChunkBitSet::new();
     let mut components: Vec<Vec<IVec3>> = Vec::new();
     // Shared across every seed in this call, not rebuilt per flood: most
     // seeds from the same edit land in the same handful of chunks, so the
@@ -465,7 +500,7 @@ pub fn detach_unsupported(
     for &r in removed {
         for d in DIRS {
             let seed = r + d;
-            if visited.contains(&seed) || !lookup.present(seed) {
+            if visited.contains(seed) || !lookup.present(seed) {
                 continue;
             }
             if let FloodResult::Bounded(component) = flood_from(world, &mut lookup, seed, &mut visited)
