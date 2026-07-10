@@ -28,6 +28,9 @@ pub const MUD_DRY_TICKS: u32 = 300; // ~20 s
 pub const MUD_DISSOLVE_TICKS: u32 = 60; // ~4 s
 /// Contact ticks before clean water adjacent to muddy_water becomes muddy.
 pub const POLLUTE_SPREAD_TICKS: u32 = 90; // ~6 s
+/// Settle ticks (continuously still, no moves) before muddy_water clarifies
+/// to clean water and deposits sand below.
+pub const MUDDY_SETTLE_TICKS: u32 = 150; // ~10 s
 
 const NEIGHBORS_6: [IVec3; 6] = [
     IVec3::new(1, 0, 0),
@@ -65,6 +68,7 @@ pub struct Weathering {
     drying: FxHashMap<IVec3, u32>,
     dissolving: FxHashMap<IVec3, u32>,
     polluting: FxHashMap<IVec3, u32>,
+    settling: FxHashMap<IVec3, u32>,
 }
 
 impl Weathering {
@@ -75,6 +79,7 @@ impl Weathering {
             drying: FxHashMap::default(),
             dissolving: FxHashMap::default(),
             polluting: FxHashMap::default(),
+            settling: FxHashMap::default(),
         }
     }
 
@@ -90,6 +95,9 @@ impl Weathering {
     }
     pub fn polluting_count(&self) -> usize {
         self.polluting.len()
+    }
+    pub fn settling_count(&self) -> usize {
+        self.settling.len()
     }
 
     pub fn tick(&mut self, world: &mut World, events: &[ContactEvent]) {
@@ -110,6 +118,8 @@ impl Weathering {
                 ContactEvent::Flowed(p) => (p, true, false),
                 ContactEvent::Settled(p) => (p, false, false),
                 ContactEvent::Vacated(p) => {
+                    // The cell that moved away is no longer settling.
+                    self.settling.remove(&p);
                     // Mud that just lost a water neighbor starts drying.
                     for n in NEIGHBORS_6 {
                         let q = p + n;
@@ -141,6 +151,14 @@ impl Weathering {
                     if world.get_voxel(q) == t.water {
                         self.polluting.entry(q).or_insert(0);
                     }
+                }
+                // A still muddy_water cell starts settling toward clean
+                // water; a moving one (Fell/Flowed) is not still, so it
+                // leaves the settling clock.
+                if moving {
+                    self.settling.remove(&pos);
+                } else {
+                    self.settling.entry(pos).or_insert(0);
                 }
             }
         }
@@ -262,6 +280,33 @@ impl Weathering {
         });
         for pos in dried {
             world.set_voxel(pos, self.table.dirt);
+        }
+
+        // 4. Advance settling: muddy_water that has been still for N ticks
+        // clarifies to water and deposits sand below.
+        let mut settled = Vec::new();
+        self.settling.retain(|&pos, ticks| {
+            if world.get_voxel(pos) != t.muddy_water {
+                return false;
+            }
+            *ticks += 1;
+            if *ticks >= MUDDY_SETTLE_TICKS {
+                settled.push(pos);
+                return false;
+            }
+            true
+        });
+        for pos in settled {
+            world.set_voxel(pos, t.water);
+            // Deposit sand on the solid cell below (if it's a solid material
+            // that isn't already sand).
+            let below = pos - IVec3::Y;
+            if world.in_bounds(below) {
+                let below_v = world.get_voxel(below);
+                if below_v != t.sand && !t.is_wet(below_v) && world.solid(below) {
+                    world.set_voxel(below, t.sand);
+                }
+            }
         }
     }
 }
@@ -642,6 +687,64 @@ mod tests {
             world.get_voxel(water_cell),
             MUDDY_WATER,
             "clean water must become muddy_water at the pollute threshold"
+        );
+    }
+    #[test]
+    fn still_muddy_water_settles_to_water_and_deposits_sand_below() {
+        let mut world = world_with_floor(STONE);
+        let mut weathering = Weathering::new(table());
+        // test_world fills y=0..5 with Voxel(2) (floor), top at y=5.
+        // Place muddy_water at y=5, floor at y=4 is STONE.
+        let muddy_cell = IVec3::new(8, 5, 8);
+        let floor_cell = IVec3::new(8, 4, 8); // STONE
+        world.set_voxel(muddy_cell, MUDDY_WATER);
+        world.set_solid_table(vec![false, false, true, true, true, true, true, false]);
+
+        // Seed: Settled event starts the settle clock
+        weathering.tick(&mut world, &[ContactEvent::Settled(muddy_cell)]);
+        assert_eq!(weathering.settling_count(), 1);
+
+        for _ in 0..(MUDDY_SETTLE_TICKS - 2) {
+            weathering.tick(&mut world, &[]);
+            assert_eq!(world.get_voxel(muddy_cell), MUDDY_WATER, "must not settle early");
+        }
+        weathering.tick(&mut world, &[]);
+        assert_eq!(
+            world.get_voxel(muddy_cell),
+            WATER,
+            "muddy_water must clarify to water after settling"
+        );
+        assert_eq!(
+            world.get_voxel(floor_cell),
+            SAND,
+            "sand must be deposited on the floor below"
+        );
+        assert_eq!(weathering.settling_count(), 0, "settling entry cleared");
+    }
+
+    #[test]
+    fn moving_muddy_water_does_not_settle() {
+        let mut world = world_with_floor(STONE);
+        let mut weathering = Weathering::new(table());
+        let cell = IVec3::new(8, 5, 8);
+        world.set_voxel(cell, MUDDY_WATER);
+        world.set_solid_table(vec![false, false, true, true, true, true, true, false]);
+
+        // Start settling
+        weathering.tick(&mut world, &[ContactEvent::Settled(cell)]);
+        // Then water moves -- Flowed event resets the settle timer
+        for _ in 0..(MUDDY_SETTLE_TICKS / 2) {
+            weathering.tick(&mut world, &[ContactEvent::Flowed(cell)]);
+        }
+        assert_eq!(
+            world.get_voxel(cell),
+            MUDDY_WATER,
+            "moving muddy_water must not settle"
+        );
+        assert_eq!(
+            weathering.settling_count(),
+            0,
+            "Flowed events must remove from settling"
         );
     }
 }
