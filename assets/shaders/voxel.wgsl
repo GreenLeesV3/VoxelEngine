@@ -162,20 +162,7 @@ fn vs(v: VIn, inst: Inst) -> VOut {
     let local = vec3f(f32(v.pos_ao.x), f32(v.pos_ao.y), f32(v.pos_ao.z)) * cam.fog.z;
     var wp = (model * vec4f(local, 1.0)).xyz;
 
-    // Grass sway: displace top-face vertices of grass material (ID 3)
-    // with a sin wave based on world XZ + time. Only +Y faces (normal id 2)
-    // sway — sides and bottom stay fixed. Amplitude scales with height
-    // above the voxel base so the root stays planted.
     let mat_id = v.norm_mat.z | (v.norm_mat.w << 8u);
-    let normal_id = v.norm_mat.x;
-    if (mat_id == 3u && normal_id == 2u) {
-        let t = cam.sun_color.w; // game time
-        let phase = wp.x * 0.8 + wp.z * 0.6 + t * 2.0;
-        let sway = sin(phase) * 0.03 + sin(phase * 2.3 + 1.0) * 0.015;
-        wp.x += sway;
-        wp.z += cos(phase * 0.9) * 0.02;
-    }
-
 
     let base = palette[mat_id];
     // Jitter is baked into the mesh once at build time (see vox-mesh's
@@ -263,5 +250,6 @@ fn fs(in: VOut) -> @location(0) vec4f {
         // Slight blue tint for water
         c = mix(c, vec3f(0.15, 0.35, 0.55), 0.15);
     }
+
     return vec4f(c, alpha);
 }

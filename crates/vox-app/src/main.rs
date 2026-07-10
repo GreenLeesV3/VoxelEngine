@@ -10,6 +10,7 @@ mod day_night;
 mod remesh;
 mod tools;
 mod replay;
+mod grass;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -218,6 +219,10 @@ struct VoxApp {
     /// HDR post-processing pipeline: tone-maps the HDR offscreen render
     /// target to the swapchain format using ACES filmic tone mapping.
     post_pipeline: vox_render::PostPipeline,
+    /// Grass blade render pipeline.
+    grass_pipeline: vox_render::GrassPipeline,
+    /// Cached grass blade vertices (throttled regeneration).
+    grass_cache: grass::GrassCache,
     /// In-engine editor mode: when active, LMB paints a sphere of the
     /// selected material at the crosshair target and RMB erases a sphere of
     /// AIR, instead of the normal hotbar tools. Toggled with E. The player
@@ -278,6 +283,7 @@ impl VoxApp {
         let shadow_shader = std::fs::read_to_string(assets.join("shaders/shadow.wgsl"))?;
         let particle_shader = std::fs::read_to_string(assets.join("shaders/particle.wgsl"))?;
         let post_shader = std::fs::read_to_string(assets.join("shaders/post.wgsl"))?;
+        let grass_shader = std::fs::read_to_string(assets.join("shaders/grass.wgsl"))?;
 
         let build_start = Instant::now();
         let world = build_terrain_world(cfg, &registry)?;
@@ -302,6 +308,7 @@ impl VoxApp {
         let particle_pipeline = ParticlePipeline::new(&gpu, &particle_shader);
         let tools = Tools::new(&registry);
         let post_pipeline = vox_render::PostPipeline::new(&gpu, gpu.hdr_view(), &post_shader);
+        let grass_pipeline = vox_render::GrassPipeline::new(&gpu, &grass_shader);
         let debug_overlay = DebugOverlay::new(
             gpu.device(),
             gpu.surface_format(),
@@ -365,6 +372,8 @@ impl VoxApp {
             particles: ParticleSystem::new(),
             particle_pipeline,
             post_pipeline,
+            grass_pipeline,
+            grass_cache: grass::GrassCache::new(),
         };
         app.initial_mesh();
 
@@ -1518,6 +1527,20 @@ impl App for VoxApp {
                 }
             }
             self.particle_pipeline.draw(&mut pass);
+            // Grass blades: 3D blades standing up from grass voxels.
+            let grass_verts = self.grass_cache.get_or_regen(
+                &self.world,
+                self.camera.pos,
+                self.world.cfg.voxel_size_m,
+                self.game_time,
+            );
+            self.grass_pipeline.write_camera(
+                self.gpu.queue(),
+                view_proj.to_cols_array_2d(),
+                self.camera.pos,
+                self.game_time,
+            );
+            self.grass_pipeline.draw(self.gpu.queue(), &mut pass, grass_verts);
             self.debug_overlay.paint(&mut pass, &prepared_overlay);
         }
         self.gpu.queue().submit([encoder.finish()]);
