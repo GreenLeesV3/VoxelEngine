@@ -1390,7 +1390,14 @@ impl App for VoxApp {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: self.gpu.depth_view(),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
