@@ -94,20 +94,8 @@ fn solid_table(registry: &MaterialRegistry) -> Vec<bool> {
         .collect()
 }
 
-/// The registry's `water` material, or a harmless fallback if the asset
-/// set doesn't define one (keeps the engine bootable with a stripped-down
-/// material set, e.g. in a test fixture) -- mirrors the existing
-/// `id_by_name("wood").unwrap_or(...)` pattern in `spawn_debris`.
-fn water_material(registry: &MaterialRegistry) -> Voxel {
-    registry
-        .id_by_name("water")
-        .map(|m| Voxel(m.0))
-        .unwrap_or(Voxel(1))
-}
-
 /// Weathering material table, or `None` (weathering disabled) if any
-/// required material is missing from the asset set -- mirrors
-/// `water_material`'s graceful-fallback pattern. A missing material name
+/// required material is missing from the asset set. A missing material name
 /// disables weathering with a log line, not a crash.
 fn weather_table(registry: &MaterialRegistry) -> Option<vox_sim::WeatherTable> {
     let id = |name: &str| registry.id_by_name(name).map(|m| Voxel(m.0));
@@ -352,6 +340,12 @@ struct VoxApp {
     body_mesh: BodyMeshQueue,
     phys: PhysicsWorld,
     fluid: vox_sim::FluidSim,
+    /// Full set of fluid material voxels (water, muddy_water, ...) -- the
+    /// materials `mesh_slab` treats as translucent fluids when meshing
+    /// chunks and debris. Stored once at construction (see
+    /// `fluid_materials`) and reused at every mesh call site so a newly
+    /// added fluid renders without each caller being touched.
+    fluids: Vec<Voxel>,
     /// Fluid ticks run at their own fixed rate (`FLUID_DT`), independent of
     /// the 60 Hz physics loop -- see the design doc §5.
     fluid_clock: vox_platform::FrameClock,
@@ -551,7 +545,7 @@ impl VoxApp {
             shadow_pipeline,
             world,
             fluid: vox_sim::FluidSim::with_fluids_and_powders(
-                fluid_materials(&registry),
+                fluids.clone(),
                 powder_materials(&registry),
             ),
             fluid_clock: vox_platform::FrameClock::new(vox_core::consts::FLUID_DT),
@@ -567,10 +561,11 @@ impl VoxApp {
             phys: {
                 let mut phys = PhysicsWorld::new();
                 if !fluids.is_empty() {
-                    phys.set_fluid_voxels(fluids);
+                    phys.set_fluid_voxels(fluids.clone());
                 }
                 phys
             },
+            fluids,
             blast_seed: 0,
             impact_seed: 0,
             grabbed: false,
@@ -617,14 +612,14 @@ impl VoxApp {
         let _ = self.world.drain_dirty_regions();
         let start = Instant::now();
         let world = &self.world;
-        let water = water_material(&self.registry);
+        let fluids = &self.fluids;
         let meshes: Vec<(IVec3, vox_mesh::MeshData)> = keys
             .par_iter()
             .filter(|key| world.chunk_at(**key).is_some())
             .map(|key| {
                 let origin = chunk_origin(*key);
                 let slab = VoxelSlab::extract(world, origin, IVec3::splat(CHUNK_SIZE as i32));
-                (*key, mesh_slab(&slab, origin, &[water]))
+                (*key, mesh_slab(&slab, origin, fluids))
             })
             .collect();
         let meshed = meshes.len();
@@ -690,11 +685,10 @@ impl VoxApp {
             .registry
             .id_by_name("ember")
             .map(|m| body_smoke_outlets(body, Voxel(m.0), self.world.cfg.voxel_size_m));
-        let water = water_material(&self.registry);
         let voxel_count = (body.grid.dims.x * body.grid.dims.y * body.grid.dims.z) as usize;
         let dispatch = if voxel_count <= INLINE_MESH_VOXEL_BUDGET {
             let slab = VoxelSlab::from_grid(body.grid.dims, &body.grid.voxels);
-            let mesh = mesh_slab(&slab, IVec3::ZERO, &[water]);
+            let mesh = mesh_slab(&slab, IVec3::ZERO, &self.fluids);
             self.pipeline
                 .upload_body(&self.gpu, (id.slot, id.generation), &mesh);
             MeshDispatch::Sync
@@ -703,7 +697,7 @@ impl VoxApp {
                 (id.slot, id.generation),
                 body.grid.dims,
                 body.grid.voxels.clone(),
-                &[water],
+                &self.fluids,
             );
             MeshDispatch::Async
         };
@@ -1798,7 +1792,7 @@ impl App for VoxApp {
             }
             self.remesh.absorb_dirty(&mut self.world);
             self.remesh
-                .dispatch(&self.world, eye, &[water_material(&self.registry)]);
+                .dispatch(&self.world, eye, &self.fluids);
             self.remesh.collect(&self.gpu, &mut self.pipeline);
             self.body_mesh.collect(&self.gpu, &mut self.pipeline)
         };
