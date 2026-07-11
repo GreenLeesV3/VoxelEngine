@@ -73,6 +73,11 @@ pub struct MarioMode {
     /// impact position in meters. Drained by the caller via
     /// [`pending_ground_pound`].
     pending_ground_pound: Option<Vec3>,
+    /// Last tick's health (0-8, 8 = full). Exposed to the HUD for the
+    /// SM64 power meter.
+    last_health: i16,
+    /// Last tick's action bitmask. Exposed to the HUD for an action label.
+    last_action: u32,
     /// Fractional tick progress (0..1) for interpolation between 30 Hz
     /// ticks. At 120 FPS render, this cycles 0→1 four times per tick.
     pub tick_alpha: f32,
@@ -130,17 +135,19 @@ impl MarioMode {
         cam_yaw: 0.0,
         cam_pitch: 0.2,
         tick_accumulator: 0.0,
+        tick_rate: 30.0,
+        last_pos_sm64: [0.0; 3],
         model_scale: 1.0,
         units_per_meter,
         prev_tick_pos: [0.0; 3],
         prev_positions: vec![[0.0; 3]; vox_sm64::ffi::SM64_GEO_MAX_TRIANGLES as usize * 3],
         prev_vertex_count: 0,
-        tick_rate: 30.0,
-        last_pos_sm64: [0.0; 3],
+        pending_ground_pound: None,
+        last_health: 8,
+        last_action: 0,
+        debris_objects: HashMap::new(),
         tick_alpha: 0.0,
         prev_action: 0,
-        pending_ground_pound: None,
-        debris_objects: HashMap::new(),
         })
     }
 
@@ -228,13 +235,14 @@ impl MarioMode {
             ticks_this_frame += 1;
             // Save previous state for position interpolation
             self.prev_tick_pos = self.last_pos_sm64;
-            let geo = self.mario.as_ref().unwrap().geometry();
-            let n = geo.num_vertices();
-            self.prev_vertex_count = n;
-            self.prev_positions[..n].copy_from_slice(&geo.positions[..n]);
-            // Now tick
+            // Previous geometry capture for interpolation (currently
+            // disabled — the `if false` block below skips it). Kept
+            // for when 30→120fps animation interpolation is re-enabled.
+            let _geo = self.mario.as_ref().unwrap().geometry();
             let state = self.mario.as_mut().unwrap().tick(inputs);
             self.last_pos_sm64 = [state.position.x, state.position.y, state.position.z];
+            self.last_health = state.health;
+            self.last_action = state.action;
             // Detect a ground-pound landing: the action transitions from
             // the airborne pound into its landing action on the tick Mario
             // impacts the ground. Record the impact point (in meters) so
@@ -290,6 +298,16 @@ impl MarioMode {
  pub fn mario_pos_m(&self) -> Vec3 {
      Vec3::from(self.last_pos_sm64) / self.units_per_meter
  }
+
+    /// Mario's current health (0-8, 8 = full). For the SM64 power meter HUD.
+    pub fn health(&self) -> i16 {
+        self.last_health
+    }
+
+    /// Mario's current action bitmask. For the HUD action label.
+    pub fn action(&self) -> u32 {
+        self.last_action
+    }
 
     /// Synchronize libsm64 surface objects for nearby debris bodies.
     ///

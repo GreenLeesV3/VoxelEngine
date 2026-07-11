@@ -1524,6 +1524,13 @@ impl App for VoxApp {
                 .get(MaterialId((self.selected_material + 1) as u16))
                 .map(|d| d.color)
                 .unwrap_or([0.8, 0.8, 0.8]),
+            mario: mario_active.then(|| {
+                let mode = self.mario_mode.as_ref().unwrap();
+                vox_debug::hud::MarioHudState {
+                    health: mode.health(),
+                    action: mode.action(),
+                }
+            }),
         };
         let debug_state = self.debug_visible.then(|| OverlayState {
             profile: &self.profile,
