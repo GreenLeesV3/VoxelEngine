@@ -8,10 +8,19 @@
 
 use glam::Vec3;
 
-/// Seconds per game-day. At 120 real-seconds per cycle, a full day/night
-/// takes 2 minutes of real time — long enough to appreciate, short enough
-/// to see transitions.
-const DAY_LENGTH_SECS: f32 = 120.0;
+/// Day/night cycle timing (in seconds of real time):
+/// 10 min day, 1.5 min sunrise, 7 min night, 1.5 min sunset = 20 min total.
+const DAY_SECS: f32 = 600.0;       // 10 minutes
+const SUNRISE_SECS: f32 = 90.0;    // 1.5 minutes
+const NIGHT_SECS: f32 = 420.0;     // 7 minutes
+const SUNSET_SECS: f32 = 90.0;     // 1.5 minutes
+const CYCLE_SECS: f32 = DAY_SECS + SUNRISE_SECS + NIGHT_SECS + SUNSET_SECS; // 1200
+
+/// Phase boundaries (start times within the cycle).
+const DAY_END: f32 = DAY_SECS;                          // 600
+const SUNRISE_END: f32 = DAY_END + SUNRISE_SECS;        // 690
+const NIGHT_END: f32 = SUNRISE_END + NIGHT_SECS;        // 1110
+// SUNSET_END = CYCLE_SECS = 1200
 
 /// Computes all lighting parameters for the current time of day.
 /// `game_time` is in seconds (unbounded — wraps modulo DAY_LENGTH_SECS).
@@ -26,44 +35,80 @@ pub struct DayNightParams {
     pub sky_color: Vec3,
     /// Fill light strength (bounce light from opposite direction).
     pub fill_strength: f32,
-    /// Ambient light strength multiplier.
     pub ambient_strength: f32,
     /// Ambient sky tint (cool blue during day, dim at night).
     pub ambient_sky: Vec3,
     /// Ambient ground tint (warm during day, dim at night).
     pub ambient_ground: Vec3,
-    /// Normalized time of day 0..1 (0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk).
+    /// Normalized time of day 0..1.
     pub time_of_day: f32,
 }
 
 /// Compute lighting parameters from game_time (seconds).
 pub fn compute(game_time: f32) -> DayNightParams {
-    // Wrap time into 0..1 cycle.
-    let t = (game_time / DAY_LENGTH_SECS).fract();
-    // Sun angle: t=0 midnight (sun below), t=0.5 noon (sun overhead).
-    // The sun sweeps east→west in a proper arc across the sky.
-    // angle goes from -pi/2 (midnight, below) through 0 (horizon) to
-    // +pi/2 (noon, overhead) and back to -pi/2 (next midnight).
-    let sun_angle = (t * 2.0 - 0.5) * std::f32::consts::PI;
-    let sun_height = sun_angle.sin(); // -1 (midnight) to +1 (noon)
+    // Wrap into the 20-minute cycle.
+    let cycle_t = (game_time % CYCLE_SECS).max(0.0);
 
-    // Azimuth sweeps east→west over the full cycle. At dawn (t=0.25)
-    // the sun is in the +X direction (east), at noon (t=0.5) it's
-    // overhead, at dusk (t=0.75) it's in the -X direction (west).
-    // Use cos to get a smooth 0→1→0 daylight arc and negate for
-    // proper east→west direction.
-    let sun_azimuth = -((t * 2.0 - 0.5) * std::f32::consts::PI).cos();
+    // Determine which phase we're in and compute a normalized sun
+    // height (0=horizon, 1=zenith) and sun azimuth for each phase.
+    //
+    // Cycle layout (starts at dawn/sunrise):
+    //   0..600         DAY        (sun rises→zenith→descends)
+    //   600..690       SUNRISE→   (wait, this is actually "dusk/sunset"
+    //                              — naming: phase 1 = day, phase 2 =
+    //                              sunset transition, phase 3 = night,
+    //                              phase 4 = sunrise transition)
+    //
+    // Actually let's lay it out as the user experiences it:
+    //   0..600     DAY      — full daylight, sun arcs overhead
+    //   600..690   SUNSET   — sun descends to horizon, warm light
+    //   690..1110  NIGHT    — dark, stars, moon-ish
+    //   1110..1200 SUNRISE  — sun rises from horizon, warm light
 
-    // Sun direction: arcs across the sky from east to west.
-    // X = azimuth (east→west sweep), Y = height (up/down), Z = slight
-    // southward tilt for visual variety.
-    let sun_dir = Vec3::new(sun_azimuth * sun_height.abs().max(0.15), sun_height, -0.2).normalize();
+    let (sun_height, azimuth_phase, daylight, horizon_glow);
 
-    // Daylight factor: 0 at night, 1 at full day. Smooth transition at horizon.
-    let daylight = clamp01((sun_height + 0.1) * 2.5);
+    if cycle_t < DAY_END {
+        // DAY: sun arcs from east horizon → zenith → west horizon.
+        // Map 0..DAY_END to angle 0..pi (east to west).
+        let day_t = cycle_t / DAY_END; // 0..1
+        let angle = day_t * std::f32::consts::PI;
+        sun_height = angle.sin(); // 0→1→0
+        azimuth_phase = day_t; // 0=east, 1=west
+        daylight = clamp01(sun_height * 1.8);
+        horizon_glow = clamp01(1.0 - sun_height * 4.0);
+    } else if cycle_t < SUNRISE_END {
+        // SUNSET: sun drops from horizon to below (0→-1).
+        let sunset_t = (cycle_t - DAY_END) / SUNRISE_SECS; // 0..1
+        sun_height = (1.0 - sunset_t) * 0.15; // 0.15→0 (just below horizon)
+        // Continue azimuth westward.
+        azimuth_phase = 1.0;
+        daylight = clamp01((1.0 - sunset_t) * 0.6);
+        horizon_glow = 1.0; // peak sunset glow
+    } else if cycle_t < NIGHT_END {
+        // NIGHT: sun well below horizon.
+        let night_t = (cycle_t - SUNRISE_END) / NIGHT_SECS; // 0..1
+        // Sun dips lowest at midpoint, then starts rising.
+        sun_height = -0.3 - 0.5 * (night_t * std::f32::consts::PI).sin();
+        // Azimuth sweeps from west back toward east during night.
+        azimuth_phase = 1.0 - night_t;
+        daylight = 0.0;
+        horizon_glow = 0.0;
+    } else {
+        // SUNRISE: sun rises from below horizon toward east.
+        let sunrise_t = (cycle_t - NIGHT_END) / SUNSET_SECS; // 0..1
+        sun_height = sunrise_t * 0.15; // 0→0.15 (just above horizon)
+        azimuth_phase = 0.0; // east
+        daylight = clamp01(sunrise_t * 0.6);
+        horizon_glow = 1.0; // peak sunrise glow
+    }
 
-    // Dawn/dusk warmth: peaks when sun is near the horizon.
-    let horizon_glow = clamp01(1.0 - (sun_height.abs() * 3.0));
+    // Sun azimuth: 0 = east (+X), 0.5 = overhead, 1 = west (-X).
+    let sun_azimuth = (azimuth_phase - 0.5) * -2.0; // 1→-1 east→west
+    let sun_dir = Vec3::new(
+        sun_azimuth * sun_height.abs().max(0.15),
+        sun_height,
+        -0.2,
+    ).normalize();
 
     // Sun color: warm orange at horizon, white at noon, dim cool at night.
     let warm = Vec3::new(1.0, 0.6, 0.3);
@@ -107,7 +152,7 @@ pub fn compute(game_time: f32) -> DayNightParams {
         ambient_strength,
         ambient_sky,
         ambient_ground,
-        time_of_day: t,
+        time_of_day: cycle_t / CYCLE_SECS,
     }
 }
 
