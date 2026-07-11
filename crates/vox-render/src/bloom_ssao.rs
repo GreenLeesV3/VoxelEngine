@@ -50,10 +50,9 @@ struct SsaoParamsUniform {
     intensity: f32,
     bias: f32,
     kernel_size: u32,
+    depth_texel_size: [f32; 2],
     _pad: f32,
     _pad2: f32,
-    _pad3: f32,
-    _pad4: f32,
 }
 
 /// Rust mirror of the `BloomParams` WGSL uniform struct.
@@ -167,12 +166,11 @@ impl BloomSsaoPipeline {
             texel_size: [1.0 / half_w as f32, 1.0 / half_h as f32],
             radius: 0.5,
             intensity: 1.0,
-            bias: 0.025,
+            bias: 0.05,
             kernel_size: SSAO_KERNEL_SIZE,
+            depth_texel_size: [1.0 / width as f32, 1.0 / height as f32],
             _pad: 0.0,
             _pad2: 0.0,
-            _pad3: 0.0,
-            _pad4: 0.0,
         };
         let ssao_params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ssao-params"),
@@ -609,12 +607,11 @@ impl BloomSsaoPipeline {
             texel_size: [1.0 / self.half_w.max(1) as f32, 1.0 / self.half_h.max(1) as f32],
             radius: ssao_radius,
             intensity: ssao_intensity,
-            bias: 0.025,
+            bias: 0.05,
             kernel_size: SSAO_KERNEL_SIZE,
+            depth_texel_size: [1.0 / self.width.max(1) as f32, 1.0 / self.height.max(1) as f32],
             _pad: 0.0,
             _pad2: 0.0,
-            _pad3: 0.0,
-            _pad4: 0.0,
         };
         queue.write_buffer(&self.ssao_params_buf, 0, bytemuck::bytes_of(&ssao_params));
 

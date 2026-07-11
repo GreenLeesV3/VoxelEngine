@@ -11,9 +11,9 @@ struct SsaoParams {
     intensity: f32,
     bias: f32,
     kernel_size: u32,
+    depth_texel_size: vec2f,  // 1.0 / depth_texture_dimensions (full-res)
     _pad: f32,
     _pad2: f32,
-    _pad3: f32,
 };
 
 @group(0) @binding(0) var<uniform> params: SsaoParams;
@@ -50,7 +50,8 @@ fn load_depth(uv: vec2f) -> f32 {
     return textureLoad(depth_tex, texel, 0);
 }
 
-fn reconstruct_normal(uv: vec2f, ts: vec2f, depth: f32) -> vec3f {
+fn reconstruct_normal(uv: vec2f, depth: f32) -> vec3f {
+    let ts = params.depth_texel_size;
     let l = load_depth(uv + vec2f(-ts.x, 0.0));
     let r = load_depth(uv + vec2f( ts.x, 0.0));
     let d = load_depth(uv + vec2f(0.0, -ts.y));
@@ -77,13 +78,22 @@ fn fs_ssao(@builtin(position) frag_pos: vec4f) -> @location(0) f32 {
     }
 
     let p = view_pos_from_ndc(uv, depth).xyz;
-    let n = reconstruct_normal(uv, params.texel_size, depth);
+    let n = reconstruct_normal(uv, depth);
+
+    // Build a TBN basis to rotate the tangent-space hemisphere kernel
+    // into view space aligned with the surface normal. Without this, the
+    // kernel samples along a fixed view-space direction and the AO detaches
+    // from geometry ("floating shadows").
+    let rvec = vec3f(0.123, 0.456, 0.789);
+    let tangent = normalize(rvec - n * dot(rvec, n));
+    let bitangent = cross(n, tangent);
+    let tbn = mat3x3f(tangent, bitangent, n);
 
     var occlusion = 0.0;
     let n_samples = i32(params.kernel_size);
     for (var i = 0; i < n_samples; i = i + 1) {
-        let sample_dir = kernel[i].xyz * kernel[i].w;
-        let sample_pos = p + n * params.bias + sample_dir * params.radius;
+        let sample_dir = (tbn * kernel[i].xyz) * kernel[i].w;
+        let sample_pos = p + sample_dir * params.radius + n * params.bias;
 
         let proj = params.view_proj * vec4f(sample_pos, 1.0);
         let sample_ndc = proj.xy / proj.w;

@@ -57,7 +57,7 @@ impl Default for Tunables {
             // throw, stone needs a genuinely hard impact.
             fracture_sensitivity: 1.0,
             ssao_intensity: 1.0,
-            ssao_radius: 0.5,
+            ssao_radius: 2.0,
             bloom_intensity: 0.8,
             bloom_threshold: 0.8,
         }
