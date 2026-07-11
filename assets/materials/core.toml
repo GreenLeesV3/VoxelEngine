@@ -41,22 +41,6 @@ strength = 1.0
 solid = false
 powder = true
 
-
-[[material]]
-name = "sandstone"
-color = [0.86, 0.79, 0.58]
-jitter = 0.04
-density = 1600.0
-strength = 1.0
-solid = true
-[[material]]
-name = "snow"
-color = [0.92, 0.92, 0.95]
-jitter = 0.03
-density = 400.0
-strength = 0.3
-solid = true
-
 [[material]]
 name = "wood"
 color = [0.52, 0.37, 0.23]
@@ -95,6 +79,8 @@ density = 1000.0
 strength = 0.0
 solid = false
 fluid = true
+roughness = 0.1
+metalness = 0.0
 
 [[material]]
 name = "mud"
@@ -140,3 +126,29 @@ density = 400.0
 strength = 0.3
 solid = false
 powder = true
+
+[[material]]
+name = "sandstone"
+color = [0.86, 0.79, 0.58]
+jitter = 0.04
+density = 1600.0
+strength = 1.0
+solid = true
+
+[[material]]
+name = "snow"
+color = [0.92, 0.92, 0.95]
+jitter = 0.03
+density = 400.0
+strength = 0.3
+solid = true
+
+[[material]]
+name = "metal"
+color = [0.75, 0.75, 0.78]
+jitter = 0.02
+density = 7800.0
+strength = 15.0
+solid = true
+roughness = 0.25
+metalness = 1.0

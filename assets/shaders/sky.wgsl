@@ -69,29 +69,21 @@ fn fs(in: VOut) -> @location(0) vec4f {
     // Cosine of angle between view direction and sun.
     let cos_angle = dot(dir, sun_dir);
 
-    // Day sky colors (top vs horizon).
-    let day_top = vec3f(0.25, 0.45, 0.85);
-    let day_horizon = vec3f(0.55, 0.70, 0.90);
-
-    // Sunset/sunrise tint.
-    let sunset_tint = vec3f(0.95, 0.45, 0.20);
-    let sunset_factor = clamp(1.0 - abs(sun_dir.y) * 4.0, 0.0, 1.0);
-
-    // Night sky.
-    let night_top = vec3f(0.02, 0.02, 0.05);
-    let night_horizon = vec3f(0.04, 0.04, 0.08);
-
-    // Blend day/night by sun strength.
-    let top_color = mix(night_top, day_top, sun_strength);
-    let horizon_color = mix(night_horizon, day_horizon, sun_strength);
+    // Sky colors from the 6-phase ToD system (cam.sky_color.xyz
+    // carries the weighted blend of day/sunset/blue hour/night/
+    // dawn/sunrise from day_night.rs). Use it as the horizon color
+    // and derive a darker zenith by multiplying by 0.6.
+    let horizon_color = cam.sky_color.xyz;
+    let top_color = horizon_color * 0.6;
 
     // Sky gradient: horizon at dir.y=0, top at dir.y=1.
     let gradient = clamp(dir_up * 0.5 + 0.5, 0.0, 1.0);
     var sky = mix(horizon_color, top_color, pow(gradient, 0.8));
 
-    // Sunset/sunrise warm tint near horizon.
+    // Sunset/sunrise warm tint near horizon — driven by sun elevation.
+    let sunset_factor = clamp(1.0 - abs(sun_dir.y) * 4.0, 0.0, 1.0);
     let horizon_glow = clamp(1.0 - abs(dir.y) * 3.0, 0.0, 1.0) * sunset_factor;
-    sky = mix(sky, sunset_tint, horizon_glow * 0.4 * sun_strength);
+    sky = mix(sky, cam.sun_color.xyz, horizon_glow * 0.3 * sun_strength);
 
     // Rayleigh scattering — sky brighter near sun.
     let rayleigh_val = rayleigh(cos_angle);

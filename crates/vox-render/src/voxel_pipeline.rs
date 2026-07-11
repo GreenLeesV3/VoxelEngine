@@ -143,6 +143,19 @@ impl VoxelPipeline {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
+        // PBR params: [roughness, metalness, 0, 0] per material. Default
+        // (roughness=1, metalness=0) marks a non-PBR material so the
+        // fragment shader keeps the cel-shaded Lambert look.
+        let pbr: Vec<[f32; 4]> = registry
+            .iter()
+            .map(|(_, def)| [def.roughness, def.metalness, 0.0, 0.0])
+            .collect();
+        let pbr_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("pbr params"),
+            contents: bytemuck::cast_slice(&pbr),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("voxel camera uniform"),
             size: std::mem::size_of::<CameraUniform>() as u64,
@@ -183,6 +196,16 @@ impl VoxelPipeline {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -200,6 +223,10 @@ impl VoxelPipeline {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: emissive_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: pbr_buf.as_entire_binding(),
                 },
             ],
         });

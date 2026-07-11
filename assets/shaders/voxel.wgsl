@@ -17,6 +17,7 @@ struct Camera {
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(0) @binding(1) var<storage, read> palette: array<vec4f>; // rgb + jitter
 @group(0) @binding(2) var<storage, read> emissive: array<vec4f>; // xyz = emissive color, w = intensity (w < 0 = not emissive)
+@group(0) @binding(3) var<storage, read> pbr_params: array<vec4f>; // x = roughness, y = metalness, z/w unused
 // Shadow camera uniform, must match `shadow.wgsl`'s `ShadowCam`.
 struct ShadowCam {
     view_proj: mat4x4f,
@@ -199,6 +200,29 @@ fn vs(v: VIn, inst: Inst) -> VOut {
     return out;
 }
 
+// --- PBR specular (GGX) ---
+// Only materials whose pbr_params has roughness < 1.0 or metalness > 0.0
+// get this specular term; the rest keep the cel-shaded Lambert diffuse.
+// Microfacet model: D = GGX/Trowbridge-Reitz NDF, F = Schlick Fresnel,
+// G = Smith geometric shadowing, combined as D*F*G / (4 * n·v * n·l).
+
+fn d_ggx(noth: f32, a: f32) -> f32 {
+    let a2 = a * a;
+    let denom = noth * noth * (a2 - 1.0) + 1.0;
+    return a2 / (3.14159265 * denom * denom + 0.0001);
+}
+
+fn f_schlick(ct: f32, f0: vec3f) -> vec3f {
+    return f0 + (1.0 - f0) * pow(1.0 - ct, 5.0);
+}
+
+fn g_smith(nov: f32, nol: f32, a: f32) -> f32 {
+    let a2 = a * a;
+    let gv = nov / (nov * (1.0 - a2) + a2 + 0.0001);
+    let gl = nol / (nol * (1.0 - a2) + a2 + 0.0001);
+    return gv * gl;
+}
+
 // Specialization constant: 0 = opaque pass (skip water), 1 = water pass
 // (skip non-water). Two pipelines share this shader; the opaque pipeline
 // has depth_write_enabled=true, the water pipeline has it false so terrain
@@ -258,11 +282,17 @@ fn fs(in: VOut) -> @location(0) vec4f {
     var sun = pow(smooth_q, 1.5) * cam.sun_dir.w * cam.sun_color.xyz * lit_tint;
     let fill = max(-ndotl, 0.0) * cam.sky_color.w;
 
+    // Shadow visibility for the fragment, fetched once and reused by both the
+    // diffuse sun attenuation below and the PBR specular term further down.
+    // 1.0 = fully lit; <1.0 = occluded. Water (mat 9) skips the fetch and
+    // stays 1.0 — water specular is not shadow-attenuated, which is fine for
+    // a translucent surface.
+    var vis: f32 = 1.0;
     // Shadow mapping (#14): sample the directional shadow map and attenuate
     // direct sunlight by ~50% on occluded fragments. At night (sun_strength
     // ~0) the sun term is already zero, so skip the texture fetch entirely.
     if (cam.sun_dir.w > 0.0 && in.mat_id != 9u) {
-        let vis = shadow_visibility(in.world_pos);
+        vis = shadow_visibility(in.world_pos);
         sun = sun * mix(0.5, 1.0, vis);
     }
 
@@ -288,6 +318,36 @@ fn fs(in: VOut) -> @location(0) vec4f {
     if (bl > 0.0) {
         let bl_falloff = bl * bl;
         c += in.color * vec3f(1.0, 0.9, 0.8) * bl_falloff;
+    }
+
+    // PBR specular (GGX): for materials flagged as PBR (roughness < 1.0 or
+    // metalness > 0.0), add a microfacet specular highlight on top of the
+    // cel-shaded diffuse. Metals (metalness=1) replace the diffuse tint with
+    // specular; dielectrics (metalness=0) keep diffuse and add a bright
+    // highlight. Shadow attenuation is applied so occluded PBR surfaces
+    // don't sparkle through walls. Skipped at night (no sun) or for water.
+    let pbr = pbr_params[in.mat_id];
+    let is_pbr = pbr.x < 0.999 || pbr.y > 0.001;
+    if (is_pbr && cam.sun_dir.w > 0.0 && in.mat_id != 9u) {
+        let roughness = pbr.x;
+        let metalness = pbr.y;
+        let v = normalize(cam.cam_pos.xyz - in.world_pos);
+        let l = cam.sun_dir.xyz;
+        let h = normalize(v + l);
+        let nov = max(dot(n, v), 0.0);
+        let nol = max(dot(n, l), 0.0);
+        let noh = max(dot(n, h), 0.0);
+        let loh = max(dot(l, h), 0.0);
+
+        let f0 = mix(vec3f(0.04), in.color, metalness);
+        let f = f_schlick(loh, f0);
+        let d = d_ggx(noh, roughness);
+        let g = g_smith(nov, nol, roughness);
+
+        let specular = (d * g / (4.0 * nov * nol + 0.0001)) * f * cam.sun_dir.w * cam.sun_color.xyz;
+        // Shadow attenuation: reuse the `vis` fetched above so specular
+        // respects occlusion the same way diffuse does (no second fetch).
+        c = c * (1.0 - metalness) + specular * mix(0.5, 1.0, vis);
     }
 
 

@@ -62,6 +62,14 @@ pub struct MaterialDef {
     /// color. Defaults to 1.0; values > 1 make the material glow brighter
     /// than its base color.
     pub emissive_intensity: f32,
+    /// PBR roughness: 0 = mirror, 1 = fully rough. Defaults to 1.0, which
+    /// disables the PBR specular path so non-PBR materials keep the cel-shaded
+    /// Lambert look.
+    pub roughness: f32,
+    /// PBR metalness: 0 = dielectric, 1 = metal. Defaults to 0.0. Only
+    /// materials with `roughness < 1.0` or `metalness > 0.0` get the GGX
+    /// specular term in the fragment shader.
+    pub metalness: f32,
 }
 
 /// Registry of material definitions with stable `u16` ids.
@@ -99,6 +107,8 @@ struct RawMaterial {
     emissive: Option<bool>,
     emissive_color: Option<[f32; 3]>,
     emissive_intensity: Option<f32>,
+    roughness: Option<f32>,
+    metalness: Option<f32>,
 }
 
 /// Validation error for a named material: `material '{name}': {detail}`.
@@ -125,7 +135,9 @@ impl MaterialRegistry {
             emissive: false,
             emissive_color: [0.0, 0.0, 0.0],
             emissive_intensity: 0.0,
-        };
+            roughness: 1.0,
+            metalness: 0.0,
+};
         let mut by_name = HashMap::new();
         by_name.insert(air.name.clone(), MaterialId::AIR);
         Self {
@@ -307,6 +319,22 @@ impl MaterialRegistry {
                 ));
             }
         }
+        let roughness = raw.roughness.unwrap_or(1.0);
+        if !roughness.is_finite() || !(0.0..=1.0).contains(&roughness) {
+            return Err(material_error(
+                origin,
+                &name,
+                format!("roughness must be in 0..=1, got {roughness}"),
+            ));
+        }
+        let metalness = raw.metalness.unwrap_or(0.0);
+        if !metalness.is_finite() || !(0.0..=1.0).contains(&metalness) {
+            return Err(material_error(
+                origin,
+                &name,
+                format!("metalness must be in 0..=1, got {metalness}"),
+            ));
+        }
 
         if self.defs.len() > usize::from(u16::MAX) {
             return Err(material_error(
@@ -331,6 +359,8 @@ impl MaterialRegistry {
             emissive,
             emissive_color,
             emissive_intensity,
+            roughness,
+            metalness,
         });
         Ok(())
     }
@@ -585,7 +615,7 @@ mod tests {
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let reg = MaterialRegistry::from_toml_str(&source, "assets/materials/core.toml")
             .expect("shipped core.toml must parse");
-        assert_eq!(reg.len(), 17, "air + 16 shipped materials");
+        assert_eq!(reg.len(), 18, "air + 17 shipped materials");
         assert_eq!(reg.id_by_name("stone"), Some(MaterialId(1)));
         let sandstone = reg
             .get(reg.id_by_name("sandstone").expect("sandstone registered"))
@@ -628,6 +658,16 @@ mod tests {
         assert_eq!(leaves.jitter, 0.10);
         assert!(leaves.solid, "leaves are solid (detach with trees, raycastable)");
         assert!(leaves.flammable, "leaves must be flammable");
+        let metal = reg
+            .get(reg.id_by_name("metal").expect("metal registered"))
+            .expect("metal present");
+        assert!(metal.solid, "metal is solid");
+        assert_eq!(metal.roughness, 0.25);
+        assert_eq!(metal.metalness, 1.0);
+        // Defaults: non-PBR materials stay fully rough / non-metallic.
+        let stone_def = reg.get(MaterialId(1)).expect("stone present");
+        assert_eq!(stone_def.roughness, 1.0);
+        assert_eq!(stone_def.metalness, 0.0);
     }
 
     /// Pins `deny_unknown_fields`: a typo'd optional key must fail loudly
