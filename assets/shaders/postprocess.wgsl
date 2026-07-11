@@ -5,8 +5,18 @@
 struct Params {
     resolution: vec2f,   // screen size in pixels
     texel_size: vec2f,   // 1.0 / resolution
+    cam_pos: vec3f,      // camera world position
     _pad0: f32,
+    cam_forward: vec3f,  // camera forward (unit)
     _pad1: f32,
+    cam_right: vec3f,    // camera right (unit)
+    _pad2: f32,
+    cam_up: vec3f,       // camera up (unit)
+    tan_half_fov: f32,   // tan(fov_y / 2)
+    aspect: f32,         // width / height
+    _pad3: f32,
+    _pad4: f32,
+    _pad5: f32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -64,6 +74,58 @@ fn boost_saturation(c: vec3f, amount: f32) -> vec3f {
     return mix(vec3f(lum), c, amount);
 }
 
+// Screen-Space Reflections (SSR): ray-march the linear depth buffer
+// for reflections, blended subtly (max 20%) into bright/smooth surfaces.
+// Depth is linear (dist / 600.0), so world position is reconstructed
+// from the camera basis vectors — same pattern as the sky shader.
+fn ssr(uv: vec2f, color: vec3f) -> vec3f {
+    let depth = textureSample(depth_tex, samp, uv).r;
+    if (depth >= 0.99) { return color; }  // sky — no reflection
+
+    // Reconstruct world position from linear depth using camera basis.
+    // depth = dist / 600.0  →  dist = depth * 600.0
+    let ndc = uv * 2.0 - 1.0;
+    let view_dir = normalize(
+        params.cam_forward
+        + params.cam_right * (ndc.x * params.tan_half_fov * params.aspect)
+        + params.cam_up * (ndc.y * params.tan_half_fov)
+    );
+    let world_pos = params.cam_pos + view_dir * (depth * 600.0);
+
+    // Normal from MRT (world-space).
+    let normal = normalize(textureSample(normal_tex, samp, uv).xyz);
+
+    // Reflection direction (view_dir points from cam to surface).
+    let refl_dir = reflect(view_dir, normal);
+
+    // Screen-space ray-march: step along the reflection direction in
+    // screen space. Project the reflection end-point back to screen UV
+    // by reprojecting via the camera basis approximation.
+    var step_uv = uv;
+    let step_size = params.texel_size * 3.0;  // 3 texels per step
+    // Approximate screen-space direction from reflection xy in view basis.
+    let step_dir = normalize(refl_dir.xy);
+    var hit_color = vec3f(0.0);
+    var hit_weight = 0.0;
+
+    for (var i = 0u; i < 24u; i++) {
+        step_uv += step_dir * step_size;
+        if (step_uv.x < 0.0 || step_uv.x > 1.0 || step_uv.y < 0.0 || step_uv.y > 1.0) {
+            break;
+        }
+        let sample_depth = textureSampleLevel(depth_tex, samp, step_uv, 0.0).r;
+        if (sample_depth < depth - 0.002 && sample_depth < 0.99) {
+            // Hit geometry closer than the start — reflection.
+            hit_color = textureSampleLevel(color_tex, samp, step_uv, 0.0).rgb;
+            hit_color = hit_color / (hit_color + vec3f(0.6));  // tone map
+            hit_weight = (1.0 - f32(i) / 24.0) * 0.2;  // fade + max 20% blend
+            break;
+        }
+    }
+
+    return mix(color, hit_color, hit_weight);
+}
+
 @fragment
 fn fs(@builtin(position) frag_pos: vec4f) -> @location(0) vec4f {
     let uv = frag_pos.xy * params.texel_size;
@@ -84,6 +146,10 @@ fn fs(@builtin(position) frag_pos: vec4f) -> @location(0) vec4f {
 
     // Color grading: slight lift in shadows, warm tint, gentle contrast.
     c = c * vec3f(1.02, 1.0, 0.98);
+
+    // Screen-space reflections (#SSR): subtle ray-marched reflections
+    // on water/smooth surfaces, max 20% blend weight.
+    c = ssr(uv, c);
 
     // Edge detection (#64): Sobel on depth + normal. Now that MRT
     // writes real data to depth_copy_tex and normal_tex, the sobel

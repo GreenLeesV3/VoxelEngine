@@ -1495,6 +1495,19 @@ impl App for VoxApp {
         let cam_up = cam_right.cross(self.camera.forward()).normalize();
         self.particle_pipeline
             .write_camera(&self.gpu, view_proj, cam_right, cam_up);
+        // SSR camera basis: pass camera vectors to the postprocess
+        // pipeline so it can reconstruct world position from linear depth.
+        let cam_forward = self.camera.forward();
+        let tan_half_fov = (70.0f32.to_radians() * 0.5).tan();
+        self.postprocess.update_camera(
+            &self.gpu,
+            self.camera.pos,
+            cam_forward,
+            cam_right,
+            cam_up,
+            tan_half_fov,
+            aspect,
+        );
         let particle_instances = self.particles.instances();
         self.particle_pipeline
             .upload(&self.gpu, &particle_instances);

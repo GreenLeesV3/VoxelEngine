@@ -8,6 +8,7 @@
 //! writing the result to the swapchain.
 
 use wgpu::util::DeviceExt;
+use glam::Vec3;
 
 use crate::gpu::{DEPTH_FORMAT, Gpu};
 
@@ -25,8 +26,18 @@ pub const DEPTH_COPY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Fl
 struct ParamsUniform {
     resolution: [f32; 2],
     texel_size: [f32; 2],
+    cam_pos: [f32; 3],
     _pad0: f32,
+    cam_forward: [f32; 3],
     _pad1: f32,
+    cam_right: [f32; 3],
+    _pad2: f32,
+    cam_up: [f32; 3],
+    tan_half_fov: f32,
+    aspect: f32,
+    _pad3: f32,
+    _pad4: f32,
+    _pad5: f32,
 }
 
 /// Owns the offscreen textures, the post-process pipeline, and the
@@ -42,6 +53,13 @@ pub struct PostProcessPipeline {
     sampler: wgpu::Sampler,
     width: u32,
     height: u32,
+    // Camera basis for SSR world-position reconstruction.
+    cam_pos: Vec3,
+    cam_forward: Vec3,
+    cam_right: Vec3,
+    cam_up: Vec3,
+    tan_half_fov: f32,
+    aspect: f32,
 }
 
 impl PostProcessPipeline {
@@ -66,12 +84,21 @@ impl PostProcessPipeline {
         });
 
 
-        // --- Params uniform ---
         let params = ParamsUniform {
             resolution: [width as f32, height as f32],
             texel_size: [1.0 / width.max(1) as f32, 1.0 / height.max(1) as f32],
+            cam_pos: [0.0; 3],
             _pad0: 0.0,
+            cam_forward: [0.0; 3],
             _pad1: 0.0,
+            cam_right: [0.0; 3],
+            _pad2: 0.0,
+            cam_up: [0.0; 3],
+            tan_half_fov: 0.0,
+            aspect: 1.0,
+            _pad3: 0.0,
+            _pad4: 0.0,
+            _pad5: 0.0,
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("postprocess-params"),
@@ -198,6 +225,12 @@ impl PostProcessPipeline {
             sampler,
             width,
             height,
+            cam_pos: Vec3::ZERO,
+            cam_forward: Vec3::NEG_Z,
+            cam_right: Vec3::X,
+            cam_up: Vec3::Y,
+            tan_half_fov: (70.0f32.to_radians() * 0.5).tan(),
+            aspect: width as f32 / height.max(1) as f32,
         }
     }
 
@@ -212,13 +245,9 @@ impl PostProcessPipeline {
         self.normal_tex = create_color_texture(gpu.device(), width, height, NORMAL_FORMAT);
         self.depth_copy_tex = create_color_texture(gpu.device(), width, height, DEPTH_COPY_FORMAT);
         self.depth_tex = create_depth_texture_view(gpu.device(), width, height);
-        // Update params uniform.
-        let params = ParamsUniform {
-            resolution: [width as f32, height as f32],
-            texel_size: [1.0 / width.max(1) as f32, 1.0 / height.max(1) as f32],
-            _pad0: 0.0,
-            _pad1: 0.0,
-        };
+        // Update params uniform — preserve camera basis, update aspect.
+        self.aspect = width as f32 / height.max(1) as f32;
+        let params = self.build_params(width, height);
         gpu.queue().write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
         // Recreate bind group with new textures.
@@ -233,6 +262,49 @@ impl PostProcessPipeline {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
         });
+    }
+
+    /// Build the params uniform from current camera state + resolution.
+    fn build_params(&self, width: u32, height: u32) -> ParamsUniform {
+        ParamsUniform {
+            resolution: [width as f32, height as f32],
+            texel_size: [1.0 / width.max(1) as f32, 1.0 / height.max(1) as f32],
+            cam_pos: [self.cam_pos.x, self.cam_pos.y, self.cam_pos.z],
+            _pad0: 0.0,
+            cam_forward: [self.cam_forward.x, self.cam_forward.y, self.cam_forward.z],
+            _pad1: 0.0,
+            cam_right: [self.cam_right.x, self.cam_right.y, self.cam_right.z],
+            _pad2: 0.0,
+            cam_up: [self.cam_up.x, self.cam_up.y, self.cam_up.z],
+            tan_half_fov: self.tan_half_fov,
+            aspect: self.aspect,
+            _pad3: 0.0,
+            _pad4: 0.0,
+            _pad5: 0.0,
+        }
+    }
+
+    /// Update camera basis for SSR. Call once per frame before drawing.
+    /// `cam_pos`, `cam_forward`, `cam_right`, `cam_up` are world-space
+    /// unit vectors; `tan_half_fov` is tan(fov_y/2); `aspect` is w/h.
+    pub fn update_camera(
+        &mut self,
+        gpu: &Gpu,
+        cam_pos: Vec3,
+        cam_forward: Vec3,
+        cam_right: Vec3,
+        cam_up: Vec3,
+        tan_half_fov: f32,
+        aspect: f32,
+    ) {
+        self.cam_pos = cam_pos;
+        self.cam_forward = cam_forward;
+        self.cam_right = cam_right;
+        self.cam_up = cam_up;
+        self.tan_half_fov = tan_half_fov;
+        self.aspect = aspect;
+        let params = self.build_params(self.width, self.height);
+        gpu.queue().write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
     }
 
     /// The offscreen color texture view (scene renders here).
