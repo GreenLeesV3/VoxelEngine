@@ -4,9 +4,9 @@
 
 struct SkyCam {
     view_proj: mat4x4f,
-    cam_pos: vec4f,
+    cam_pos: vec4f,      // xyz = cam pos, w = tan(fov_y / 2)
     sun_dir: vec4f,      // xyz = sun direction (unit), w = sun strength
-    sky_color: vec4f,    // xyz = sky/fog color, w = unused
+    sky_color: vec4f,    // xyz = sky/fog color, w = aspect ratio
     sun_color: vec4f,    // xyz = sun color, w = game time
     cam_forward: vec4f,  // xyz = camera forward (unit)
     cam_right: vec4f,    // xyz = camera right (unit)
@@ -29,9 +29,17 @@ fn vs(@builtin(vertex_index) vi: u32) -> VOut {
     );
     var out: VOut;
     out.clip = vec4f(p[vi], 1.0, 1.0);
-    // Reconstruct view direction from camera basis vectors.
+    // Reconstruct the world-space view ray for this pixel using the
+    // actual FOV and aspect ratio so the sky matches the camera frustum.
+    // NDC x,y ∈ [-1,1] map to tan(fov/2) * aspect on X and tan(fov/2)
+    // on Y, then normalize the resulting direction.
     let ndc = p[vi];
-    out.view_dir = normalize(cam.cam_forward.xyz + cam.cam_right.xyz * ndc.x + cam.cam_up.xyz * ndc.y);
+    let tan_half_fov = cam.cam_pos.w;
+    let aspect = cam.sky_color.w;
+    let ray = cam.cam_forward.xyz
+        + cam.cam_right.xyz * (ndc.x * tan_half_fov * aspect)
+        + cam.cam_up.xyz * (ndc.y * tan_half_fov);
+    out.view_dir = normalize(ray);
     return out;
 }
 

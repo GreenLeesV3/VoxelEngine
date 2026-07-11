@@ -1646,9 +1646,9 @@ impl App for VoxApp {
                 self.gpu.queue(),
                 &SkyUniform {
                     view_proj: view_proj.to_cols_array_2d(),
-                    cam_pos: [self.camera.pos.x, self.camera.pos.y, self.camera.pos.z, 0.0],
+                    cam_pos: [self.camera.pos.x, self.camera.pos.y, self.camera.pos.z, (70.0f32.to_radians() * 0.5).tan()],
                     sun_dir: [dn.sun_dir.x, dn.sun_dir.y, dn.sun_dir.z, dn.sun_strength],
-                    sky_color: [dn.sky_color.x, dn.sky_color.y, dn.sky_color.z, 0.0],
+                    sky_color: [dn.sky_color.x, dn.sky_color.y, dn.sky_color.z, aspect],
                     sun_color: [dn.sun_color.x, dn.sun_color.y, dn.sun_color.z, self.game_time],
                     cam_forward: [fwd.x, fwd.y, fwd.z, 0.0],
                     cam_right: [right.x, right.y, right.z, 0.0],
