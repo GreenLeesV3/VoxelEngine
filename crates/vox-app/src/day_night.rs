@@ -30,11 +30,11 @@ const DAWN_START: f32 = NIGHT_START + NIGHT_SECS;                      // 1170
 const SUNRISE_START: f32 = DAWN_START + DAWN_SECS;                     // 1230
 // CYCLE_END = CYCLE_SECS = 1320
 
-/// Per-phase sky color constants (zenith colors from CazToon).
-const DAY_SKY: Vec3 = Vec3::new(0.45, 0.66, 0.90);
-const SUNSET_SKY: Vec3 = Vec3::new(0.95, 0.45, 0.25);
-const BLUE_HOUR_SKY: Vec3 = Vec3::new(0.20, 0.25, 0.55);
-const NIGHT_SKY: Vec3 = Vec3::new(0.03, 0.04, 0.08);
+/// Per-phase sky color constants (horizon colors from CazToon's settings/sky.glsl).
+const DAY_SKY: Vec3 = Vec3::new(0.65, 0.95, 1.00);
+const SUNSET_SKY: Vec3 = Vec3::new(1.00, 0.85, 0.24);
+const BLUE_HOUR_SKY: Vec3 = Vec3::new(0.00, 0.70, 1.00);
+const NIGHT_SKY: Vec3 = Vec3::new(0.39, 0.40, 0.62);
 const DAWN_SKY: Vec3 = Vec3::new(0.12, 0.18, 0.45);
 const SUNRISE_SKY: Vec3 = Vec3::new(0.65, 0.45, 0.55);
 

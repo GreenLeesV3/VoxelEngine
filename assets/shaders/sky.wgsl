@@ -76,52 +76,74 @@ fn fs(in: VOut) -> SkyFOut {
     let cos_angle = dot(dir, sun_dir);
 
     // Sky colors from the 6-phase ToD system (cam.sky_color.xyz
-    // carries the weighted blend of day/sunset/blue hour/night/
-    // dawn/sunrise from day_night.rs). Use it as the horizon color
-    // and derive a darker zenith by multiplying by 0.6.
+    // carries the weighted blend from day_night.rs). Use it as the
+    // horizon color and derive zenith + mid colors from it.
+    // CazToon-style 3-layer gradient: horizon → mid → zenith.
     let horizon_color = cam.sky_color.xyz;
-    let top_color = horizon_color * 0.6;
+    let mid_color = horizon_color * 0.75;
+    let top_color = horizon_color * 0.5;
 
-    // Sky gradient: horizon at dir.y=0, top at dir.y=1.
+    // 3-layer sky gradient matching CazToon's horizon/mid/zenith blend.
     let gradient = clamp(dir_up * 0.5 + 0.5, 0.0, 1.0);
-    var sky = mix(horizon_color, top_color, pow(gradient, 0.8));
+    var sky = mix(horizon_color, mid_color, smoothstep(0.0, 0.52, gradient));
+    sky = mix(sky, top_color, smoothstep(0.52, 0.85, gradient));
+
+    // Sky saturation boost (CazToon uses 2.0x saturation on sky).
+    let sky_lum = dot(sky, vec3f(0.299, 0.587, 0.114));
+    sky = mix(vec3f(sky_lum), sky, 1.8);
 
     // Sunset/sunrise warm tint near horizon — driven by sun elevation.
     let sunset_factor = clamp(1.0 - abs(sun_dir.y) * 4.0, 0.0, 1.0);
     let horizon_glow = clamp(1.0 - abs(dir.y) * 3.0, 0.0, 1.0) * sunset_factor;
-    sky = mix(sky, cam.sun_color.xyz, horizon_glow * 0.3 * sun_strength);
+    sky = mix(sky, cam.sun_color.xyz, horizon_glow * 0.35 * sun_strength);
 
     // Rayleigh scattering — sky brighter near sun.
     let rayleigh_val = rayleigh(cos_angle);
     sky += cam.sun_color.xyz * rayleigh_val * 0.15 * sun_strength;
 
-    // Sun disc — bright spot at sun direction.
-    // Use a smooth gaussian falloff instead of Mie pow() which
-    // overflows to inf/NaN at cos_angle=1 (the "black hole" bug).
+    // Sun disc — bright spot at sun direction with CazToon-style glow.
     let sun_angle = acos(clamp(cos_angle, -1.0, 1.0));
-    let sun_disc = exp(-sun_angle * sun_angle * 800.0); // sharp gaussian
+    let sun_disc = exp(-sun_angle * sun_angle * 800.0);
     let sun_glow = sun_disc * 3.0;
-    // Sun disc visible during day, fades at sunset, invisible at night.
-    // Tied directly to sun_strength so the disc disappears as the sun sets.
     sky += cam.sun_color.xyz * sun_glow * sun_strength;
+
+    // Sun atmospheric glow — wide halo, strong at sunrise/sunset.
+    let sun_atmo = exp(-sun_angle * sun_angle * 30.0) * 0.3;
+    sky += cam.sun_color.xyz * sun_atmo * sun_strength;
 
     // Sun halo — softer glow around the disc, fades with the sun.
     let halo = exp(-sun_angle * sun_angle * 80.0) * 0.4;
     sky += cam.sun_color.xyz * halo * sun_strength;
 
-    // Stars at night — snap direction to a grid to prevent shimmer.
+    // Stars at night — CazToon-style with density, size, and twinkle.
     if (sun_strength < 0.15) {
-        let grid_dir = floor(dir * 200.0) / 200.0;
-        let star_hash = fract(sin(grid_dir.x * 127.1 + grid_dir.y * 311.7 + grid_dir.z * 74.7) * 43758.5453);
-        let star_brightness = smoothstep(0.992, 1.0, star_hash);
         let star_fade = (0.15 - sun_strength) / 0.15;
         let above_horizon = step(0.0, dir.y);
-        sky += vec3f(star_brightness * star_fade * above_horizon);
+
+        // Grid-based star field (STAR_SCALE=40, STAR_DENSITY=0.20)
+        let grid_dir = floor(dir * 40.0) / 40.0;
+        let star_hash = fract(sin(grid_dir.x * 127.1 + grid_dir.y * 311.7 + grid_dir.z * 74.7) * 43758.5453);
+        let star_density = step(0.80, star_hash);  // 20% of cells have stars
+
+        // Star size (STAR_SIZE=0.18) — soft circle within the cell
+        let cell_fract = fract(dir * 40.0);
+        let star_dist = length(cell_fract - 0.5);
+        let star_shape = 1.0 - smoothstep(0.0, 0.18, star_dist);
+
+        // Twinkle (STAR_TWINKLE=0.6) — time-based brightness variation
+        let twinkle = 0.7 + 0.3 * sin(cam.sun_color.w * 3.0 + star_hash * 6.28);
+        let star_brightness = star_density * star_shape * star_fade * 0.5 * twinkle * above_horizon;
+        sky += vec3f(star_brightness);
+
+        // Night nebula — subtle colored cloud patches (CazToon-style)
+        let neb_noise = fract(sin(grid_dir.x * 13.1 + grid_dir.z * 27.7) * 43758.5453);
+        let nebula = smoothstep(0.7, 0.95, neb_noise) * star_fade * 0.15 * above_horizon;
+        sky += vec3f(nebula * 0.2, nebula * 0.1, nebula * 0.8);  // blue-purple
     }
 
     var out: SkyFOut;
     out.color = vec4f(sky, 1.0);
-    out.normal = vec4f(0.0, 0.0, 0.0, 0.0);    // sky has no normal
-    out.linear_depth = vec4f(1.0, 0.0, 0.0, 0.0); // sky = far depth
+    out.normal = vec4f(0.0, 0.0, 0.0, 0.0);
+    out.linear_depth = vec4f(1.0, 0.0, 0.0, 0.0);
     return out;
 }
