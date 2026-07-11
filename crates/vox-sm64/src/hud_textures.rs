@@ -77,7 +77,9 @@ pub fn mio0_decode(input: &[u8]) -> Result<Vec<u8>, HudTextureError> {
     let dest_size = read_u32_be(&input[4..8]) as usize;
     let comp_offset = read_u32_be(&input[8..12]) as usize;
     let uncomp_offset = read_u32_be(&input[12..16]) as usize;
-
+    if comp_offset < MIO0_HEADER_LENGTH || comp_offset >= input.len() || uncomp_offset > input.len() {
+        return Err(HudTextureError::Mio0Decode("offset out of bounds".to_owned()));
+    }
     let mut out: Vec<u8> = Vec::with_capacity(dest_size);
 
     let mut bit_idx: usize = 0;
@@ -162,10 +164,14 @@ pub fn rgba16_to_rgba8(data: &[u8], width: usize, height: usize) -> Vec<u8> {
 
     for px in 0..pixel_count {
         let off = px * 2;
-        if off + 1 >= data.len() {
-            break;
-        }
-        let pixel = u16::from_be_bytes([data[off], data[off + 1]]);
+        let pixel = if off + 1 < data.len() {
+            u16::from_be_bytes([data[off], data[off + 1]])
+        } else {
+            // Input shorter than width*height*2 — pad missing bytes
+            // with zeros (transparent black) instead of silently
+            // truncating the output.
+            0
+        };
 
         let r5 = ((pixel >> 11) & 0x1F) as u8;
         let g5 = ((pixel >> 6) & 0x1F) as u8;

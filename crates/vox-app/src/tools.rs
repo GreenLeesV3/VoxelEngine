@@ -541,7 +541,7 @@ impl Tools {
         eye_m: Vec3,
         look: Vec3,
         player: Aabb,
-    ) -> Option<IVec3> {
+    ) -> Option<(IVec3, Voxel)> {
         let dir = look.normalize_or_zero();
         if dir == Vec3::ZERO {
             return None;
@@ -563,8 +563,9 @@ impl Tools {
             && (c.y + half > player.min.y && c.y - half < player.max.y)
             && (c.z + half > player.min.z && c.z - half < player.max.z);
         if !overlaps {
+            let old = world.get_voxel(target);
             world.set_voxel(target, Voxel(ember_id.0));
-            Some(target)
+            Some((target, old))
         } else {
             None
         }

@@ -87,6 +87,9 @@ pub struct MarioMode {
     /// None if extraction failed — Mario mode works without them, the
     /// HUD just falls back to the egui-drawn approximation.
     pub hud_textures: Option<vox_sm64::HudTextures>,
+    /// Cached Arc<MarioHudTextures> built from hud_textures once.
+    /// Avoids rebuilding ~64KB of Arc<[u8]> every frame.
+    hud_texture_cache: Option<std::sync::Arc<vox_debug::hud::MarioHudTextures>>,
 }
 
 impl MarioMode {
@@ -158,6 +161,7 @@ impl MarioMode {
         last_action: 0,
         debris_objects: HashMap::new(),
         hud_textures,
+        hud_texture_cache: None,
         tick_alpha: 0.0,
         prev_action: 0,
         })
@@ -326,6 +330,29 @@ impl MarioMode {
     /// Mario's current action bitmask. For the HUD action label.
     pub fn action(&self) -> u32 {
         self.last_action
+    }
+
+    /// Get cached MarioHudTextures for the HUD, building them once from
+    /// the raw ROM textures. Subsequent calls return the cached Arc.
+    pub fn hud_texture_cache(&mut self) -> Option<&std::sync::Arc<vox_debug::hud::MarioHudTextures>> {
+        if self.hud_texture_cache.is_none() && self.hud_textures.is_some() {
+            let ht = self.hud_textures.as_ref().unwrap();
+            self.hud_texture_cache = Some(std::sync::Arc::new(vox_debug::hud::MarioHudTextures {
+                power_meter_left: ht.power_meter_left.as_slice().into(),
+                power_meter_right: ht.power_meter_right.as_slice().into(),
+                power_meter_segments: std::array::from_fn(|i| {
+                    ht.power_meter_segments[i].as_slice().into()
+                }),
+                coin_icon: ht.coin_icon.as_slice().into(),
+                star_icon: ht.star_icon.as_slice().into(),
+                mario_head: ht.mario_head.as_slice().into(),
+                multiply: ht.multiply.as_slice().into(),
+                digits: std::array::from_fn(|i| {
+                    ht.digits[i].as_slice().into()
+                }),
+            }));
+        }
+        self.hud_texture_cache.as_ref()
     }
 
     /// Synchronize libsm64 surface objects for nearby debris bodies.

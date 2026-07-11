@@ -9,4 +9,3 @@ rust-version.workspace = true
 vox-core = { workspace = true }
 vox-world = { workspace = true }
 glam = { workspace = true }
-tracing = { workspace = true }

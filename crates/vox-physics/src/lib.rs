@@ -7,6 +7,7 @@ pub mod broadphase;
 pub mod character;
 pub mod contact;
 pub mod destruction;
+pub mod grid;
 pub mod solver;
 
 pub use body::{Body, BodyId, GridRayHit, MassProps, VoxelGrid, mass_props, raycast_grid, surface_points};

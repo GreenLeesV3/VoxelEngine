@@ -4,7 +4,7 @@
 //! extinguished → zero cost). See `docs/plans/2026-07-09-fire-system-design.md`.
 
 use glam::IVec3;
-use vox_core::FxHashMap;
+use vox_core::{FxHashMap, FxHashSet};
 use vox_world::{Voxel, World};
 
 const NEIGHBORS_6: [IVec3; 6] = [
@@ -209,10 +209,12 @@ impl FireSim {
                 }
             }
         }
+        let mut ignited_this_tick: FxHashSet<IVec3> = FxHashSet::default();
         for (pos, original) in &new_ignitions {
             if *original != table.ember {
                 world.set_voxel(*pos, table.ember);
             }
+            ignited_this_tick.insert(*pos);
             self.burning.insert(*pos, BurnState {
                 ticks: 0,
                 original: *original,
@@ -225,7 +227,12 @@ impl FireSim {
         let mut consumed: Vec<(IVec3, Voxel)> = Vec::new();
         let mut stale: Vec<IVec3> = Vec::new();
         for (&pos, state) in &mut self.burning {
-            state.ticks += 1;
+            // Skip the tick increment on the ignition tick: a cell
+            // ignited this tick (via spread) has ticks == 0 and should
+            // only start incrementing on subsequent ticks.
+            if !ignited_this_tick.contains(&pos) {
+                state.ticks += 1;
+            }
             // If the cell is no longer ember in the world (e.g. it was
             // extracted as a debris body by detach_unsupported), drop it
             // silently — no residue, no event. The burn continues on the

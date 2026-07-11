@@ -62,6 +62,8 @@ pub fn compute(game_time: f32) -> DayNightParams {
 
     if cycle_t < DAY_END {
         // DAY: sun arcs from east horizon → zenith → west horizon.
+        // Starts at sin(0)=0 (matching sunrise end) and ends at sin(PI)=0
+        // (matching sunset start).
         let day_t = cycle_t / DAY_END; // 0..1
         let angle = day_t * std::f32::consts::PI;
         sun_height = angle.sin(); // 0→1→0
@@ -69,23 +71,26 @@ pub fn compute(game_time: f32) -> DayNightParams {
         daylight = clamp01(sun_height * 1.8);
         horizon_glow = clamp01(1.0 - sun_height * 4.0);
     } else if cycle_t < SUNSET_END {
-        // SUNSET: sun drops toward horizon.
+        // SUNSET: sun descends from the horizon into the start-of-night
+        // depth. Continuous with day end (sin(PI)=0) and night start (-0.3).
         let sunset_t = (cycle_t - DAY_END) / SUNSET_SECS; // 0..1
-        sun_height = (1.0 - sunset_t) * 0.15;
+        sun_height = sunset_t * -0.3; // 0→-0.3
         azimuth_phase = 1.0; // west
         daylight = clamp01((1.0 - sunset_t) * 0.6);
         horizon_glow = 1.0;
     } else if cycle_t < NIGHT_END {
-        // NIGHT: sun well below horizon.
+        // NIGHT: sun well below horizon. Starts and ends at -0.3
+        // (matching sunset end and sunrise start).
         let night_t = (cycle_t - SUNSET_END) / NIGHT_SECS; // 0..1
         sun_height = -0.3 - 0.5 * (night_t * std::f32::consts::PI).sin();
         azimuth_phase = 1.0 - night_t; // west→east
         daylight = 0.0;
         horizon_glow = 0.0;
     } else {
-        // SUNRISE: sun rises from below horizon toward east.
+        // SUNRISE: sun rises from the start-of-night depth up to the
+        // horizon. Continuous with night end (-0.3) and day start (0).
         let sunrise_t = (cycle_t - NIGHT_END) / SUNRISE_SECS; // 0..1
-        sun_height = sunrise_t * 0.15;
+        sun_height = -0.3 + sunrise_t * 0.3; // -0.3→0
         azimuth_phase = 0.0; // east
         daylight = clamp01(sunrise_t * 0.6);
         horizon_glow = 1.0;

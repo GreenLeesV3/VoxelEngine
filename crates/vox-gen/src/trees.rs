@@ -10,7 +10,7 @@ use glam::{IVec3, Vec2, Vec3};
 use vox_core::{MaterialRegistry, WorldConfig, voxel_at, voxel_center_m};
 use vox_world::{AIR, Voxel, World};
 
-use crate::noise::{Fbm, hash2};
+use crate::noise::{Fbm, hash2, mix_seed_u64};
 use crate::terrain::TerrainGen;
 
 /// Tree material ids resolved once from the registry.
@@ -65,8 +65,8 @@ fn unit(h: u32) -> f32 {
 
 /// Decide tree positions for a world, purely from config + terrain.
 pub fn plan_trees(cfg: &WorldConfig, terrain: &TerrainGen) -> Vec<TreeInstance> {
-    let seed = (cfg.seed as u32) ^ ((cfg.seed >> 32) as u32) ^ 0x7EE5;
-    let density = Fbm::new(3, seed ^ 0xD375);
+    let seed = mix_seed_u64(cfg.seed, 0x7EE5);
+    let density = Fbm::new(3, mix_seed_u64(cfg.seed, 0xD375));
     let cells_x = (cfg.extent_m[0] / CELL_M) as i32;
     let cells_z = (cfg.extent_m[2] / CELL_M) as i32;
     let mut trees = Vec::new();

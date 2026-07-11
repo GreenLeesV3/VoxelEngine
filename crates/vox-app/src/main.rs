@@ -822,14 +822,20 @@ impl VoxApp {
                     CarveOutcome::default()
                 }
                 Tool::Ember => {
-                    if let Some(pos) = self.tools
+                    let mut outcome = CarveOutcome::default();
+                    if let Some((pos, old)) = self.tools
                         .place_ember(&mut self.world, &self.registry, eye, look, self.player.ctrl.aabb())
                     {
                         if let Some(f) = &mut self.fire {
                             f.ignite(&mut self.world, pos);
+                            // Wake the fire sim around the ember so it
+                            // picks up any pre-existing embers in the
+                            // vicinity that weren't tracked yet.
+                            f.wake_region(&mut self.world, pos - IVec3::ONE, pos + IVec3::ONE + IVec3::ONE);
                         }
+                        outcome.voxel_diff = vec![(pos, old)];
                     }
-                    CarveOutcome::default()
+                    outcome
                 }
             };
             // A carved body is despawned and replaced, not updated in
@@ -1418,6 +1424,9 @@ impl App for VoxApp {
             for (min, max) in self.world.drain_dirty_regions() {
                 self.phys.wake_region(min.as_vec3() * s, max.as_vec3() * s);
                 self.fluid.wake_region(&self.world, min, max);
+                if let Some(w) = &mut self.weathering {
+                    w.wake_region(&self.world, min, max);
+                }
             }
             self.remesh.absorb_dirty(&mut self.world);
             self.remesh.dispatch(&self.world, eye, Voxel(9));
@@ -1536,26 +1545,11 @@ impl App for VoxApp {
                 .map(|d| d.color)
                 .unwrap_or([0.8, 0.8, 0.8]),
             mario: mario_active.then(|| {
-                let mode = self.mario_mode.as_ref().unwrap();
+                let mode = self.mario_mode.as_mut().unwrap();
                 vox_debug::hud::MarioHudState {
                     health: mode.health(),
                     action: mode.action(),
-                    textures: mode.hud_textures.as_ref().map(|ht| {
-                        std::sync::Arc::new(vox_debug::hud::MarioHudTextures {
-                            power_meter_left: ht.power_meter_left.as_slice().into(),
-                            power_meter_right: ht.power_meter_right.as_slice().into(),
-                            power_meter_segments: std::array::from_fn(|i| {
-                                ht.power_meter_segments[i].as_slice().into()
-                            }),
-                            coin_icon: ht.coin_icon.as_slice().into(),
-                            star_icon: ht.star_icon.as_slice().into(),
-                            mario_head: ht.mario_head.as_slice().into(),
-                            multiply: ht.multiply.as_slice().into(),
-                            digits: std::array::from_fn(|i| {
-                                ht.digits[i].as_slice().into()
-                            }),
-                        })
-                    }),
+                    textures: mode.hud_texture_cache().cloned(),
                     // Placeholders — wired when collectibles (#29) and
                     // death/respawn are implemented.
                     coins: 0,

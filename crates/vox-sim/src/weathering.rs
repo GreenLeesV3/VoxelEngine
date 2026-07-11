@@ -168,6 +168,35 @@ impl Weathering {
             world.set_voxel(pos, self.table.dirt);
         }
     }
+
+    /// Reactivate weathering awareness for a region (e.g. after a world
+    /// edit removes water with a tool). The weathering sim is normally
+    /// event-driven by fluid `ContactEvent`s — a tool that directly sets
+    /// a water cell to air bypasses the fluid sim entirely, so no
+    /// `Vacated` event ever fires and adjacent mud never starts drying.
+    /// This scans the region for mud cells whose water neighbor is now
+    /// gone and starts their drying timer.
+    pub fn wake_region(&mut self, world: &World, min: IVec3, max: IVec3) {
+        let t = self.table;
+        let (bounds_min, bounds_max) = world.bounds_voxels();
+        let min = min.max(bounds_min);
+        let max = max.min(bounds_max);
+        for x in min.x..max.x {
+            for y in min.y..max.y {
+                for z in min.z..max.z {
+                    let p = IVec3::new(x, y, z);
+                    if world.get_voxel(p) != t.mud {
+                        continue;
+                    }
+                    // If no water neighbor remains, start drying (if not
+                    // already on the clock).
+                    if !NEIGHBORS_6.iter().any(|&n| world.get_voxel(p + n) == t.water) {
+                        self.drying.entry(p).or_insert(0);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

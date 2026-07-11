@@ -22,20 +22,7 @@ use crate::BodyId;
 use crate::body::{Body, VoxelGrid, mass_props};
 use crate::destruction::{ExplosionShape, small_hash};
 use crate::solver::PhysicsWorld;
-
-const DIRS: [IVec3; 6] = [
-    IVec3::X,
-    IVec3::NEG_X,
-    IVec3::Y,
-    IVec3::NEG_Y,
-    IVec3::Z,
-    IVec3::NEG_Z,
-];
-
-#[inline]
-fn grid_index(dims: IVec3, p: IVec3) -> usize {
-    (p.x + p.z * dims.x + p.y * dims.x * dims.z) as usize
-}
+use crate::grid::{DIRS, grid_index};
 
 /// Visit every voxel in `[min, max)` (clipped to the grid's own bounds),
 /// calling `edit(local_pos, current)`; `Some(new)` writes it. Returns the

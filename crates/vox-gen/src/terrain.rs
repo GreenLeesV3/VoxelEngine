@@ -10,7 +10,7 @@ use vox_core::consts::CHUNK_SIZE;
 use vox_core::{MaterialRegistry, WorldConfig};
 use vox_world::{Chunk, Voxel, World};
 
-use crate::noise::Fbm;
+use crate::noise::{Fbm, mix_seed_u64};
 
 /// Terrain material ids resolved once from the registry.
 #[derive(Copy, Clone, Debug)]
@@ -60,7 +60,7 @@ impl TerrainGen {
             cfg.extent_m[1] >= MIN_HEIGHT_M + CEIL_MARGIN_M,
             "world extent_m.y must be >= MIN_HEIGHT_M + CEIL_MARGIN_M for terrain"
         );
-        let s = |k: u32| -> u32 { (cfg.seed as u32).wrapping_add((cfg.seed >> 32) as u32) ^ k };
+        let s = |k: u32| -> u32 { mix_seed_u64(cfg.seed, k) };
         Self {
             continents: Fbm::new(5, s(0x0001)),
             hills: Fbm::new(4, s(0x00E2)),

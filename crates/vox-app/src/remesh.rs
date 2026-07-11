@@ -65,6 +65,24 @@ impl RemeshQueue {
             self.pending.insert(key, self.counter);
             self.latest.insert(key, self.counter);
         }
+        // Cap `latest` growth: once it exceeds the threshold, drop entries
+        // that are no longer pending or in flight — their generation is no
+        // longer needed for the stale-result check.
+        const LATEST_CAP: usize = 1000;
+        if self.latest.len() > LATEST_CAP {
+            let to_remove: Vec<IVec3> = self
+                .latest
+                .keys()
+                .filter(|k| !self.pending.contains_key(k))
+                .copied()
+                .collect();
+            // Keep at least the most recent LATEST_CAP entries by counter
+            // value; only remove the surplus non-pending entries.
+            let surplus = self.latest.len() - LATEST_CAP;
+            for key in to_remove.into_iter().take(surplus) {
+                self.latest.remove(&key);
+            }
+        }
     }
 
     /// Dispatch up to the per-frame budget, nearest chunks first.

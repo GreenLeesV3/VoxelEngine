@@ -56,6 +56,7 @@ use vox_world::{AIR, SolidLookup, Voxel, World};
 use crate::BodyId;
 use crate::body::{Body, VoxelGrid, mass_props};
 use crate::solver::PhysicsWorld;
+use crate::grid::DIRS;
 
 /// Extra voxels searched beyond the carved region on every side when
 /// computing [`CarveResult::region`] — used only to size the `wake_region`
@@ -353,16 +354,6 @@ pub fn carve_capsule(world: &mut World, start_m: Vec3, end_m: Vec3, radius_m: f3
         spawned: Vec::new(),
     }
 }
-
-/// The six face-adjacent directions.
-const DIRS: [IVec3; 6] = [
-    IVec3::X,
-    IVec3::NEG_X,
-    IVec3::Y,
-    IVec3::NEG_Y,
-    IVec3::Z,
-    IVec3::NEG_Z,
-];
 
 /// Early-bailout cap for [`flood_from`]'s "is this obviously anchored"
 /// check — deliberately much larger than [`MAX_BODY_VOXELS`]. The two caps

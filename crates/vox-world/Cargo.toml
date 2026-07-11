@@ -8,5 +8,4 @@ rust-version.workspace = true
 [dependencies]
 vox-core = { workspace = true }
 glam = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }

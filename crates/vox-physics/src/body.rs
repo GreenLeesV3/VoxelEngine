@@ -4,6 +4,7 @@
 use glam::{IVec3, Mat3, Quat, Vec3};
 use vox_core::MaterialRegistry;
 use vox_world::{AIR, Voxel};
+use crate::grid::DIRS;
 
 /// A dense little voxel grid owned by a body. Indexed `x + z*dx + y*dx*dz`.
 #[derive(Clone, Debug)]
@@ -219,14 +220,6 @@ pub fn mass_props(grid: &VoxelGrid, reg: &MaterialRegistry, voxel_size_m: f32) -
 /// Surface sample points: centers of solid voxels with at least one empty
 /// face neighbor, in meters relative to the grid's minimum corner.
 pub fn surface_points(grid: &VoxelGrid, voxel_size_m: f32) -> Vec<Vec3> {
-    const DIRS: [IVec3; 6] = [
-        IVec3::X,
-        IVec3::NEG_X,
-        IVec3::Y,
-        IVec3::NEG_Y,
-        IVec3::Z,
-        IVec3::NEG_Z,
-    ];
     let mut points = Vec::new();
     for y in 0..grid.dims.y {
         for z in 0..grid.dims.z {

@@ -77,7 +77,7 @@ pub type BodyMeshKey = (u32, u32);
 /// mesh store.
 pub struct VoxelPipeline {
     pipeline: wgpu::RenderPipeline,
-    /// Water-only pipeline variant: alpha blending, depth_write enabled,
+    /// Water-only pipeline variant: alpha blending, depth_write disabled,
     /// specialization constant water_pass=1 so only mat_id==9 fragments
     /// survive. Draws after the opaque pass so terrain behind water is
     /// already in the depth buffer and shows through the alpha blend.
@@ -266,8 +266,8 @@ impl VoxelPipeline {
 
         // Water pipeline: same shader/layout, but specialization constant
         // water_pass=1 (only mat_id==9 fragments survive), alpha blending.
-        // Depth writes enabled so void behind water is properly occluded —
-        // terrain (drawn in opaque pass) still shows through the alpha blend.
+        // Depth writes disabled so translucent water doesn't occlude terrain
+        // drawn in the opaque pass — it still shows through the alpha blend.
         let water_constants = wgpu::PipelineCompilationOptions {
             constants: &std::collections::HashMap::from([("water_pass".into(), 1.0_f64)]),
             ..Default::default()

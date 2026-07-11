@@ -19,6 +19,23 @@ fn avalanche(mut x: u32) -> u32 {
     x
 }
 
+/// Mix a 64-bit seed with a 32-bit salt into a well-distributed 32-bit
+/// value, using a splitmix64-style finalizer so the full 64-bit entropy
+/// is used rather than folding the halves together with XOR (which loses
+/// information when the high and low words share structure).
+#[inline]
+pub fn mix_seed_u64(seed: u64, salt: u32) -> u32 {
+    // splitmix64 step on the salted 64-bit value.
+    let mut z = seed.wrapping_add(u64::from(salt).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_1155);
+    z ^= z >> 31;
+    // Fold to 32 bits with a final mix so both halves contribute.
+    let lo = z as u32;
+    let hi = (z >> 32) as u32;
+    lo.wrapping_add(hi.wrapping_mul(0x9E37_79B9))
+}
+
 /// Hash a 2-D lattice point with a seed.
 #[inline]
 pub fn hash2(ix: i32, iy: i32, seed: u32) -> u32 {

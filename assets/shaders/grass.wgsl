@@ -64,7 +64,8 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
     let quantized = floor(raw * bands + 0.5) / bands;
     let smooth_q = mix(quantized, raw, smoothstep(0.45, 0.55, fract(raw * bands)));
     let sun = pow(smooth_q, 1.5) * cam.sun_dir.w * cam.sun_color.xyz;
-    let lit = color * (ambient + sun);
+    let fill = max(-ndotl, 0.0) * cam.sky_color.w;
+    let lit = color * (ambient + sun + vec3f(fill));
 
     // Distance fog — matches the voxel pipeline.
     let dist = length(cam.cam_pos.xyz - in.world_pos);

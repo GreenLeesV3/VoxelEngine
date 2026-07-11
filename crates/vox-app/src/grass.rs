@@ -59,7 +59,7 @@ pub fn generate_grass(
     world: &World,
     cam_pos: Vec3,
     voxel_size: f32,
-    game_time: f32,
+    _game_time: f32,
 ) -> Vec<GrassVertex> {
     let mut vertices = Vec::new();
     let vs = voxel_size;

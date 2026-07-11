@@ -52,6 +52,44 @@ impl Default for Tunables {
     }
 }
 
+impl Tunables {
+    /// Check that all parameters are within physically valid ranges.
+    /// Returns `Err` with a message naming the first violation.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(0.0..=1.0).contains(&self.contact_beta) {
+            return Err(format!(
+                "contact_beta must be in [0, 1], got {}",
+                self.contact_beta
+            ));
+        }
+        if self.friction < 0.0 {
+            return Err(format!("friction must be >= 0, got {}", self.friction));
+        }
+        if self.sleep_lin < 0.0 {
+            return Err(format!("sleep_lin must be >= 0, got {}", self.sleep_lin));
+        }
+        if self.sleep_ang < 0.0 {
+            return Err(format!("sleep_ang must be >= 0, got {}", self.sleep_ang));
+        }
+        if self.blast_power < 0.0 {
+            return Err(format!(
+                "blast_power must be >= 0, got {}",
+                self.blast_power
+            ));
+        }
+        if self.fly_speed < 0.0 {
+            return Err(format!("fly_speed must be >= 0, got {}", self.fly_speed));
+        }
+        if self.fracture_sensitivity < 0.0 {
+            return Err(format!(
+                "fracture_sensitivity must be >= 0, got {}",
+                self.fracture_sensitivity
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

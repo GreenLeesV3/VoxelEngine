@@ -76,6 +76,12 @@ impl SurfaceProvider {
         true
     }
 
+    /// Force the next `update` call to regenerate surfaces regardless of
+    /// how far Mario has moved. Call this after terrain edits that
+    /// change collision geometry near Mario.
+    pub fn force_invalidate(&mut self) {
+        self.last_center = Vec3::splat(f32::INFINITY);
+    }
     pub fn surfaces(&self) -> &[SM64Surface] {
         &self.surfaces
     }

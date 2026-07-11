@@ -2704,7 +2704,6 @@ name = "vox-gen"
 version = "0.1.0"
 dependencies = [
  "glam",
- "tracing",
  "vox-core",
  "vox-world",
 ]
@@ -2724,7 +2723,6 @@ name = "vox-physics"
 version = "0.1.0"
 dependencies = [
  "glam",
- "rayon",
  "tracing",
  "vox-core",
  "vox-world",
@@ -2783,7 +2781,6 @@ name = "vox-world"
 version = "0.1.0"
 dependencies = [
  "glam",
- "thiserror 2.0.18",
  "tracing",
  "vox-core",
 ]

@@ -87,6 +87,9 @@ pub struct InputState {
     gamepad_buttons_down: HashSet<GamepadButton>,
     /// Gamepad buttons pressed this frame (edge).
     gamepad_pressed_this_frame: HashSet<GamepadButton>,
+    /// Scratch set reused across `poll_gamepad` calls to avoid per-frame
+    /// allocation when building the new held-button set.
+    gamepad_down_scratch: HashSet<GamepadButton>,
     /// True when a gamepad is connected and producing input.
     pub gamepad_connected: bool,
 }
@@ -177,10 +180,12 @@ impl InputState {
         self.left_stick = Self::apply_deadzone(Vec2::new(lx, ly), STICK_DZ);
         self.right_stick = Self::apply_deadzone(Vec2::new(rx, ry), STICK_DZ);
 
-        // Triggers — 0..=1
-        self.left_trigger = gamepad.value(gilrs::Axis::LeftZ).max(0.0);
-        self.right_trigger = gamepad.value(gilrs::Axis::RightZ).max(0.0);
-
+        // Triggers — 0..=1, with a deadzone so light rest pressure reads 0.
+        const TRIGGER_DZ: f32 = 0.1;
+        let lt = gamepad.value(gilrs::Axis::LeftZ).max(0.0);
+        let rt = gamepad.value(gilrs::Axis::RightZ).max(0.0);
+        self.left_trigger = if lt > TRIGGER_DZ { (lt - TRIGGER_DZ) / (1.0 - TRIGGER_DZ) } else { 0.0 };
+        self.right_trigger = if rt > TRIGGER_DZ { (rt - TRIGGER_DZ) / (1.0 - TRIGGER_DZ) } else { 0.0 };
         // Map gilrs buttons to our GamepadButton enum
         let button_map = [
             (gilrs::Button::South, GamepadButton::South),
@@ -201,21 +206,23 @@ impl InputState {
             (gilrs::Button::DPadRight, GamepadButton::DpadRight),
         ];
 
-        let mut new_down = HashSet::new();
+        // Build the held-button set in a scratch buffer to avoid a per-frame
+        // allocation; swap it into place at the end.
+        self.gamepad_down_scratch.clear();
         for (gb, our_btn) in &button_map {
             if gamepad.is_pressed(*gb) {
-                new_down.insert(*our_btn);
+                self.gamepad_down_scratch.insert(*our_btn);
             }
         }
 
         // Detect newly pressed buttons (edge detection)
-        for btn in &new_down {
+        for btn in &self.gamepad_down_scratch {
             if !self.gamepad_buttons_down.contains(btn) {
                 self.gamepad_pressed_this_frame.insert(*btn);
             }
         }
 
-        self.gamepad_buttons_down = new_down;
+        std::mem::swap(&mut self.gamepad_buttons_down, &mut self.gamepad_down_scratch);
     }
 
     /// Feed a winit window event (keyboard, mouse buttons, wheel, focus).
@@ -235,6 +242,14 @@ impl InputState {
             WindowEvent::Focused(false) => {
                 self.keys_down.clear();
                 self.mouse_buttons_down.clear();
+                // Clear gamepad state too so a controller unplugged or
+                // ignored during focus loss can't leave phantom input.
+                self.gamepad_buttons_down.clear();
+                self.gamepad_pressed_this_frame.clear();
+                self.left_stick = Vec2::ZERO;
+                self.right_stick = Vec2::ZERO;
+                self.left_trigger = 0.0;
+                self.right_trigger = 0.0;
             }
             _ => {}
         }
