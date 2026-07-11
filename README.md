@@ -50,6 +50,7 @@ world.
 | Right click | Place selected material |
 | `[` / `]` | Shrink / grow the Scalable Dig / Bomb / Place Water radius (0.5-4 m) |
 | `B` | Spawn a wood debris cube in front of the player |
+| `T` | Spawn a 5-segment rope near the player |
 | `X` | Clear all sleeping (settled) debris |
 | `E` | Toggle editor mode (LMB paint sphere, RMB erase sphere, wheel adjusts radius) |
 | `Ctrl+Z` | Undo last world edit (safe edits only — no debris-spawning operations) |
@@ -189,6 +190,14 @@ works fully without Mario mode.
   debris.
 - **Buoyancy**: Debris bodies float or sink based on material density
   vs fluid density. Wood floats, stone sinks.
+- **Joints + rope**: Distance-constraint joints connect debris bodies,
+  maintaining a rest length between anchor points. Solved interleaved with
+  contacts in the sequential-impulse solver, with warm starting and split-
+  impulse position correction. Joint-connected bodies sleep/wake together
+  via island consensus. Rope segments (2×2×5 voxel bodies of rope material,
+  20 voxels each) connect end-to-end via joints. Press `T` to spawn a
+  5-segment rope near the player. Rope can be cut, burned, and destroyed —
+  severing a segment breaks the joint chain.
 
 ## Editor & Tools
 
