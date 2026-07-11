@@ -18,6 +18,8 @@ pub struct TerrainMaterials {
     pub stone: Voxel,
     pub dirt: Voxel,
     pub grass: Voxel,
+    pub sandstone: Voxel,
+    pub snow: Voxel,
 }
 
 impl TerrainMaterials {
@@ -35,12 +37,27 @@ impl TerrainMaterials {
             stone: id("stone")?,
             dirt: id("dirt")?,
             grass: id("grass")?,
+            sandstone: id("sandstone")?,
+            snow: id("snow")?,
         })
+    }
+
+    /// Surface voxel for a biome, matched directly on the enum (no registry
+    /// is available at fill time).
+    pub fn surface(self, biome: crate::biome::Biome) -> Voxel {
+        match biome {
+            crate::biome::Biome::Plains => self.grass,
+            crate::biome::Biome::Forest => self.grass,
+            crate::biome::Biome::Desert => self.sandstone,
+            crate::biome::Biome::Snow => self.snow,
+        }
     }
 }
 
-/// Dirt band thickness below the grass surface, in meters.
-const DIRT_DEPTH_M: f32 = 1.5;
+/// Conservative upper bound on the biome dirt band thickness, in meters.
+/// Used only for the uniform-stone fast-path bound; the per-column dirt
+/// depth is biome-driven (ranges 0.5–3.0 m, max = Forest).
+const DIRT_DEPTH_M: f32 = 3.0;
 /// Terrain height clamp margins (meters above floor / below ceiling).
 const MIN_HEIGHT_M: f32 = 4.0;
 const CEIL_MARGIN_M: f32 = 6.0;
@@ -82,7 +99,7 @@ impl TerrainGen {
 
     /// Generate terrain into an empty world (chunk-batched: uniform stone
     /// below, air above, per-column fill in the surface band).
-    pub fn generate(&self, world: &mut World, mats: TerrainMaterials) {
+    pub fn generate(&self, world: &mut World, mats: TerrainMaterials, biomes: &crate::biome::BiomeMap) {
         let s = world.cfg.voxel_size_m;
         let chunks = world.cfg.extent_chunks();
         let chunk_m = CHUNK_SIZE as f32 * s;
@@ -110,7 +127,7 @@ impl TerrainGen {
                     } else if bottom_m > max_h {
                         // Air: absent chunks already read as air.
                     } else {
-                        let chunk = self.fill_surface_chunk(IVec3::new(cx, cy, cz), s, mats);
+                        let chunk = self.fill_surface_chunk(IVec3::new(cx, cy, cz), s, mats, biomes);
                         world.insert_chunk(IVec3::new(cx, cy, cz), chunk);
                     }
                 }
@@ -119,25 +136,37 @@ impl TerrainGen {
     }
 
     /// Build one chunk in the surface band, column by column.
-    fn fill_surface_chunk(&self, key: IVec3, s: f32, mats: TerrainMaterials) -> Chunk {
+    fn fill_surface_chunk(
+        &self,
+        key: IVec3,
+        s: f32,
+        mats: TerrainMaterials,
+        biomes: &crate::biome::BiomeMap,
+    ) -> Chunk {
         let mut chunk = Chunk::new();
         let origin = key * CHUNK_SIZE as i32;
         for lz in 0..CHUNK_SIZE as i32 {
             for lx in 0..CHUNK_SIZE as i32 {
                 let wx = origin.x + lx;
                 let wz = origin.z + lz;
+                // Column center, in meters.
+                let cx_m = (wx as f32 + 0.5) * s;
+                let cz_m = (wz as f32 + 0.5) * s;
                 // Sample at the column center, in meters.
-                let h_m = self.height_m((wx as f32 + 0.5) * s, (wz as f32 + 0.5) * s);
+                let h_m = self.height_m(cx_m, cz_m);
                 // Topmost solid voxel index for this column.
                 let top = ((h_m / s).round() as i32 - 1).max(0);
-                let dirt_from = top - (DIRT_DEPTH_M / s).round().max(1.0) as i32;
+                let biome = biomes.biome_at(cx_m, cz_m);
+                let surface = mats.surface(biome);
+                let dirt_depth = biome.dirt_depth();
+                let dirt_from = top - (dirt_depth / s).round().max(1.0) as i32;
                 for ly in 0..CHUNK_SIZE as i32 {
                     let wy = origin.y + ly;
                     if wy > top {
                         break;
                     }
                     let v = if wy == top {
-                        mats.grass
+                        surface
                     } else if wy >= dirt_from {
                         mats.dirt
                     } else {
@@ -176,7 +205,13 @@ mod tests {
             stone: Voxel(1),
             dirt: Voxel(2),
             grass: Voxel(3),
+            sandstone: Voxel(4),
+            snow: Voxel(5),
         }
+    }
+
+    fn biomes() -> crate::biome::BiomeMap {
+        crate::biome::BiomeMap::new(424_242)
     }
 
     fn test_cfg(voxel_size_m: f32) -> WorldConfig {
@@ -217,26 +252,33 @@ mod tests {
         let cfg = test_cfg(0.25);
         let terrain = TerrainGen::new(&cfg);
         let mut world = World::new(cfg);
-        terrain.generate(&mut world, mats());
+        terrain.generate(&mut world, mats(), &biomes());
         let s = world.cfg.voxel_size_m;
+        let bm = biomes();
 
         for (x, z) in sample_positions(40) {
             let surface = TerrainGen::surface_height_m(&world, x, z).expect("column has terrain");
             let wx = (x / s).floor() as i32;
             let wz = (z / s).floor() as i32;
             let top = (surface / s).round() as i32 - 1;
+            let biome = bm.biome_at(x, z);
 
             assert_eq!(
                 world.get_voxel(IVec3::new(wx, top, wz)),
-                mats().grass,
-                "top voxel must be grass at ({x}, {z})"
+                mats().surface(biome),
+                "top voxel must match biome surface at ({x}, {z}) ({biome:?})"
             );
             let below = top - 1;
-            assert_eq!(
-                world.get_voxel(IVec3::new(wx, below, wz)),
-                mats().dirt,
-                "voxel below grass must be dirt"
-            );
+            // Desert has a thin (0.5 m) dirt band; at coarse voxel sizes the
+            // dirt layer may collapse to zero voxels, so only assert dirt when
+            // the biome's band is deep enough to cover the voxel below.
+            if biome.dirt_depth() > s {
+                assert_eq!(
+                    world.get_voxel(IVec3::new(wx, below, wz)),
+                    mats().dirt,
+                    "voxel below surface must be dirt ({biome:?})"
+                );
+            }
             let deep_m = 3.0;
             let deep = top - (deep_m / s) as i32;
             if deep > 0 {
@@ -250,7 +292,6 @@ mod tests {
             assert_eq!(world.get_voxel(IVec3::new(wx, top + 1, wz)), Voxel(0));
         }
     }
-
     /// THE scale contract: the same seed produces the same landscape in
     /// meters at 0.1 m and 1.0 m voxels.
     #[test]
@@ -262,8 +303,8 @@ mod tests {
 
         let mut fine = World::new(cfg_fine);
         let mut coarse = World::new(cfg_coarse);
-        gen_fine.generate(&mut fine, mats());
-        gen_coarse.generate(&mut coarse, mats());
+        gen_fine.generate(&mut fine, mats(), &biomes());
+        gen_coarse.generate(&mut coarse, mats(), &biomes());
 
         let tolerance = 2.0 * 1.0f32; // 2 x the coarser voxel size, meters
         for (x, z) in sample_positions(50) {
@@ -281,7 +322,7 @@ mod tests {
         let cfg = test_cfg(0.25);
         let terrain = TerrainGen::new(&cfg);
         let mut world = World::new(cfg);
-        terrain.generate(&mut world, mats());
+        terrain.generate(&mut world, mats(), &biomes());
 
         // The fast path must have produced at least one uniform-stone chunk
         // somewhere under the surface band.

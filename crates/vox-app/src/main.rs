@@ -66,10 +66,11 @@ fn build_terrain_world(
     let mut world = World::new(cfg);
     world.set_solid_table(solid_table(registry));
     let mats = TerrainMaterials::from_registry(registry)?;
+    let biomes = vox_gen::BiomeMap::new(world.cfg.seed);
     let terrain = TerrainGen::new(&world.cfg);
-    terrain.generate(&mut world, mats);
+    terrain.generate(&mut world, mats, &biomes);
     let tree_mats = TreeMaterials::from_registry(registry)?;
-    let planted = generate_trees(&mut world, &terrain, tree_mats);
+    let planted = generate_trees(&mut world, &terrain, tree_mats, &biomes);
     tracing::info!(trees = planted, "forest planted");
     Ok(world)
 }

@@ -63,8 +63,12 @@ fn unit(h: u32) -> f32 {
     (h >> 8) as f32 / (1u32 << 24) as f32
 }
 
-/// Decide tree positions for a world, purely from config + terrain.
-pub fn plan_trees(cfg: &WorldConfig, terrain: &TerrainGen) -> Vec<TreeInstance> {
+/// Decide tree positions for a world, purely from config + terrain + biomes.
+pub fn plan_trees(
+    cfg: &WorldConfig,
+    terrain: &TerrainGen,
+    biomes: &crate::biome::BiomeMap,
+) -> Vec<TreeInstance> {
     let seed = mix_seed_u64(cfg.seed, 0x7EE5);
     let density = Fbm::new(3, mix_seed_u64(cfg.seed, 0xD375));
     let cells_x = (cfg.extent_m[0] / CELL_M) as i32;
@@ -81,8 +85,17 @@ pub fn plan_trees(cfg: &WorldConfig, terrain: &TerrainGen) -> Vec<TreeInstance> 
             if x < 2.0 || z < 2.0 || x > cfg.extent_m[0] - 2.0 || z > cfg.extent_m[2] - 2.0 {
                 continue;
             }
-            // Forest density field.
-            if density.sample2(Vec2::new(x, z) / 60.0) < DENSITY_THRESHOLD {
+            // Biome tree-density multiplier scales the forest-density
+            // threshold: higher density => lower threshold => more trees.
+            // Desert (0.0) rejects every candidate.
+            let biome = biomes.biome_at(x, z);
+            let density_mult = biome.tree_density();
+            if density_mult <= 0.0 {
+                continue;
+            }
+            let threshold = DENSITY_THRESHOLD / density_mult;
+            // Forest density field, gated by biome.
+            if density.sample2(Vec2::new(x, z) / 60.0) < threshold {
                 continue;
             }
             // Slope check: ±1 m samples.
@@ -220,22 +233,24 @@ fn stamp_ellipsoid(world: &mut World, center_m: Vec3, radii_m: Vec3, leaves: Vox
             for x in min.x..=max.x {
                 let v = IVec3::new(x, y, z);
                 let d = (voxel_center_m(v, s) - center_m) / radii_m;
-                if d.length_squared() <= 1.0 && world.get_voxel(v) == AIR {
-                    world.set_voxel(v, leaves);
+                if d.x * d.x + d.y * d.y + d.z * d.z <= 1.0 {
+                    if world.get_voxel(v) == AIR {
+                        world.set_voxel(v, leaves);
+                    }
                 }
             }
         }
     }
-    // Guarantee at least the center voxel so coarse scales get a canopy.
-    let c = voxel_at(center_m, s);
-    if world.get_voxel(c) == AIR {
-        world.set_voxel(c, leaves);
-    }
 }
 
 /// Plan and stamp all trees for a world. Returns the number planted.
-pub fn generate_trees(world: &mut World, terrain: &TerrainGen, mats: TreeMaterials) -> usize {
-    let trees = plan_trees(&world.cfg, terrain);
+pub fn generate_trees(
+    world: &mut World,
+    terrain: &TerrainGen,
+    mats: TreeMaterials,
+    biomes: &crate::biome::BiomeMap,
+) -> usize {
+    let trees = plan_trees(&world.cfg, terrain, biomes);
     for tree in &trees {
         stamp_tree(world, tree, mats);
     }
@@ -254,6 +269,10 @@ mod tests {
         }
     }
 
+    fn biomes() -> crate::biome::BiomeMap {
+        crate::biome::BiomeMap::new(777)
+    }
+
     fn cfg(voxel_size_m: f32) -> WorldConfig {
         WorldConfig {
             seed: 777,
@@ -267,13 +286,13 @@ mod tests {
         let fine = cfg(0.1);
         let coarse = cfg(1.0);
         let terrain = TerrainGen::new(&fine);
-        let a = plan_trees(&fine, &terrain);
-        let b = plan_trees(&fine, &terrain);
+        let a = plan_trees(&fine, &terrain, &biomes());
+        let b = plan_trees(&fine, &terrain, &biomes());
         assert_eq!(a, b, "same inputs must plan identical trees");
         assert!(!a.is_empty(), "seed 777 must plant at least one tree");
 
         // The plan is meters + seed only: voxel scale must not affect it.
-        let c = plan_trees(&coarse, &TerrainGen::new(&coarse));
+        let c = plan_trees(&coarse, &TerrainGen::new(&coarse), &biomes());
         assert_eq!(a, c, "voxel scale must not change the plan");
     }
 
@@ -281,7 +300,7 @@ mod tests {
     fn heights_are_in_the_specified_band() {
         let cfg = cfg(0.1);
         let terrain = TerrainGen::new(&cfg);
-        for tree in plan_trees(&cfg, &terrain) {
+        for tree in plan_trees(&cfg, &terrain, &biomes()) {
             assert!(
                 (6.0..=10.0).contains(&tree.height_m),
                 "height {} outside 6-10 m",
@@ -402,9 +421,12 @@ mod tests {
                 stone: Voxel(1),
                 dirt: Voxel(2),
                 grass: Voxel(3),
+                sandstone: Voxel(4),
+                snow: Voxel(5),
             },
+            &biomes(),
         );
-        let planted = generate_trees(&mut world, &terrain, mats());
+        let planted = generate_trees(&mut world, &terrain, mats(), &biomes());
         assert!(planted > 0, "coarse world must still get trees");
     }
 }
