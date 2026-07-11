@@ -1587,9 +1587,10 @@ impl App for VoxApp {
         // Shadow pass (#14): render visible chunks into the shadow map
         // (depth-only, no color attachment) before the main pass samples it.
         // The pass must close (drop the shadow pass encoder guard) before
-        // the main pass opens on the same encoder. Frustum culling reuses
-        // the main camera frustum -- chunks outside the view are also
-        // outside the shadow receiver region.
+        // the main pass opens on the same encoder. Frustum culling uses
+        // the shadow camera's own frustum — chunks outside the main view
+        // but inside the shadow volume must still be rendered.
+        let shadow_frustum = Frustum::from_view_proj(self.shadow_pipeline.view_proj());
         {
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow-pass"),
@@ -1605,7 +1606,7 @@ impl App for VoxApp {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.pipeline.draw_chunks_shadow(&self.shadow_pipeline, &mut shadow_pass, &frustum);
+            self.pipeline.draw_chunks_shadow(&self.shadow_pipeline, &mut shadow_pass, &shadow_frustum);
         }
 
         let stats;

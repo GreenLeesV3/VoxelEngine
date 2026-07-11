@@ -661,7 +661,8 @@ pub struct ShadowPipeline {
     #[allow(dead_code)]
     sampler: wgpu::Sampler,
     uniform_buf: wgpu::Buffer,
-    /// Bind group handed to the *main* voxel pass (group 1) so its fragment
+    /// Last shadow camera view-projection (stored for frustum culling).
+    last_view_proj: Mat4,
     /// shader can sample the shadow map. Bound fresh each frame after
     /// `write_camera` so the uniform always matches this frame's shadow
     /// view-proj.
@@ -903,6 +904,7 @@ impl ShadowPipeline {
             shadow_view,
             sampler,
             uniform_buf,
+            last_view_proj: Mat4::IDENTITY,
             sample_bind_group,
             sample_bgl,
             render_bind_group,
@@ -934,8 +936,7 @@ impl ShadowPipeline {
     /// direction (from the sun toward the scene). The box spans
     /// `SHADOW_HALF_EXTENT` meters in every axis so nearby terrain is
     /// covered; far plane is placed well beyond the box depth to avoid
-    /// clipping.
-    pub fn write_camera(&self, gpu: &Gpu, sun_dir: Vec3, focus: Vec3, voxel_size_m: f32) {
+    pub fn write_camera(&mut self, gpu: &Gpu, sun_dir: Vec3, focus: Vec3, voxel_size_m: f32) {
         // `sun_dir` points TOWARD the sun. The voxel shader uses
         // `dot(normal, sun_dir)` for lighting (surfaces facing the sun
         // are lit). The shadow camera looks along the light-travel
@@ -981,6 +982,12 @@ impl ShadowPipeline {
         };
         gpu.queue()
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniform));
+        self.last_view_proj = view_proj;
+    }
+
+    /// Returns the last shadow camera view-projection matrix for frustum culling.
+    pub fn view_proj(&self) -> Mat4 {
+        self.last_view_proj
     }
 
     /// Render all visible chunks into the shadow map. The pass must already
