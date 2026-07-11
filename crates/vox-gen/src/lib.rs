@@ -7,4 +7,4 @@ pub mod trees;
 
 pub use noise::{Fbm, gradient2, hash2, hash3, value3};
 pub use terrain::{TerrainGen, TerrainMaterials};
-pub use trees::{TreeInstance, TreeMaterials, generate_trees, plan_trees, stamp_tree};
+pub use trees::{TreeInstance, TreeMaterials, generate_trees, plan_trees, stamp_tree, trees_for_chunk};
