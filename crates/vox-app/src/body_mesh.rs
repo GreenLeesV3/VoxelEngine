@@ -46,7 +46,7 @@ impl BodyMeshQueue {
     /// voxels to a few hundred thousand at the very largest -- so cloning it
     /// once to hand across the thread boundary is far cheaper than the
     /// meshing work itself, and avoids needing any lock on `PhysicsWorld`).
-    pub fn dispatch(&mut self, key: BodyMeshKey, dims: IVec3, voxels: Vec<Voxel>, water_voxel: Voxel) {
+    pub fn dispatch(&mut self, key: BodyMeshKey, dims: IVec3, voxels: Vec<Voxel>, water_voxel: Voxel, emissive_set: Vec<Voxel>) {
         let tx = self.tx.clone();
         self.in_flight += 1;
         rayon::spawn(move || {
@@ -54,7 +54,7 @@ impl BodyMeshQueue {
             // whole thread pool — the body just gets no mesh.
             let mesh = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let slab = VoxelSlab::from_grid(dims, &voxels);
-                mesh_slab(&slab, IVec3::ZERO, water_voxel, None)
+                mesh_slab(&slab, IVec3::ZERO, water_voxel, &emissive_set, None)
             }));
             if let Ok(m) = mesh {
                 let _ = tx.send((key, m));

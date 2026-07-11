@@ -88,6 +88,18 @@ fn solid_table(registry: &MaterialRegistry) -> Vec<bool> {
         .collect()
 }
 
+/// All materials the registry marks as emissive (fire, ember, lava), as
+/// `Voxel` ids. Passed to the mesher so it can BFS-propagate their light
+/// through air and bake the per-voxel blocklight level into vertices.
+fn emissive_materials(registry: &MaterialRegistry) -> Vec<Voxel> {
+    (1..registry.len())
+        .filter_map(|i| {
+            let def = registry.get(vox_core::MaterialId(i as u16))?;
+            def.emissive.then(|| Voxel(i as u16))
+        })
+        .collect()
+}
+
 /// The registry's `water` material, or a harmless fallback if the asset
 /// set doesn't define one (keeps the engine bootable with a stripped-down
 /// material set, e.g. in a test fixture) -- mirrors the existing
@@ -164,6 +176,9 @@ struct VoxApp {
     shadow_pipeline: ShadowPipeline,
     world: World,
     registry: MaterialRegistry,
+    /// Emissive material ids (fire, ember, lava), passed to the mesher so
+    /// it can BFS-propagate blocklight from these sources into vertices.
+    emissive_voxels: Vec<Voxel>,
     player: Player,
     camera: Camera,
     tools: Tools,
@@ -378,6 +393,7 @@ impl VoxApp {
             fluid_clock: vox_platform::FrameClock::new(vox_core::consts::FLUID_DT),
             weathering,
             fire,
+            emissive_voxels: emissive_materials(&registry),
             registry,
             player: Player::new(Vec3::ZERO),
             camera: Camera::new(Vec3::ZERO),
@@ -431,6 +447,7 @@ impl VoxApp {
         let _ = self.world.drain_dirty_regions();
         let start = Instant::now();
         let world = &self.world;
+        let emissive = self.emissive_voxels.clone();
         let meshes: Vec<(IVec3, vox_mesh::MeshData)> = keys
             .par_iter()
             .filter(|key| world.chunk_at(**key).is_some())
@@ -439,7 +456,7 @@ impl VoxApp {
                 let chunk = world.chunk_at(*key).expect("filtered above");
                 let masks = chunk.solid_slice_masks();
                 let slab = VoxelSlab::extract(world, origin, IVec3::splat(CHUNK_SIZE as i32));
-                (*key, mesh_slab(&slab, origin, Voxel(9), Some(&masks)))
+                (*key, mesh_slab(&slab, origin, Voxel(9), &emissive, Some(&masks)))
             })
             .collect();
         let meshed = meshes.len();
@@ -504,7 +521,7 @@ impl VoxApp {
         let voxel_count = (body.grid.dims.x * body.grid.dims.y * body.grid.dims.z) as usize;
         let dispatch = if voxel_count <= INLINE_MESH_VOXEL_BUDGET {
             let slab = VoxelSlab::from_grid(body.grid.dims, &body.grid.voxels);
-            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(9), None);
+            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(9), &self.emissive_voxels, None);
             self.pipeline
                 .upload_body(&self.gpu, (id.slot, id.generation), &mesh);
             MeshDispatch::Sync
@@ -514,6 +531,7 @@ impl VoxApp {
                 body.grid.dims,
                 body.grid.voxels.clone(),
                 Voxel(9),
+                self.emissive_voxels.clone(),
             );
             MeshDispatch::Async
         };
@@ -1429,7 +1447,7 @@ impl App for VoxApp {
                 }
             }
             self.remesh.absorb_dirty(&mut self.world);
-            self.remesh.dispatch(&self.world, eye, Voxel(9));
+            self.remesh.dispatch(&self.world, eye, Voxel(9), &self.emissive_voxels);
             self.remesh.collect(&self.gpu, &mut self.pipeline);
             self.body_mesh.collect(&self.gpu, &mut self.pipeline)
         };

@@ -18,6 +18,10 @@ use crate::slab::VoxelSlab;
 /// The `ao` byte packs two fields: bits 0-1 are the corner AO level (0..=3),
 /// bits 4-7 are the skylight level (0..=15, 15 = open sky). Bits 2-3 are
 /// unused. The shader extracts both with bitmask ops.
+///
+/// The `normal` byte packs the face normal id (bits 0-3, 0..=5) and the
+/// blocklight level (bits 4-7, 0..=15). The shader extracts both with
+/// bitmask ops.
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VoxelVertex {
@@ -80,8 +84,9 @@ fn ao(side1: bool, side2: bool, corner: bool) -> u8 {
 /// A meshable face cell: merged only with cells equal in material AND all
 /// four corner AO values AND skylight. Water depth is NOT part of the merge
 /// comparison (it varies across a surface over uneven terrain) — merged
-/// quads take the first cell's depth, which is less precise but keeps mesh
-/// density low.
+/// density low. Blocklight is also excluded from the merge comparison
+/// (like water_depth) — it varies per-voxel in 3D near emissive sources,
+/// so including it would fragment greedy merges into single-quad strips.
 #[derive(Copy, Clone)]
 struct Cell {
     material: Voxel,
@@ -97,6 +102,12 @@ struct Cell {
     /// sky, 0 = enclosed/underground. Packed into the vertex `ao` byte's
     /// upper nibble so the shader can attenuate ambient light by it.
     skylight: u8,
+    /// Blocklight level (0..=15): propagated light from emissive sources
+    /// (fire, ember, lava). NOT part of the merge comparison (like
+    /// water_depth) — it varies per-voxel in 3D and would fragment greedy
+    /// merges near light sources; merged quads take the first cell's value.
+    /// Packed into the vertex `normal` byte's high nibble.
+    blocklight: u8,
 }
 
 impl PartialEq for Cell {
@@ -106,6 +117,7 @@ impl PartialEq for Cell {
 }
 
 impl Eq for Cell {}
+
 
 /// Deterministic per-vertex jitter hash, baked into the mesh once here
 /// rather than recomputed from world position in the shader every frame.
@@ -160,17 +172,115 @@ fn skylight_above(slab: &VoxelSlab, p: IVec3) -> u8 {
     count
 }
 
+/// Blocklight field for a slab: a per-voxel light level (0..=15) propagated
+/// from emissive sources (fire, ember, lava) via BFS through air and water.
+///
+/// Emissive voxels (any position whose material is in `emissive_set`) seed
+/// the field at 15. Light then floods outward through non-opaque voxels,
+/// decrementing by 1 per Manhattan step, until it reaches 0. Opaque voxels
+/// block propagation (light doesn't pass through solid terrain), matching
+/// how blocklight works in voxel games.
+///
+/// The scan covers the full padded volume (inner region + 1-voxel shell) so
+/// emissive voxels in neighboring chunks (sampled into the shell) contribute
+/// light that bleeds across chunk boundaries. Returns an empty Vec when
+/// there are no emissive materials, letting callers skip the lookup.
+fn blocklight_field(slab: &VoxelSlab, emissive_set: &[Voxel]) -> Vec<u8> {
+    if emissive_set.is_empty() {
+        return Vec::new();
+    }
+    let dims = slab.inner_dims;
+    let d = dims + IVec3::splat(2); // padded dims
+    let total = (d.x * d.y * d.z) as usize;
+    let mut light = vec![0u8; total];
+
+    // Index matching VoxelSlab::index (private): (rel+1) in x-major rows.
+    let idx = |rel: IVec3| -> usize {
+        let p = rel + IVec3::ONE;
+        (p.x + p.z * d.x + p.y * d.x * d.z) as usize
+    };
+
+    // BFS queue (Vec + head index avoids importing VecDeque).
+    let mut queue: Vec<IVec3> = Vec::new();
+    let mut head: usize = 0;
+
+    // Seed: scan the full padded volume for emissive voxels.
+    for y in -1..=dims.y {
+        for z in -1..=dims.z {
+            for x in -1..=dims.x {
+                let p = IVec3::new(x, y, z);
+                if emissive_set.contains(&slab.get(p)) {
+                    let i = idx(p);
+                    if light[i] < 15 {
+                        light[i] = 15;
+                        queue.push(p);
+                    }
+                }
+            }
+        }
+    }
+
+    // BFS: propagate through non-opaque voxels (air + water).
+    while head < queue.len() {
+        let p = queue[head];
+        head += 1;
+        let cur = light[idx(p)];
+        if cur <= 1 {
+            continue;
+        }
+        let next = cur - 1;
+        for dir in [
+            IVec3::X,
+            -IVec3::X,
+            IVec3::Y,
+            -IVec3::Y,
+            IVec3::Z,
+            -IVec3::Z,
+        ] {
+            let n = p + dir;
+            if n.x < -1 || n.x > dims.x || n.y < -1 || n.y > dims.y || n.z < -1 || n.z > dims.z {
+                continue;
+            }
+            let ni = idx(n);
+            if light[ni] < next && !slab.opaque(n) {
+                light[ni] = next;
+                queue.push(n);
+            }
+        }
+    }
+
+    light
+}
+
+/// Look up the blocklight level at a slab-relative position from a field
+/// produced by `blocklight_field`. Returns 0 when the field is empty (no
+/// emissive materials in this slab).
+#[inline]
+fn light_at(field: &[u8], padded: IVec3, rel: IVec3) -> u8 {
+    if field.is_empty() {
+        return 0;
+    }
+    let p = rel + IVec3::ONE;
+    let i = (p.x + p.z * padded.x + p.y * padded.x * padded.z) as usize;
+    field[i]
+}
+
 /// Greedy-mesh a slab into quads. `jitter_seed` anchors the baked per-vertex
 /// jitter pattern (see `jitter_hash`) -- pass a chunk's world origin for
-/// chunks, `IVec3::ZERO` for a body's own local mesh.
+/// chunks, `IVec3::ZERO` for a body's own local mesh. `emissive_set` lists
+/// material ids that emit blocklight; the mesher BFS-propagates their light
+/// through air and bakes the per-voxel level into each vertex.
 pub fn mesh_slab(
     slab: &VoxelSlab,
     jitter_seed: IVec3,
     water_voxel: Voxel,
+    emissive_set: &[Voxel],
     slice_masks: Option<&[[bool; CHUNK_SIZE]; 3]>,
 ) -> MeshData {
     let mut mesh = MeshData::default();
     let dims = slab.inner_dims;
+    let padded = dims + IVec3::splat(2);
+    let blocklight = blocklight_field(slab, emissive_set);
 
     // Hoist the mask buffer outside the face loop: allocate once, clear and
     // reuse per face direction. The buffer is always sized to the largest
@@ -260,6 +370,7 @@ pub fn mesh_slab(
                             ao4,
                             water_depth: depth,
                             skylight: skylight_above(slab, p),
+                            blocklight: light_at(&blocklight, padded, outer),
                         })
                     } else {
                         None
@@ -343,7 +454,7 @@ fn emit_quad(
         mesh.vertices.push(VoxelVertex {
             pos,
             ao: cell.ao4[i] | (cell.skylight << 4),
-            normal: normal_id,
+            normal: normal_id | (cell.blocklight << 4),
             jitter: if cell.material == water_voxel { cell.water_depth } else { jitter_hash(jitter_seed, pos) },
             material: cell.material.0,
         });
@@ -411,7 +522,7 @@ mod tests {
     #[test]
     fn empty_slab_zero_quads() {
         let slab = slab_of(IVec3::splat(4), &[]);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
         assert_eq!(mesh.quads(), 0);
         assert!(mesh.is_empty());
     }
@@ -419,7 +530,7 @@ mod tests {
     #[test]
     fn single_voxel_six_quads() {
         let slab = slab_of(IVec3::splat(3), &[(IVec3::splat(1), STONE)]);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
         assert_eq!(mesh.quads(), 6);
         assert_eq!(mesh.indices.len(), 36);
     }
@@ -445,8 +556,8 @@ mod tests {
                 (IVec3::new(1, 2, 1), STONE),
             ],
         );
-        let mesh_a = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0), None);
-        let mesh_b = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0), None);
+        let mesh_a = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0), &[], None);
+        let mesh_b = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0), &[], None);
         let jitter_a: Vec<u8> = mesh_a.vertices.iter().map(|v| v.jitter).collect();
         let jitter_b: Vec<u8> = mesh_b.vertices.iter().map(|v| v.jitter).collect();
         assert_eq!(jitter_a, jitter_b, "same geometry + same seed must match exactly");
@@ -455,7 +566,7 @@ mod tests {
         // *different* seed (a different chunk's origin) must generally
         // produce a different pattern -- confirming the seed actually
         // participates, not just the local position.
-        let mesh_c = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
+        let mesh_c = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
         let jitter_c: Vec<u8> = mesh_c.vertices.iter().map(|v| v.jitter).collect();
         assert_ne!(jitter_a, jitter_c, "different seeds should not collide onto the same pattern");
     }
@@ -466,7 +577,7 @@ mod tests {
             IVec3::new(2, 1, 1),
             &[(IVec3::new(0, 0, 0), STONE), (IVec3::new(1, 0, 0), STONE)],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
         assert_eq!(mesh.quads(), 6, "coplanar same-material faces must merge");
     }
 
@@ -476,7 +587,7 @@ mod tests {
             IVec3::new(2, 1, 1),
             &[(IVec3::new(0, 0, 0), STONE), (IVec3::new(1, 0, 0), DIRT)],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
         // 2 end caps + 4 long sides split in two each = 2 + 8 = 10.
         assert_eq!(mesh.quads(), 10);
     }
@@ -493,7 +604,7 @@ mod tests {
             }
         }
         let slab = slab_of(dims, &solids);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
         // Skylight splits each side face at the top row (the topmost voxel
         // sees air above in the padding, so skylight=1; the rest see solid
         // above, skylight=0). Top and bottom faces are uniform. So: 2 caps
@@ -522,7 +633,7 @@ mod tests {
                 }
             }
             let slab = slab_of(dims, &solids);
-            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
+            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
 
             // Brute-force expected exposed faces.
             let mut expected: HashSet<(IVec3, u8)> = HashSet::new();
@@ -592,7 +703,7 @@ mod tests {
             }
         }
         let slab = slab_of(dims, &solids);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
         assert!(!mesh.is_empty());
 
         for tri in mesh.indices.chunks_exact(3) {
@@ -625,7 +736,7 @@ mod tests {
                 (IVec3::new(0, 1, 0), STONE), // wall on top of (0,0,0)
             ],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
 
         // Top faces (+Y, normal id 2) of the floor at y=1 (excluding the wall
         // voxel's own top at y=2).
@@ -670,7 +781,7 @@ mod tests {
                 (IVec3::new(2, 1, 0), STONE), // covers (2,0,0)
             ],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
 
         // Top face (+Y, normal 2) of (0,0,0): plane at y=1. Corner (1,1,1).
         // Air above → skylight > 0.

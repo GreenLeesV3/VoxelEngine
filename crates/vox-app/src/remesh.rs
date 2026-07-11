@@ -86,7 +86,9 @@ impl RemeshQueue {
     }
 
     /// Dispatch up to the per-frame budget, nearest chunks first.
-    pub fn dispatch(&mut self, world: &World, camera_pos: Vec3, water_voxel: Voxel) {
+    /// `emissive_set` lists material ids that emit blocklight; passed through
+    /// to the mesher so it can BFS-propagate their light into vertices.
+    pub fn dispatch(&mut self, world: &World, camera_pos: Vec3, water_voxel: Voxel, emissive_set: &[Voxel]) {
         if self.pending.is_empty() {
             return;
         }
@@ -97,6 +99,9 @@ impl RemeshQueue {
             let db = (voxel_center_m(chunk_origin(*b), s) - camera_pos).length_squared();
             da.total_cmp(&db)
         });
+        // Clone the emissive set once per dispatch; each worker gets its own
+        // reference via the moved closure.
+        let emissive_set: Vec<Voxel> = emissive_set.to_vec();
         for key in keys.into_iter().take(MAX_DISPATCH_PER_FRAME) {
             let generation = self
                 .pending
@@ -113,10 +118,11 @@ impl RemeshQueue {
             };
             let masks = chunk.solid_slice_masks();
             let tx = self.tx.clone();
+            let es = emissive_set.clone();
             self.in_flight += 1;
             rayon::spawn(move || {
                 let mesh = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mesh_slab(&slab, origin, water_voxel, Some(&masks))
+                    mesh_slab(&slab, origin, water_voxel, &es, Some(&masks))
                 }));
                 if let Ok(m) = mesh {
                     let _ = tx.send((key, generation, m));

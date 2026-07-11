@@ -169,7 +169,7 @@ fn stress_meshing(sizes: &[i32]) {
         for _ in 0..20 {
             let t0 = Instant::now();
             let slab = VoxelSlab::from_grid(dims, &voxels);
-            let _mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(9), None);
+            let _mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(9), &[], None);
             times.push(t0.elapsed().as_secs_f32() * 1000.0);
         }
         report(&format!("mesh-slab/{n}^3-cube"), times);

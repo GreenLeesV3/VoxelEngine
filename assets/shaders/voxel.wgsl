@@ -36,7 +36,7 @@ struct Inst {
 
 struct VIn {
     @location(0) pos_ao: vec4<u32>,   // x, y, z corner (voxel units), w = packed AO(0-3) | skylight(<<4)
-    @location(1) norm_mat: vec4<u32>, // normal id, jitter 0..255, material lo, material hi
+    @location(1) norm_mat: vec4<u32>, // normal id (low nibble) | blocklight (high nibble), jitter 0..255, material lo, material hi
 };
 
 struct VOut {
@@ -48,6 +48,9 @@ struct VOut {
     @location(2) ao: f32,
     @location(3) world_pos: vec3f,
     @location(4) @interpolate(flat) mat_id: u32,
+    // Blocklight level (0..=15), passed flat to the fragment shader for
+    // the warm orange emissive-light contribution.
+    @location(5) @interpolate(flat) blocklight: u32,
 };
 // All lighting constants are now uniforms (cam.*) for day/night cycle.
 
@@ -187,10 +190,12 @@ fn vs(v: VIn, inst: Inst) -> VOut {
     // object and spinning with it. Rotating the normal by the model matrix
     // here (translation-free, via w=0) fixes that for both cases uniformly.
     out.ao = f32(v.pos_ao.w);  // packed AO + skylight byte
-    let local_n = face_normal(v.norm_mat.x);
+    let packed_norm = v.norm_mat.x;
+    let local_n = face_normal(packed_norm & 0x0Fu);
     out.world_normal = normalize((model * vec4f(local_n, 0.0)).xyz);
     out.world_pos = wp;
     out.mat_id = mat_id;
+    out.blocklight = (packed_norm >> 4u) & 0x0Fu;
     return out;
 }
 
@@ -275,6 +280,16 @@ fn fs(in: VOut) -> @location(0) vec4f {
 
     // Apply per-face shade: multiply final lit color by face brightness
     var c = in.color * (ambient + sun + vec3f(fill)) * ao * mix(1.0, face_shade, cam.sun_dir.w);
+    // Blocklight: warm orange contribution from emissive sources (fire,
+    // ember, lava) propagated through air by the mesher's BFS. Quadratic
+    // falloff so the glow concentrates near sources and fades naturally.
+    // Added before fog so distant lit voxels still fade into the sky.
+    let bl = f32(in.blocklight) / 15.0;
+    if (bl > 0.0) {
+        let bl_falloff = bl * bl;
+        c += in.color * vec3f(1.0, 0.9, 0.8) * bl_falloff;
+    }
+
 
     // Procedural crack decals (#43): dark branching lines on solid voxels,
     // driven by cam.ambient_sky.w. Intensity 0 => no cracks (clean multiply
