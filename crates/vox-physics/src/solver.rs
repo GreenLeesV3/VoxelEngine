@@ -276,6 +276,7 @@ impl PhysicsWorld {
         anchor_a: Vec3,
         anchor_b: Vec3,
         rest_length: f32,
+        compliance: f32,
     ) -> usize {
         let joint = Joint {
             body_a: a.slot as usize,
@@ -284,7 +285,7 @@ impl PhysicsWorld {
             anchor_b,
             rest_length,
             acc_lambda: 0.0,
-            compliance: 0.01, // soft joint — rope is flexible, not rigid
+            compliance,
         };
         self.joints.push(joint);
         self.joints.len() - 1
@@ -732,7 +733,7 @@ impl PhysicsWorld {
                 if keff <= 0.0 {
                     continue;
                 }
-                let lambda = -vn / (keff + j.compliance);
+                let lambda = (-vn + c * 0.1) / (keff + j.compliance);
                 // Don't accumulate — each iteration applies its own correction.
                 let p = n * lambda;
                 let (ba, bb) = two_mut(&mut self.slots, j.body_a, j.body_b);
@@ -1573,28 +1574,23 @@ mod tests {
             b.aabb_min.y
         );
     }
-
     #[test]
     fn joint_holds_two_bodies_at_rest_length() {
         let world = floored_world();
         let reg = registry();
         let mut phys = PhysicsWorld::new();
 
-        // Two 2x2x2 foam bodies (density 300, light), 1m apart on X,
-        // joined at rest length 1.0. Start high (20m) so they have many
-        // steps of free fall before floor contact — the joint should
-        // maintain distance during free fall.
-        let grid = VoxelGrid::new(IVec3::new(2, 2, 2), vec![Voxel(2); 8]); // foam
+        // Two 2x2x2 stone bodies, 1m apart, joined rigidly (compliance=0).
+        let grid = VoxelGrid::new(IVec3::new(2, 2, 2), vec![Voxel(1); 8]);
         let body_a =
             Body::from_grid(grid.clone(), &reg, 0.5, Vec3::new(10.0, 20.0, 10.0)).unwrap();
         let body_b = Body::from_grid(grid, &reg, 0.5, Vec3::new(11.0, 20.0, 10.0)).unwrap();
         let id_a = phys.spawn(body_a);
         let id_b = phys.spawn(body_b);
 
-        phys.add_joint(id_a, id_b, Vec3::ZERO, Vec3::ZERO, 1.0);
+        phys.add_joint(id_a, id_b, Vec3::ZERO, Vec3::ZERO, 1.0, 0.0);
 
-        // Run 100 steps (~1.7s). Floor is at 4m, start at 20m, so they
-        // fall ~16m in ~1.8s — they should still be airborne.
+        // Run 100 steps (~1.7s free fall from 20m — floor at 4m, still airborne).
         for step in 0..100 {
             phys.step(&world, PHYSICS_DT);
             let a = phys.get(id_a).expect("alive");
@@ -1602,13 +1598,12 @@ mod tests {
             assert!(a.pos.is_finite() && b.pos.is_finite(), "NaN at step {step}");
         }
 
-        // During free fall, the joint should keep them ~1m apart.
         let a = phys.get(id_a).unwrap();
         let b = phys.get(id_b).unwrap();
         let dist = (a.pos - b.pos).length();
         assert!(
-            (dist - 1.0).abs() < 0.3,
-            "joint should maintain rest length ~1.0m during free fall, got {dist}"
+            (dist - 1.0).abs() < 0.15,
+            "joint should maintain rest length ~1.0m, got {dist}"
         );
     }
 }

@@ -711,7 +711,7 @@ impl VoxApp {
                 // Connect bottom of previous segment to top of this segment.
                 let anchor_prev = Vec3::new(0.0, -half_height, 0.0);
                 let anchor_this = Vec3::new(0.0, half_height, 0.0);
-                self.phys.add_joint(prev, id, anchor_prev, anchor_this, voxel_size);
+                self.phys.add_joint(prev, id, anchor_prev, anchor_this, voxel_size, 0.001);
             }
 
             prev_id = Some(id);
