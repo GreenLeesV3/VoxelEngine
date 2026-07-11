@@ -116,9 +116,11 @@ fn get_time_weights(cycle_t: f32) -> TimeWeights {
             * (1.0 - smoothstep(night_e - ramp, night_e + ramp, t)),
         dawn: smoothstep(night_e - ramp, night_e + ramp, t)
             * (1.0 - smoothstep(dawn_e - ramp, dawn_e + ramp, t)),
-        // Sunrise wraps around the cycle boundary (0/1).
+        // Sunrise: from dawn to cycle end, plus the wrap tail at t≈0.
+        // The product gates sunrise to only after dawn_e; the addend
+        // carries the tail from the previous cycle near t=0.
         sunrise: smoothstep(dawn_e - ramp, dawn_e + ramp, t)
-            + (1.0 - smoothstep(sunrise_e - ramp, sunrise_e + ramp, t))
+            * (1.0 - smoothstep(sunrise_e - ramp, sunrise_e + ramp, t))
             + (1.0 - smoothstep(0.0, ramp, t)),
     };
 
@@ -195,13 +197,14 @@ pub fn compute(game_time: f32) -> DayNightParams {
     // Sun strength: zero at night, full at noon.
     let sun_strength = light_brightness.max(0.0) * 0.85;
 
-    // Sky color (horizon): weighted blend of all 6 phase colors.
-    let mut sky = DAY_SKY * w.day
-        + SUNSET_SKY * w.sunset
-        + BLUE_HOUR_SKY * w.blue_hour
-        + NIGHT_SKY * w.night
-        + DAWN_SKY * w.dawn
-        + SUNRISE_SKY * w.sunrise;
+    // Sky color (horizon): weighted blend, each phase multiplied by its
+    // sky-gradient brightness (CazToon: nightC = mix(h,z,bias) * BRIGHTNESS).
+    let mut sky = DAY_SKY * (w.day * DAY_BRIGHTNESS)
+        + SUNSET_SKY * (w.sunset * SUNSET_BRIGHTNESS)
+        + BLUE_HOUR_SKY * (w.blue_hour * BLUE_HOUR_BRIGHTNESS)
+        + NIGHT_SKY * (w.night * NIGHT_BRIGHTNESS)
+        + DAWN_SKY * (w.dawn * DAWN_BRIGHTNESS)
+        + SUNRISE_SKY * (w.sunrise * SUNRISE_BRIGHTNESS);
     // Day↔sunset warm blend
     let day_sunset_mix = (w.day.min(w.sunset + w.sunrise) * 2.5).min(1.0);
     sky = sky.lerp(Vec3::new(0.92, 0.55, 0.35), day_sunset_mix * 0.5);
@@ -211,20 +214,20 @@ pub fn compute(game_time: f32) -> DayNightParams {
 
     // Zenith color: distinct hue from horizon (CazToon uses different
     // RGB values per layer — not a scalar multiple).
-    let mut zenith = DAY_ZENITH * w.day
-        + SUNSET_ZENITH * w.sunset
-        + BLUE_HOUR_ZENITH * w.blue_hour
-        + NIGHT_ZENITH * w.night
-        + DAWN_ZENITH * w.dawn
-        + SUNRISE_ZENITH * w.sunrise;
+    let mut zenith = DAY_ZENITH * (w.day * DAY_BRIGHTNESS)
+        + SUNSET_ZENITH * (w.sunset * SUNSET_BRIGHTNESS)
+        + BLUE_HOUR_ZENITH * (w.blue_hour * BLUE_HOUR_BRIGHTNESS)
+        + NIGHT_ZENITH * (w.night * NIGHT_BRIGHTNESS)
+        + DAWN_ZENITH * (w.dawn * DAWN_BRIGHTNESS)
+        + SUNRISE_ZENITH * (w.sunrise * SUNRISE_BRIGHTNESS);
     zenith = zenith.lerp(Vec3::new(0.85, 0.40, 0.20), day_sunset_mix * 0.5);
     zenith = zenith.lerp(Vec3::new(0.20, 0.10, 0.60), sunset_blue_mix * 0.5);
 
-    // Fill light: dimmer at night.
-    let fill_strength = 0.12 * light_brightness.max(0.15);
+    // Fill light: dimmer at night (small floor so terrain isn't pitch black).
+    let fill_strength = 0.12 * light_brightness.max(0.08);
 
     // Ambient: dimmer and cooler at night.
-    let ambient_strength = 0.55 * light_brightness.max(0.15);
+    let ambient_strength = 0.55 * light_brightness.max(0.08);
     let ambient_sky = Vec3::new(0.50, 0.58, 0.70).lerp(Vec3::new(0.15, 0.18, 0.25), 1.0 - light_brightness);
     let ambient_ground = Vec3::new(0.30, 0.27, 0.24).lerp(Vec3::new(0.08, 0.07, 0.06), 1.0 - light_brightness);
 

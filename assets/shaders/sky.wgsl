@@ -311,20 +311,19 @@ fn fs(in: VOut) -> SkyFOut {
     sky += cam.sun_color.xyz * (sun_atmo_glow + sun_atmo_halo) * sun_strength;
 
     // --- Moon disc (opposite the sun) ---
-    // CazToon renders the moon via the vanilla sun/moon texture, but we
-    // draw it procedurally: a soft white disc opposite the sun direction,
-    // visible at night (when sun_strength is low).
+    // CazToon renders the moon via the vanilla sun/moon texture. We draw
+    // a procedural pale disc — soft, dim, with a subtle glow. Not a sun.
     let moon_dir = -sun_dir;
     let moon_cos = dot(dir, moon_dir);
     let moon_angle = acos(clamp(moon_cos, -1.0, 1.0));
     let moon_visibility = clamp(1.0 - sun_strength * 2.0, 0.0, 1.0);
-    let moon_disc = exp(-moon_angle * moon_angle * 600.0) * moon_visibility;
-    let moon_glow_r = 0.12;
-    let moon_glow = exp(-moon_angle * moon_angle / (moon_glow_r * moon_glow_r)) * 0.25 * moon_visibility;
-    let moon_halo_r2 = 0.35;
-    let moon_halo = 1.0 / (1.0 + pow(moon_angle / moon_halo_r2, 4.0)) * 0.04 * moon_visibility;
-    let moon_color = vec3f(0.9, 0.92, 0.95);
-    sky += moon_color * (moon_disc * 2.0 + moon_glow + moon_halo);
+    // Disc: tight but dim (pale grey, not white-hot)
+    let moon_disc = exp(-moon_angle * moon_angle * 2000.0) * moon_visibility;
+    // Soft glow halo
+    let moon_glow = exp(-moon_angle * moon_angle * 100.0) * 0.15 * moon_visibility;
+    let moon_halo = 1.0 / (1.0 + pow(moon_angle / 0.35, 4.0)) * 0.03 * moon_visibility;
+    let moon_color = vec3f(0.65, 0.67, 0.72);
+    sky += moon_color * (moon_disc * 0.8 + moon_glow + moon_halo);
 
     // --- Night features (CazToon's skyAddNightFeatures) ---
     // Night visibility: driven by how low sun_strength is (0 = full night).
