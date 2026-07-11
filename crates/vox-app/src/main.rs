@@ -411,6 +411,9 @@ struct VoxApp {
     mario_units_per_meter: f32,
     /// Game time accumulator for day/night cycle (seconds).
     game_time: f32,
+    /// When true, the day/night cycle is frozen at noon (full daylight).
+    /// Toggled via the F3 debug overlay.
+    always_day: bool,
     /// Old debris meshes kept alive past their body's despawn, each waiting
     /// on the set of its replacement fragments' async mesh jobs still in
     /// flight -- see `replace_body`'s doc comment for why this exists (a
@@ -597,6 +600,7 @@ impl VoxApp {
             #[cfg(feature = "mario")]
             mario_units_per_meter,
             game_time: 60.0, // Start at noon (halfway through 120s cycle)
+            always_day: false,
             pending_body_removal: HashMap::new(),
             editor_active: false,
             editor_radius: 2.0,
@@ -1880,8 +1884,12 @@ impl App for VoxApp {
         self.particles
             .update(timing.dt_frame, &self.world, self.world.cfg.voxel_size_m);
 
-        // Advance day/night cycle.
-        self.game_time += timing.dt_frame;
+        // Advance day/night cycle (unless frozen at noon).
+        if !self.always_day {
+            self.game_time += timing.dt_frame;
+        } else {
+            self.game_time = 60.0; // Noon (halfway through 120s cycle)
+        }
         let dn = day_night::compute(self.game_time);
 
         // Camera: third-person around Mario in Mario mode, else player eye.
@@ -2006,6 +2014,7 @@ impl App for VoxApp {
             tool_radius: self.tools.active_radius_mut(),
             material_names: &self.material_names,
             selected_material: &mut self.selected_material,
+            always_day: &mut self.always_day,
         });
         let prepared_overlay = self.debug_overlay.prepare(
             &self.window,

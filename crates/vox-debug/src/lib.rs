@@ -42,8 +42,8 @@ pub struct OverlayState<'a> {
     pub tool_radius: &'a mut f32,
     pub material_names: &'a [String],
     pub selected_material: &'a mut usize,
+    pub always_day: &'a mut bool,
 }
-
 /// Output of [`DebugOverlay::prepare`]: owned, tessellated draw data ready
 /// to record into a render pass via [`DebugOverlay::paint`].
 pub struct PreparedFrame {

@@ -108,6 +108,9 @@ fn tuning_window(ctx: &Context, state: &mut OverlayState<'_>) {
             ui.add(Slider::new(&mut state.tunables.fly_speed, 1.0..=40.0).text("fly speed (m/s)"));
             ui.separator();
             ui.separator();
+            ui.label("Environment:");
+            ui.checkbox(state.always_day, "Always day");
+            ui.separator();
             ui.label("Post-processing:");
             ui.add(Slider::new(&mut state.tunables.ssao_intensity, 0.0..=2.0).text("SSAO intensity"));
             ui.add(Slider::new(&mut state.tunables.ssao_radius, 0.05..=2.0).text("SSAO radius").logarithmic(true));
