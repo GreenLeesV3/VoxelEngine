@@ -343,6 +343,19 @@ impact-fracture eligibility on it (`MIN_IMPACT_APPROACH_SPEED_M_S`):
 a resting/settling contact's closing speed stays near zero every step, a
 genuine collision's does not.
 
+### Progressive damage
+
+Debris bodies accumulate per-voxel damage from sub-threshold impacts.
+An impact below the fracture threshold but above 30% of it weakens the
+contacted voxel and its neighbors — damage accumulates proportional to
+how close the impact was to the threshold. At full damage (1.0), a voxel
+crumbles to air and may trigger a connectivity-based split. Damage is
+visible as darkening on the body's mesh (via reduced ambient occlusion
+baking) and decays at 0.05/s while the body is awake, so a body left
+alone gradually returns to pristine. This means a beam doesn't snap
+cleanly on the first hard hit — it cracks, darkens, and weakens
+progressively before finally breaking, matching how real materials fail.
+
 ### Bomb debris chips
 
 A plain carve leaves nothing behind but a void, which reads as "the
