@@ -874,11 +874,14 @@ impl ShadowPipeline {
                 stencil: Default::default(),
                 // Constant bias fights acne on near-perpendicular surfaces;
                 // slope-scaled bias handles grazing angles. Values tuned for
-                // a 100 m ortho box at 2048x2048.
+                // a 100 m ortho box at 2048x2048. The clamp was 0.05, but
+                // over a 100 m depth range that maps to ~5 m of peter-panning;
+                // reduced to 0.01 (with constant 1) to keep the gap under
+                // ~1 m while still suppressing acne.
                 bias: wgpu::DepthBiasState {
-                    constant: 2,
+                    constant: 1,
                     slope_scale: 1.5,
-                    clamp: 0.05,
+                    clamp: 0.01,
                 },
             }),
             multisample: Default::default(),

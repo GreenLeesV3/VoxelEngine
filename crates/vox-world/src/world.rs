@@ -64,6 +64,28 @@ impl<'w> SolidLookup<'w> {
         }
     }
 
+    /// The voxel at `v`, or `AIR` for out-of-bounds / absent-chunk positions.
+    /// Same semantics as [`World::get_voxel`] but with the same chunk cache
+    /// as [`solid`]/[`present`], so repeated reads in the same chunk skip the
+    /// hash-map lookup.
+    pub fn get_voxel(&mut self, v: IVec3) -> Voxel {
+        if !self.world.in_bounds(v) {
+            return AIR;
+        }
+        let key = chunk_of(v);
+        let chunk = match self.cached {
+            Some((k, c)) if k == key => c,
+            _ => {
+                let c = self.world.chunk_at(key);
+                self.cached = Some((key, c));
+                c
+            }
+        };
+        match chunk {
+            Some(c) => c.get(local_of(v)),
+            None => AIR,
+        }
+    }
     /// True when the voxel at `v` is present (non-air), regardless of
     /// solidity. Used by the connectivity flood to traverse non-solid
     /// materials (leaves, water) that are still physically present in
@@ -279,8 +301,35 @@ impl World {
                     for &(local, v) in &changes {
                         chunk.set(local, v);
                     }
-                    for (local, _) in changes {
-                        self.mark_dirty_with_neighbors(key, local);
+                    // Track which border faces were touched by any change in
+                    // this chunk, then mark dirty once per chunk instead of
+                    // per-voxel. mark_dirty_with_neighbors inserts the chunk
+                    // plus face-neighbor chunks when a change sits on that
+                    // face; collapsing to one pass preserves those semantics.
+                    self.dirty.insert(key);
+                    let last = CHUNK as u32 - 1;
+                    let mut touched_neg = [false; 3];
+                    let mut touched_pos = [false; 3];
+                    for (local, _) in &changes {
+                        for axis in 0..3 {
+                            if local[axis] == 0 {
+                                touched_neg[axis] = true;
+                            } else if local[axis] == last {
+                                touched_pos[axis] = true;
+                            }
+                        }
+                    }
+                    for axis in 0..3 {
+                        if touched_neg[axis] {
+                            let mut n = key;
+                            n[axis] -= 1;
+                            self.dirty.insert(n);
+                        }
+                        if touched_pos[axis] {
+                            let mut n = key;
+                            n[axis] += 1;
+                            self.dirty.insert(n);
+                        }
                     }
                 }
             }

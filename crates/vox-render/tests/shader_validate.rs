@@ -20,3 +20,33 @@ fn parse_shader(rel: &str) {
 fn voxel_wgsl_parses() {
     parse_shader("assets/shaders/voxel.wgsl");
 }
+
+#[test]
+fn mario_wgsl_parses() {
+    parse_shader("assets/shaders/mario.wgsl");
+}
+
+#[test]
+fn grass_wgsl_parses() {
+    parse_shader("assets/shaders/grass.wgsl");
+}
+
+#[test]
+fn sky_wgsl_parses() {
+    parse_shader("assets/shaders/sky.wgsl");
+}
+
+#[test]
+fn postprocess_wgsl_parses() {
+    parse_shader("assets/shaders/postprocess.wgsl");
+}
+
+#[test]
+fn particle_wgsl_parses() {
+    parse_shader("assets/shaders/particle.wgsl");
+}
+
+#[test]
+fn shadow_wgsl_parses() {
+    parse_shader("assets/shaders/shadow.wgsl");
+}

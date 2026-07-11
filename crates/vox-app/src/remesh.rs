@@ -115,9 +115,12 @@ impl RemeshQueue {
             let tx = self.tx.clone();
             self.in_flight += 1;
             rayon::spawn(move || {
-                let mesh = mesh_slab(&slab, origin, water_voxel, Some(&masks));
-                // Receiver dropped only on shutdown; ignore send failure.
-                let _ = tx.send((key, generation, mesh));
+                let mesh = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mesh_slab(&slab, origin, water_voxel, Some(&masks))
+                }));
+                if let Ok(m) = mesh {
+                    let _ = tx.send((key, generation, m));
+                }
             });
         }
     }

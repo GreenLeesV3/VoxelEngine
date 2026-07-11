@@ -50,12 +50,15 @@ impl BodyMeshQueue {
         let tx = self.tx.clone();
         self.in_flight += 1;
         rayon::spawn(move || {
-            let slab = VoxelSlab::from_grid(dims, &voxels);
-            // Zero seed: a body has no meaningful "world origin" (it moves),
-            // so the jitter pattern is anchored to its own local grid only.
-            let mesh = mesh_slab(&slab, IVec3::ZERO, water_voxel, None);
-            // Receiver dropped only on shutdown; ignore send failure.
-            let _ = tx.send((key, mesh));
+            // catch_unwind prevents a meshing panic from crashing the
+            // whole thread pool — the body just gets no mesh.
+            let mesh = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let slab = VoxelSlab::from_grid(dims, &voxels);
+                mesh_slab(&slab, IVec3::ZERO, water_voxel, None)
+            }));
+            if let Ok(m) = mesh {
+                let _ = tx.send((key, m));
+            }
         });
     }
 

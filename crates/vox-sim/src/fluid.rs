@@ -3,7 +3,7 @@
 
 use glam::IVec3;
 use vox_core::{FxHashMap, FxHashSet};
-use vox_world::{AIR, Voxel, World};
+use vox_world::{AIR, SolidLookup, Voxel, World};
 
 const NEIGHBORS_6: [IVec3; 6] = [
     IVec3::new(1, 0, 0),
@@ -195,20 +195,29 @@ impl FluidSim {
         let processed = cells.len();
 
         for pos in cells {
-            let v = world.get_voxel(pos);
-            let is_powder = self.is_powder(v);
             let coin = self.next_u64() & 1 == 0;
             let coin2 = self.next_u64() & 1 == 0;
-            let dest = {
-                let mut is_open = |p: IVec3| world.in_bounds(p) && world.get_voxel(p) == AIR;
+            let (v, is_powder, dest) = {
+                // SolidLookup caches the last-queried chunk for O(1) repeat
+                // access, turning per-voxel hash-map lookups into array
+                // reads.  Two instances because `is_open` and `is_supported`
+                // are passed to step_cell_with_momentum simultaneously and
+                // each closure needs exclusive &mut access to its cache.
+                let mut lk_open = SolidLookup::new(world);
+                let mut lk_solid = SolidLookup::new(world);
+                let v = lk_open.get_voxel(pos);
+                let is_powder = self.is_powder(v);
+                let mut is_open =
+                    |p: IVec3| world.in_bounds(p) && lk_open.get_voxel(p) == AIR;
                 if is_powder {
-                    step_powder(pos, &mut is_open, coin, coin2)
+                    (v, is_powder, step_powder(pos, &mut is_open, coin, coin2))
                 } else {
+                    let has_water_above = lk_solid.get_voxel(pos + IVec3::Y) == water;
                     let mut is_supported = |p: IVec3| {
-                        world.in_bounds(p) && (world.solid(p) || world.get_voxel(p) == water)
+                        world.in_bounds(p)
+                            && (lk_solid.solid(p) || lk_solid.get_voxel(p) == water)
                     };
-                    let has_water_above = world.get_voxel(pos + IVec3::Y) == water;
-                    step_cell_with_momentum(
+                    (v, is_powder, step_cell_with_momentum(
                         pos,
                         &mut is_open,
                         &mut is_supported,
@@ -216,7 +225,7 @@ impl FluidSim {
                         coin,
                         coin2,
                         self.momentum.get(&pos).copied(),
-                    )
+                    ))
                 }
             };
             if let Some(dest) = dest {
@@ -247,10 +256,11 @@ impl FluidSim {
                 // snapshot, moving its support out from under it must give
                 // it another turn next tick. Water wakes water; powder
                 // wakes powder -- they don't recruit each other.
+                let mut lk_wake = SolidLookup::new(world);
                 for changed in [pos, dest] {
                     for n in NEIGHBORS_6 {
                         let neighbor = changed + n;
-                        let nv = world.get_voxel(neighbor);
+                        let nv = lk_wake.get_voxel(neighbor);
                         if self.is_simmed(nv) {
                             next_active.insert(neighbor);
                             // Only water inherits momentum.

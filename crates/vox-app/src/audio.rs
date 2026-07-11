@@ -30,6 +30,10 @@ use vox_sm64::ffi;
 const SM64_SAMPLE_RATE: u32 = 32_000;
 /// SM64 audio channel count (stereo, interleaved L/R).
 const SM64_CHANNELS: u16 = 2;
+/// Default playback volume (0.0–1.0), applied to the libsm64 global in
+/// [`Sm64Audio::init`] unless a caller overrides it via
+/// [`Sm64Audio::set_volume`].
+pub const DEFAULT_VOLUME: f32 = 0.5;
 /// `numDesiredSamples` passed to `sm64_audio_tick` (from the upstream
 /// SDL example). When fewer than this many samples are queued, SM64
 /// produces `SAMPLES_HIGH` (544) per channel; otherwise `SAMPLES_LOW`
@@ -79,6 +83,7 @@ unsafe impl Sync for RingBuffer {}
 impl RingBuffer {
     fn new() -> Self {
         let buf = vec![0i16; RING_CAPACITY].into_boxed_slice();
+        debug_assert!(RING_CAPACITY.is_power_of_two(), "RING_CAPACITY must be a power of two for mask-based indexing");
         Self {
             buf: std::cell::UnsafeCell::new(buf),
             write: AtomicUsize::new(0),
@@ -110,6 +115,10 @@ impl RingBuffer {
             return 0;
         }
         let w = self.write.load(Ordering::Relaxed);
+        debug_assert!(
+            w.wrapping_sub(self.read.load(Ordering::Acquire)) <= RING_CAPACITY,
+            "SPSC invariant violated: write cursor lapped read cursor"
+        );
         // SAFETY: sole producer; slots [w, w+n) are free (verified by
         // write_space) and disjoint from the consumer's read window.
         let buf = unsafe { &mut *self.buf.get() };
@@ -131,6 +140,10 @@ impl RingBuffer {
             return 0;
         }
         let r = self.read.load(Ordering::Relaxed);
+        debug_assert!(
+            self.write.load(Ordering::Acquire).wrapping_sub(r) <= RING_CAPACITY,
+            "SPSC invariant violated: read cursor overtook write cursor"
+        );
         // SAFETY: sole consumer; slots [r, r+n) are populated (verified by
         // read_space) and disjoint from the producer's write window.
         let buf = unsafe { &*self.buf.get() };
@@ -145,13 +158,15 @@ impl RingBuffer {
 
 // ── Public handle ──────────────────────────────────────────────────────
 
-/// Owns the SM64 audio subsystem: a cpal output stream plus the feeder
-/// thread that keeps it supplied. Drop stops both.
 pub struct Sm64Audio {
     ring: Arc<RingBuffer>,
     stream: Option<cpal::Stream>,
     feeder: Option<thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
+    /// Current playback volume (0.0–1.0), mirrored into the libsm64
+    /// global via `sm64_set_sound_volume`. Stored so callers can query
+    /// or change it at runtime through [`Sm64Audio::set_volume`].
+    volume: f32,
 }
 
 impl Sm64Audio {
@@ -159,15 +174,19 @@ impl Sm64Audio {
     /// before [`Sm64Audio::start`]. Safe to call even if audio playback
     /// later fails to open a device — the C side tolerates tick calls
     /// after a failed init by returning 0.
-    pub fn init(rom: &[u8]) {
+    ///
+    /// `volume` sets the initial playback volume (0.0–1.0) clamped to that
+    /// range; pass [`DEFAULT_VOLUME`] for the SM64 default of 0.5.
+    pub fn init(rom: &[u8], volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
         // SAFETY: `sm64_audio_init` reads the ROM bytes and stashes them in
         // libsm64's global audio state; it does not retain the pointer.
         // We pass a valid, NUL-bounded slice (the ROM is a fixed binary).
         unsafe {
             ffi::sm64_audio_init(rom.as_ptr());
-            ffi::sm64_set_sound_volume(0.5);
+            ffi::sm64_set_sound_volume(volume);
         }
-        tracing::info!("SM64 audio initialized (banks loaded from ROM, volume 0.5)");
+        tracing::info!("SM64 audio initialized (banks loaded from ROM, volume {volume})");
     }
 
     /// Open the default output device at 32 kHz stereo and spawn the feeder
@@ -192,7 +211,27 @@ impl Sm64Audio {
             stream: Some(stream),
             feeder: Some(feeder),
             stop,
+            volume: DEFAULT_VOLUME,
         })
+    }
+
+    /// Set the playback volume (0.0–1.0), clamped to that range. Propagates
+    /// immediately to the libsm64 global so the feeder thread's next
+    /// `sm64_audio_tick` uses the new level.
+    #[allow(dead_code)]
+    pub fn set_volume(&mut self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        // SAFETY: `sm64_set_sound_volume` writes a single global float;
+        // the feeder thread reads it inside `sm64_audio_tick`, which is
+        // designed for concurrent main-thread access.
+        unsafe { ffi::sm64_set_sound_volume(volume) };
+        self.volume = volume;
+    }
+
+    /// Current playback volume (0.0–1.0).
+    #[allow(dead_code)]
+    pub fn volume(&self) -> f32 {
+        self.volume
     }
 
     /// Number of stereo frames currently queued in the ring buffer.
@@ -240,7 +279,7 @@ fn build_stream(ring: Arc<RingBuffer>) -> Option<cpal::Stream> {
     );
 
     // Try to find a 32 kHz stereo config the device actually supports.
-    let (config, sample_format) = match pick_config(&device) {
+    let (mut config, sample_format) = match pick_config(&device) {
         Some(c) => c,
         None => {
             tracing::warn!(
@@ -253,6 +292,20 @@ fn build_stream(ring: Arc<RingBuffer>) -> Option<cpal::Stream> {
             (config, sample_format)
         }
     };
+
+    // The resampler always produces interleaved stereo (L/R) i16 — see
+    // `Resampler::process`. If the selected config (most likely the
+    // device-default fallback) isn't 2-channel, request stereo so cpal
+    // opens the stream with 2 channels and the driver upmixes a mono
+    // device by duplicating the single channel into L and R. This keeps
+    // the write callbacks' interleaved-stereo assumption valid.
+    if config.channels != SM64_CHANNELS {
+        tracing::warn!(
+            "selected {}-channel output config; requesting stereo (mono channel will be duplicated)",
+            config.channels
+        );
+        config.channels = SM64_CHANNELS;
+    }
 
     let out_rate = config.sample_rate.0;
     tracing::info!(

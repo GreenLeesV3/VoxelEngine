@@ -142,8 +142,38 @@ fn mario_hud(ctx: &Context, mario: &MarioHudState) {
         authentic_counters(ctx, &cache, mario.lives, mario.coins, mario.stars);
     } else {
         power_meter_fallback(ctx, mario.health);
+        fallback_counters(ctx, mario.lives, mario.coins, mario.stars);
     }
     action_label(ctx, mario.action);
+}
+
+/// Fallback counters drawn with egui text when ROM textures are not
+/// available. Mirrors `authentic_counters` layout (upper-left): lives,
+/// stars, then coins — rendered as plain ASCII since the HUD digit
+/// textures are absent.
+fn fallback_counters(ctx: &Context, lives: i32, coins: i32, stars: i32) {
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    let pos = pos2(screen.left() + 20.0, screen.top() + 20.0);
+    let font = FontId::proportional(18.0);
+    let color = Color32::from_rgba_unmultiplied(255, 255, 255, 220);
+    let line_h = 24.0;
+
+    let lines = [
+        format!("x {lives}"),
+        format!("* {stars}"),
+        format!("o {coins}"),
+    ];
+
+    for (i, line) in lines.iter().enumerate() {
+        painter.text(
+            pos2(pos.x, pos.y + (i as f32) * line_h),
+            Align2::LEFT_TOP,
+            line,
+            font.clone(),
+            color,
+        );
+    }
 }
 
 /// A small dot at the exact center of the viewport, with a faint outline so
@@ -467,6 +497,8 @@ fn action_name(action: u32) -> &'static str {
             "Wall Kick"
         } else if action == 0x00000880 {
             "Freefall"
+        } else if action == 0x008008A9 {
+            "Ground Pound"
         } else {
             "Airborne"
         }
@@ -476,8 +508,6 @@ fn action_name(action: u32) -> &'static str {
         "Running"
     } else if action == 0x04000447 {
         "Walking"
-    } else if action == 0x008008A9 {
-        "Ground Pound"
     } else if action == 0x0080023C {
         "Pound Land"
     } else if action == 0x00000480 {
@@ -497,4 +527,30 @@ mod vox_sm64_act_flag {
     pub const ATTACKING: u32 = 0x00800000;
     /// Idle action value.
     pub const IDLE: u32 = 0x0C000200;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::action_name;
+
+    #[test]
+    fn ground_pound_action_name() {
+        assert_eq!(action_name(0x008008A9), "Ground Pound");
+    }
+
+    #[test]
+    fn pound_land_action_name() {
+        assert_eq!(action_name(0x0080023C), "Pound Land");
+    }
+
+    #[test]
+    fn triple_jump_action_name() {
+        assert_eq!(action_name(0x01000882), "Triple Jump");
+    }
+
+    #[test]
+    fn unknown_action_is_nonempty() {
+        let name = action_name(0);
+        assert!(!name.is_empty(), "action_name(0) should return a non-empty label");
+    }
 }

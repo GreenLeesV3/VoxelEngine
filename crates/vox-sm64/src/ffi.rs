@@ -113,6 +113,13 @@ unsafe extern "C" {
     pub fn sm64_global_terminate();
 
     pub fn sm64_audio_init(rom: *const u8);
+
+    /// # Concurrency
+    ///
+    /// Safe to call concurrently with [`sm64_mario_tick`]: libsm64's audio
+    /// subsystem maintains its own separate global state (the sequencer,
+    /// bank playback, and sample mix-down) from the game/Mario state, so
+    /// the two functions touch disjoint memory and never race.
     pub fn sm64_audio_tick(
         numQueuedSamples: u32,
         numDesiredSamples: u32,
@@ -126,6 +133,15 @@ unsafe extern "C" {
     );
 
     pub fn sm64_mario_create(x: f32, y: f32, z: f32) -> i32;
+
+    /// # Concurrency
+    ///
+    /// Must NOT be called concurrently with another [`sm64_mario_tick`], even
+    /// for a different Mario id: libsm64 stores all Mario instances in a
+    /// shared global array and iterates the global surface list, so two
+    /// overlapping ticks race on that shared state. The caller must
+    /// serialize Mario ticks across all instances. (Concurrent calls to
+    /// [`sm64_audio_tick`] are fine — see its concurrency note.)
     pub fn sm64_mario_tick(
         marioId: i32,
         inputs: *const SM64MarioInputs,

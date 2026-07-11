@@ -112,7 +112,7 @@ impl MarioMode {
         // Initialize libsm64's audio banks from the same ROM, then open the
         // cpal output stream + feeder thread. Audio is best-effort: if no
         // output device is available Mario mode still works silently.
-        crate::audio::Sm64Audio::init(&rom);
+        crate::audio::Sm64Audio::init(&rom, crate::audio::DEFAULT_VOLUME);
         let audio = crate::audio::Sm64Audio::start();
         if audio.is_none() {
             tracing::warn!("SM64 audio disabled (no output device / stream)");

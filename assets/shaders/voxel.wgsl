@@ -139,9 +139,9 @@ fn shadow_visibility(world_pos: vec3f) -> f32 {
     // the top-left, NDC y=+1 is the top of the viewport).
     let uv = vec2f(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5);
     // Depth the fragment *would* write to the shadow map, biased to avoid
-    // self-shadowing (acne). 0.002 was tuned for a 100 m ortho box at
-    // 2048x2048 with the writer-side bias of constant 2 / slope 1.5.
-    let ref_depth = ndc.z - 0.002;
+    // self-shadowing (acne). 0.001 was tuned for a 100 m ortho box at
+    // 2048x2048 with the writer-side bias of constant 1 / slope 1.5.
+    let ref_depth = ndc.z - 0.001;
 
     // PCF 3x3: sample the comparison sampler at 9 offsets, average the
     // result. texel size is 1/2048.
