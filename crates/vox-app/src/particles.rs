@@ -8,10 +8,24 @@
 //! The GPU side (`vox_render::ParticlePipeline`) only ever sees the flat
 //! [`ParticleInstance`] list produced by [`ParticleSystem::instances`].
 
-use glam::{IVec3, Vec3};
+use glam::{IVec3, Quat, Vec3};
 use vox_core::voxel_at;
 use vox_render::{MAX_PARTICLES, ParticleInstance};
-use vox_world::World;
+use vox_world::{Voxel, World};
+
+/// Lightweight collision shape for a debris body, passed to particle update
+/// for per-voxel collision. Broad-phase AABB + narrow-phase grid lookup
+/// avoids the invisible-wall artifacts of AABB-only collision on rotated,
+/// concave debris (L-triominoes, plus-signs).
+pub struct BodyCollisionRef<'a> {
+    pub aabb_min: Vec3,
+    pub aabb_max: Vec3,
+    pub pos: Vec3,
+    pub inv_rot: Quat,
+    pub grid_offset: Vec3,
+    pub dims: IVec3,
+    pub voxels: &'a [Voxel],
+}
 
 /// Fraction of world gravity particles feel -- dust and smoke are light and
 /// drag-dominated, so full gravity reads as "gravel", not "dust".
@@ -145,10 +159,19 @@ impl ParticleSystem {
     }
 
     /// Advance every particle by `dt` seconds, colliding with the voxel
-    /// world and repelling nearby particles, then drop the expired.
+    /// world and debris body voxels, then drop the expired.
     /// `voxel_size_m` converts world-space positions to voxel coordinates
-    /// for `world.solid()` lookups.
-    pub fn update(&mut self, dt: f32, world: &World, voxel_size_m: f32) {
+    /// for `world.solid()` lookups. `bodies` provides collision shapes for
+    /// live debris — particles collide per-voxel (broad-phase AABB + 
+    /// narrow-phase grid lookup) so smoke billows around rubble, dust
+    /// settles on fragments, etc.
+    pub fn update(
+        &mut self,
+        dt: f32,
+        world: &World,
+        voxel_size_m: f32,
+        bodies: &[BodyCollisionRef],
+    ) {
         // --- Spatial hash for inter-particle repulsion ---
         let hash = SpatialHash::build(&self.particles);
 
@@ -180,23 +203,48 @@ impl ParticleSystem {
             };
             p.vel /= 1.0 + drag * dt;
 
-            // World collision: check the proposed next position component-wise
-            // and deflect along walls instead of passing through.
+            // Collision: check the proposed next position component-wise
+            // against both the voxel world and debris body voxels.
             let next = p.pos + p.vel * dt;
 
+            // Helper: is this world-space point inside a solid world voxel
+            // or any debris body's solid voxels? Broad-phase AABB first,
+            // then narrow-phase per-voxel grid lookup for accuracy.
+            let blocked = |pos: Vec3| -> bool {
+                let v = voxel_at(pos, voxel_size_m);
+                if world.in_bounds(v) && world.solid(v) {
+                    return true;
+                }
+                for body in bodies {
+                    // Broad-phase: AABB test.
+                    if !pos.cmple(body.aabb_max).all() || !pos.cmpge(body.aabb_min).all() {
+                        continue;
+                    }
+                    // Narrow-phase: transform to body-local and check voxel.
+                    let local = body.inv_rot * (pos - body.pos) - body.grid_offset;
+                    let voxel = (local / voxel_size_m).floor().as_ivec3();
+                    if voxel.cmpge(IVec3::ZERO).all() && voxel.cmplt(body.dims).all() {
+                        let idx = (voxel.x + voxel.z * body.dims.x
+                            + voxel.y * body.dims.x * body.dims.z)
+                            as usize;
+                        if idx < body.voxels.len() && body.voxels[idx] != vox_world::AIR {
+                            return true;
+                        }
+                    }
+                }
+                false
+            };
+
             // X axis: if blocked, zero X velocity (slide along wall).
-            let x_probe = voxel_at(Vec3::new(next.x, p.pos.y, p.pos.z), voxel_size_m);
-            if world.in_bounds(x_probe) && world.solid(x_probe) {
+            if blocked(Vec3::new(next.x, p.pos.y, p.pos.z)) {
                 p.vel.x = 0.0;
             }
             // Z axis: same.
-            let z_probe = voxel_at(Vec3::new(p.pos.x, p.pos.y, next.z), voxel_size_m);
-            if world.in_bounds(z_probe) && world.solid(z_probe) {
+            if blocked(Vec3::new(p.pos.x, p.pos.y, next.z)) {
                 p.vel.z = 0.0;
             }
             // Y axis: ceiling stop (buoyant) or floor settle (non-buoyant).
-            let y_probe = voxel_at(Vec3::new(p.pos.x, next.y, p.pos.z), voxel_size_m);
-            if world.in_bounds(y_probe) && world.solid(y_probe) {
+            if blocked(Vec3::new(p.pos.x, next.y, p.pos.z)) {
                 if p.buoyant && p.vel.y > 0.0 {
                     // Hit a ceiling: stop rising, spread sideways.
                     p.vel.y = 0.0;
@@ -415,7 +463,7 @@ mod tests {
         assert_eq!(sys.len(), 50);
         // Max per-particle life is 1.0 * (0.6 + 0.8) = 1.4 s.
         for _ in 0..100 {
-            sys.update(dt(), &world, 1.0);
+            sys.update(dt(), &world, 1.0, &[]);
         }
         assert_eq!(
             sys.len(),
@@ -446,7 +494,7 @@ mod tests {
         let mut sys = ParticleSystem::new();
         sys.burst(dust(Vec3::new(32.0, 40.0, 32.0), 1));
         for _ in 0..30 {
-            sys.update(dt(), &world, 1.0);
+            sys.update(dt(), &world, 1.0, &[]);
         }
         let inst = sys.instances();
         assert_eq!(inst.len(), 1);
@@ -473,7 +521,7 @@ mod tests {
         });
         let size0 = sys.instances()[0].center_size[3];
         for _ in 0..60 {
-            sys.update(dt(), &world, 1.0);
+            sys.update(dt(), &world, 1.0, &[]);
         }
         let i = &sys.instances()[0];
         assert!(
@@ -505,7 +553,7 @@ mod tests {
         // Run enough ticks for the smoke to reach the ceiling at y=10.
         // At 0.6 m/s² from y=9, it takes ~2-3s (~180 ticks) to reach y=10.
         for _ in 0..300 {
-            sys.update(dt(), &world, 1.0);
+            sys.update(dt(), &world, 1.0, &[]);
         }
         let y = sys.instances()[0].center_size[1];
         assert!(y < 10.0, "smoke must not pass through the ceiling: y = {y}");
@@ -531,7 +579,7 @@ mod tests {
             buoyant: false,
         });
         for _ in 0..600 {
-            sys.update(dt(), &world, 1.0);
+            sys.update(dt(), &world, 1.0, &[]);
         }
         let y = sys.instances()[0].center_size[1];
         assert!(y < 2.5, "dust must settle near the floor: y = {y}");
@@ -572,7 +620,7 @@ mod tests {
         );
         // After several steps, repulsion pushes them apart.
         for _ in 0..30 {
-            sys.update(dt(), &world, 1.0);
+            sys.update(dt(), &world, 1.0, &[]);
         }
         let inst1 = sys.instances();
         let q0 = Vec3::from_array([
@@ -609,7 +657,7 @@ mod tests {
 
         // A deliberately large frame exercises the aggregate repulsion
         // clamp as well as the buoyant terminal-speed guard.
-        sys.update(0.25, &world, 1.0);
+        sys.update(0.25, &world, 1.0, &[]);
 
         assert!(
             sys.particles

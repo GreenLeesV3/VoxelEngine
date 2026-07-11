@@ -1881,8 +1881,25 @@ impl App for VoxApp {
         };
         self.resolve_pending_removals(&uploaded);
         self.sync_debris_render(timing.alpha);
-        self.particles
-            .update(timing.dt_frame, &self.world, self.world.cfg.voxel_size_m);
+        let body_colliders: Vec<particles::BodyCollisionRef> = self
+            .phys
+            .iter()
+            .map(|(_, b)| particles::BodyCollisionRef {
+                aabb_min: b.aabb_min,
+                aabb_max: b.aabb_max,
+                pos: b.pos,
+                inv_rot: b.rot.inverse(),
+                grid_offset: b.grid_offset,
+                dims: b.grid.dims,
+                voxels: &b.grid.voxels,
+            })
+            .collect();
+        self.particles.update(
+            timing.dt_frame,
+            &self.world,
+            self.world.cfg.voxel_size_m,
+            &body_colliders,
+        );
 
         // Advance day/night cycle (unless frozen at noon).
         if !self.always_day {
