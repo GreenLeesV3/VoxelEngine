@@ -1630,4 +1630,36 @@ mod tests {
             b.aabb_min.y
         );
     }
+
+    #[test]
+    fn joint_holds_two_bodies_at_rest_length() {
+        let world = floored_world();
+        let reg = registry();
+        let mut phys = PhysicsWorld::new();
+
+        // Two 2x2x2 stone bodies, 1m apart, joined at rest length 1.0.
+        let grid = VoxelGrid::new(IVec3::new(2, 2, 2), vec![Voxel(1); 8]);
+        let body_a =
+            Body::from_grid(grid.clone(), &reg, 0.5, Vec3::new(10.0, 10.0, 10.0)).unwrap();
+        let body_b = Body::from_grid(grid, &reg, 0.5, Vec3::new(11.0, 10.0, 10.0)).unwrap();
+        let id_a = phys.spawn(body_a);
+        let id_b = phys.spawn(body_b);
+
+        // Joint at COM of each body (anchor = 0,0,0 local), rest length 1.0.
+        phys.add_joint(id_a, id_b, Vec3::ZERO, Vec3::ZERO, 1.0);
+
+        // Run physics: gravity pulls both down, but the joint should keep
+        // them ~1m apart. After settling, distance should be close to 1.0.
+        for _ in 0..300 {
+            phys.step(&world, PHYSICS_DT);
+        }
+
+        let a = phys.get(id_a).unwrap();
+        let b = phys.get(id_b).unwrap();
+        let dist = (a.pos - b.pos).length();
+        assert!(
+            (dist - 1.0).abs() < 0.15,
+            "joint should maintain rest length ~1.0m, got {dist}"
+        );
+    }
 }
