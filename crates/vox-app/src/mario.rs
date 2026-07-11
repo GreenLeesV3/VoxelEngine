@@ -23,9 +23,9 @@ use winit::keyboard::KeyCode;
 
 /// Base third-person camera distance behind Mario, in meters.
 /// Scaled by Mario's world-space height relative to the original 30 units/m.
-const CAM_DISTANCE_BASE: f32 = 10.0;
+const CAM_DISTANCE_BASE: f32 = 11.0;
 /// Base third-person camera height above Mario, in meters.
-const CAM_HEIGHT_BASE: f32 = 5.0;
+const CAM_HEIGHT_BASE: f32 = 5.5;
 
 /// State for Mario mode. Created on first toggle, reused on subsequent
 /// toggles (so we don't reload the ROM every time).
@@ -424,7 +424,7 @@ impl MarioMode {
         let sensitivity = 0.0025;
         self.cam_yaw = (self.cam_yaw - delta.x * sensitivity) % std::f32::consts::TAU;
         let limit = std::f32::consts::FRAC_PI_2 - 0.1;
-        self.cam_pitch = (self.cam_pitch - delta.y * sensitivity).clamp(-limit, limit);
+        self.cam_pitch = (self.cam_pitch + delta.y * sensitivity).clamp(-limit, limit);
     }
 
     /// Camera position (third-person, behind and above Mario).
