@@ -16,7 +16,7 @@ struct SkyCam {
 
 struct VOut {
     @builtin(position) clip: vec4f,
-    @location(0) view_dir: vec3f,  // direction from camera to fragment
+    @location(0) ndc: vec2f,  // screen-space NDC (-1..1), interpolated
 };
 
 // Fullscreen triangle.
@@ -29,17 +29,7 @@ fn vs(@builtin(vertex_index) vi: u32) -> VOut {
     );
     var out: VOut;
     out.clip = vec4f(p[vi], 1.0, 1.0);
-    // Reconstruct the world-space view ray for this pixel using the
-    // actual FOV and aspect ratio so the sky matches the camera frustum.
-    // NDC x,y ∈ [-1,1] map to tan(fov/2) * aspect on X and tan(fov/2)
-    // on Y, then normalize the resulting direction.
-    let ndc = p[vi];
-    let tan_half_fov = cam.cam_pos.w;
-    let aspect = cam.sky_color.w;
-    let ray = cam.cam_forward.xyz
-        + cam.cam_right.xyz * (ndc.x * tan_half_fov * aspect)
-        + cam.cam_up.xyz * (ndc.y * tan_half_fov);
-    out.view_dir = normalize(ray);
+    out.ndc = p[vi];
     return out;
 }
 
@@ -57,7 +47,18 @@ fn mie(dot_val: f32, g: f32) -> f32 {
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4f {
-    let dir = normalize(in.view_dir);
+    // Reconstruct the world-space view ray per-pixel from the
+    // interpolated NDC coordinates. Computing it per-vertex and
+    // interpolating the normalized direction causes squashing at
+    // screen edges — the linear interpolation doesn't preserve
+    // angular distribution. Per-fragment reconstruction is correct.
+    let tan_half_fov = cam.cam_pos.w;
+    let aspect = cam.sky_color.w;
+    let dir = normalize(
+        cam.cam_forward.xyz
+        + cam.cam_right.xyz * (in.ndc.x * tan_half_fov * aspect)
+        + cam.cam_up.xyz * (in.ndc.y * tan_half_fov)
+    );
     let sun_dir = normalize(cam.sun_dir.xyz);
     let sun_strength = cam.sun_dir.w;
 
