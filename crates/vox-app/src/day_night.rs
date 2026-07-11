@@ -40,14 +40,24 @@ pub struct DayNightParams {
 pub fn compute(game_time: f32) -> DayNightParams {
     // Wrap time into 0..1 cycle.
     let t = (game_time / DAY_LENGTH_SECS).fract();
-    // Sun angle: 0 at midnight (below horizon), pi at noon (overhead).
-    // Map t=0 (midnight) to angle=-pi/2, t=0.5 (noon) to angle=+pi/2.
+    // Sun angle: t=0 midnight (sun below), t=0.5 noon (sun overhead).
+    // The sun sweeps east→west in a proper arc across the sky.
+    // angle goes from -pi/2 (midnight, below) through 0 (horizon) to
+    // +pi/2 (noon, overhead) and back to -pi/2 (next midnight).
     let sun_angle = (t * 2.0 - 0.5) * std::f32::consts::PI;
     let sun_height = sun_angle.sin(); // -1 (midnight) to +1 (noon)
-    let sun_azimuth = (t * 2.0 * std::f32::consts::PI).cos(); // horizontal sweep
 
-    // Sun direction: arcs across the sky. x/z sweep horizontally, y = height.
-    let sun_dir = Vec3::new(sun_azimuth * 0.5, sun_height, -0.35).normalize();
+    // Azimuth sweeps east→west over the full cycle. At dawn (t=0.25)
+    // the sun is in the +X direction (east), at noon (t=0.5) it's
+    // overhead, at dusk (t=0.75) it's in the -X direction (west).
+    // Use cos to get a smooth 0→1→0 daylight arc and negate for
+    // proper east→west direction.
+    let sun_azimuth = -((t * 2.0 - 0.5) * std::f32::consts::PI).cos();
+
+    // Sun direction: arcs across the sky from east to west.
+    // X = azimuth (east→west sweep), Y = height (up/down), Z = slight
+    // southward tilt for visual variety.
+    let sun_dir = Vec3::new(sun_azimuth * sun_height.abs().max(0.15), sun_height, -0.2).normalize();
 
     // Daylight factor: 0 at night, 1 at full day. Smooth transition at horizon.
     let daylight = clamp01((sun_height + 0.1) * 2.5);

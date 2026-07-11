@@ -89,20 +89,30 @@ fn fs(in: VOut) -> @location(0) vec4f {
     sky += cam.sun_color.xyz * rayleigh_val * 0.15 * sun_strength;
 
     // Sun disc — bright spot at sun direction.
-    let sun_disc = mie(cos_angle, 0.995);
-    let sun_glow = pow(sun_disc, 200.0) * 8.0;
-    sky += cam.sun_color.xyz * sun_glow * sun_strength;
+    // Use a smooth gaussian falloff instead of Mie pow() which
+    // overflows to inf/NaN at cos_angle=1 (the "black hole" bug).
+    let sun_angle = acos(clamp(cos_angle, -1.0, 1.0));
+    let sun_disc = exp(-sun_angle * sun_angle * 800.0); // sharp gaussian
+    let sun_glow = sun_disc * 3.0;
+    // Sun disc always visible during day (not multiplied by sun_strength
+    // which would zero it out). Use max(strength, 0.3) so even near
+    // dusk the disc is visible.
+    let disc_visibility = max(sun_strength, 0.3);
+    sky += cam.sun_color.xyz * sun_glow * disc_visibility;
 
     // Sun halo — softer glow around the disc.
-    let halo = pow(mie(cos_angle, 0.85), 4.0) * 0.3;
-    sky += cam.sun_color.xyz * halo * sun_strength;
+    let halo = exp(-sun_angle * sun_angle * 80.0) * 0.4;
+    sky += cam.sun_color.xyz * halo * disc_visibility;
 
-    // Stars at night (simple hash-based).
+    // Stars at night — snap direction to a grid to prevent shimmer.
     if (sun_strength < 0.15) {
-        let star_hash = fract(sin(dir.x * 127.1 + dir.y * 311.7 + dir.z * 74.7) * 43758.5453);
-        let star_brightness = smoothstep(0.995, 1.0, star_hash);
+        let grid_dir = floor(dir * 200.0) / 200.0;
+        let star_hash = fract(sin(grid_dir.x * 127.1 + grid_dir.y * 311.7 + grid_dir.z * 74.7) * 43758.5453);
+        let star_brightness = smoothstep(0.992, 1.0, star_hash);
         let star_fade = (0.15 - sun_strength) / 0.15;
-        sky += vec3f(star_brightness * star_fade);
+        // Only show stars above the horizon.
+        let above_horizon = step(0.0, dir.y);
+        sky += vec3f(star_brightness * star_fade * above_horizon);
     }
 
     return vec4f(sky, 1.0);
