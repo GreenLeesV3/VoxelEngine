@@ -83,8 +83,16 @@ fn fs(@builtin(position) frag_pos: vec4f) -> @location(0) vec4f {
     c = mix(vec3f(lum), c, 1.3);
 
     // Color grading: slight lift in shadows, warm tint, gentle contrast.
-    c = c + vec3f(0.03);
     c = c * vec3f(1.02, 1.0, 0.98);
+
+    // Edge detection (#64): Sobel on depth + normal. Now that MRT
+    // writes real data to depth_copy_tex and normal_tex, the sobel
+    // functions have real edges to detect. Subtle dark outlines on
+    // geometry boundaries for a toon look.
+    let edge_d = sobel_depth(uv, params.texel_size);
+    let edge_n = sobel_vec3(normal_tex, uv, params.texel_size);
+    let edge = clamp(edge_d + edge_n * 0.5, 0.0, 1.0);
+    c = mix(c, c * vec3f(0.3, 0.25, 0.2), edge * 0.6);
 
     return vec4f(clamp(c, vec3f(0.0), vec3f(1.0)), 1.0);
 }

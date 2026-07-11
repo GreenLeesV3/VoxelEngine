@@ -112,7 +112,12 @@ struct Cell {
 
 impl PartialEq for Cell {
     fn eq(&self, other: &Self) -> bool {
-        self.material == other.material && self.ao4 == other.ao4 && self.skylight == other.skylight
+        // Skylight quantized to 4 buckets (0-3, 4-7, 8-11, 12-15)
+        // to prevent quad fragmentation on slopes where adjacent
+        // voxels differ by 1-2 skylight levels.
+        self.material == other.material
+            && self.ao4 == other.ao4
+            && (self.skylight >> 2) == (other.skylight >> 2)
     }
 }
 
