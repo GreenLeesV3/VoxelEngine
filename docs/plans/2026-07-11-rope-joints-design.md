@@ -17,7 +17,7 @@ joints, a rope material, and rope spawning.
 | Joint storage | `joints: Vec<Joint>` on `PhysicsWorld` — persistent across steps (unlike contacts). Stores slot indices, body-local anchors, rest length, accumulated Lagrange multiplier for warm starting. |
 | Joint solving | Inside the `SOLVER_ITERS` loop (solver.rs:602), interleaved with contacts. Standard sequential-impulse: compute distance violation, apply equal-and-opposite impulse. Position correction in split-impulse pass. |
 | Joint-sleep | Feed joint pairs into island union-find (solver.rs:450). Sleeping body = static anchor. Wake on relative motion > threshold. |
-| Rope segments | Each segment is a `Body` with a `VoxelGrid` of `rope` voxels (4×4×5). Connected by joints at end-face centers. Participates in all existing physics: collision, fracture, buoyancy, fire, particles. |
+| Rope segments | Each segment is a `Body` with a `VoxelGrid` of `rope` voxels (2×2×5, 20 voxels). Connected by joints at end-face centers. Participates in all existing physics: collision, fracture, buoyancy, fire, particles. |
 | Rope material | `solid = true`, density 400, strength 2.0, flammable = true. Color: tan/brown [0.65, 0.50, 0.30]. |
 | Joint breaking | Joints removed when either body is despawned. Rope can be cut by carving through a segment (body splits, joint references stale body). |
 | Rope spawning | 5 segments spawned near player at start, hanging from a point above. Also spawnable via a rope tool (hotbar slot 7) that creates segments between two clicked points. |
@@ -139,7 +139,7 @@ flammable = true
 In `VoxApp::new`, after world build and physics init, spawn 5 rope segments hanging from a point near the player:
 
 1. Find a point ~5m above the player's spawn position.
-2. Create 5 bodies, each a 4×4×5 voxel grid of `rope` material, oriented vertically.
+2. Create 5 bodies, each a 2×2×5 voxel grid of `rope` material, oriented vertically.
 3. Connect consecutive segments with joints at their end-face centers (rest length = 0, or a small gap).
 4. The top segment could be anchored to the world (a static anchor) or just left to fall.
 
@@ -158,10 +158,10 @@ When the player selects slot 7 and clicks two points:
 
 ## 5. Rope segment construction
 
-Each segment is a `VoxelGrid` of dimensions `(4, 5, 4)` filled with `rope` material voxels. At 0.1m voxel scale, that's 0.4m × 0.5m × 0.4m per segment. 5 segments = 2.5m of rope.
+Each segment is a `VoxelGrid` of dimensions `(2, 5, 2)` filled with `rope` material voxels (20 voxels per segment). At 0.1m voxel scale, that's 0.2m × 0.5m × 0.2m per segment. 5 segments = 2.5m of rope.
 
 The anchor points for joints are at the centers of the top and bottom faces of each segment, in body-local frame:
-- `anchor_top = (0, +half_height, 0)` relative to COM
+- `anchor_top = (0, +half_height, 0)` relative to COM where `half_height = 5 * voxel_size / 2 = 0.25m`
 - `anchor_bottom = (0, -half_height, 0)` relative to COM
 
 The rest length between segments is 0 (they touch end-to-end) or a small gap (0.05m for visual separation).
