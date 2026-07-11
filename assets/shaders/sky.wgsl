@@ -1,6 +1,12 @@
 // Procedural sky dome rendered as a fullscreen triangle before the scene.
 // Uses Rayleigh + Mie scattering approximation driven by the day/night
-// sun direction. Outputs sky color + sun disc, replacing the flat clear.
+// sun direction. Outputs sky color + sun disc + moon + stars + nebula.
+//
+// Night features ported from CazToon's sky_night_features.glsl:
+// - Cube-face projected star grid with hash-based density, twinkle, size variation
+// - Shooting stars (3 slots, periodic, trail rendering)
+// - Night nebula (3D FBM noise, two-color blend, drift)
+// - Moon disc opposite the sun with soft glow
 
 struct SkyCam {
     view_proj: mat4x4f,
@@ -46,6 +52,201 @@ fn mie(dot_val: f32, g: f32) -> f32 {
     return num / (den * sqrt(abs(den)) + 0.0001);
 }
 
+// ============================================================================
+// CazToon night features — ported from sky_night_features.glsl
+// ============================================================================
+
+// --- Hash functions (CazToon's skyHash* functions) ---
+fn sky_hash11(p: f32) -> f32 {
+    var v = fract(p * 0.1031);
+    v = v * v + 33.33;
+    v = v * v + v;
+    return fract(v);
+}
+
+fn sky_hash21(p: vec2f) -> f32 {
+    let p3 = fract(vec3f(p.x, p.y, p.x) * 0.1031);
+    let pp = p3 + dot(p3, p3.yzx + 33.33);
+    return fract((pp.x + pp.y) * pp.z);
+}
+
+fn sky_hash22(p: vec2f) -> vec2f {
+    let p3 = fract(vec3f(p.x, p.y, p.x) * vec3f(0.1031, 0.1030, 0.0973));
+    let pp = p3 + dot(p3, p3.yzx + 33.33);
+    return fract((pp.xx + pp.yz) * pp.zy);
+}
+
+fn sky_hash31(p: vec3f) -> f32 {
+    var v = fract(p * 0.1031);
+    v = v + dot(v, v.zyx + 31.32);
+    return fract((v.x + v.y) * v.z);
+}
+
+// --- Cube-face projection (CazToon's skyCubeProject) ---
+// Projects a 3D direction onto a cube face, returning 2D UV for star grid.
+fn sky_cube_project(dir: vec3f) -> vec2f {
+    let a = abs(dir);
+    var uv = vec2f(0.0);
+    var face = 0.0;
+    if (a.x >= a.y && a.x >= a.z) {
+        uv = dir.zy / a.x;
+        face = select(1.0, 0.0, dir.x > 0.0);
+    } else if (a.y >= a.z) {
+        uv = dir.xz / a.y;
+        face = select(3.0, 2.0, dir.y > 0.0);
+    } else {
+        uv = dir.xy / a.z;
+        face = select(5.0, 4.0, dir.z > 0.0);
+    }
+    uv = uv + face * 100.0;
+    return uv;
+}
+
+// --- 3D noise for nebula (CazToon's skyNoise3D + skyFbm3D) ---
+fn sky_noise3d(p: vec3f) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let ff = f * f * (3.0 - 2.0 * f);
+    let a = sky_hash31(i);
+    let b = sky_hash31(i + vec3f(1.0, 0.0, 0.0));
+    let c = sky_hash31(i + vec3f(0.0, 1.0, 0.0));
+    let d = sky_hash31(i + vec3f(1.0, 1.0, 0.0));
+    let e = sky_hash31(i + vec3f(0.0, 0.0, 1.0));
+    let g = sky_hash31(i + vec3f(1.0, 0.0, 1.0));
+    let h = sky_hash31(i + vec3f(0.0, 1.0, 1.0));
+    let k = sky_hash31(i + vec3f(1.0, 1.0, 1.0));
+    return mix(
+        mix(mix(a, b, ff.x), mix(c, d, ff.x), ff.y),
+        mix(mix(e, g, ff.x), mix(h, k, ff.x), ff.y),
+        ff.z
+    );
+}
+
+fn sky_fbm3d(p: vec3f, octaves: i32) -> f32 {
+    var v = 0.0;
+    var amp = 0.5;
+    var pp = p;
+    for (var i = 0; i < 4; i = i + 1) {
+        if (i >= octaves) { break; }
+        v = v + amp * sky_noise3d(pp);
+        pp = pp * 2.0;
+        amp = amp * 0.5;
+    }
+    return v;
+}
+
+// --- Star field (CazToon's skyStarField) ---
+// STAR_SCALE=40, STAR_DENSITY=0.20, STAR_SIZE=0.18, STAR_BRIGHTNESS=0.5, STAR_TWINKLE=0.6
+fn sky_star_field(dir: vec3f, time: f32) -> f32 {
+    let d = normalize(dir);
+    let star_uv = sky_cube_project(d) * 40.0;
+    let cell = floor(star_uv);
+    let local = fract(star_uv);
+
+    var star = 0.0;
+    for (var x = -1; x <= 1; x = x + 1) {
+        for (var y = -1; y <= 1; y = y + 1) {
+            let nc = cell + vec2f(f32(x), f32(y));
+            let rnd = sky_hash21(nc);
+            if (rnd > 0.20) { continue; }  // STAR_DENSITY
+
+            let sp = sky_hash22(nc) * 0.6 + 0.2;
+            let dd = local - vec2f(f32(x), f32(y)) - sp;
+            let dist = length(dd);
+
+            let base_bright = 0.4 + sky_hash21(nc + 500.0) * 0.6;
+            let twinkle_phase = sky_hash21(nc + 700.0) * 6.28318;
+            let twinkle_speed = 0.5 + sky_hash21(nc + 800.0) * 2.0;
+            var twinkle = 0.7 + 0.3 * sin(time * twinkle_speed + twinkle_phase);
+            let twinkle_amount = sky_hash21(nc + 900.0);
+            twinkle = mix(1.0, twinkle, twinkle_amount * 0.6);
+
+            let bright = base_bright * twinkle * 0.5;  // STAR_BRIGHTNESS
+            let radius = 0.18 * (0.5 + sky_hash21(nc + 400.0) * 0.5);  // STAR_SIZE
+            let s = 1.0 - smoothstep(0.0, radius, dist);
+            star = max(star, s * bright);
+        }
+    }
+    return star;
+}
+
+// --- Shooting stars (CazToon's skyShootingStar) ---
+// STAR_SHOOTING_BRIGHTNESS=5.0, 3 slots
+fn sky_shooting_star(dir: vec3f, time: f32) -> vec3f {
+    let d = normalize(dir);
+    var result = vec3f(0.0);
+
+    for (var i = 0; i < 3; i = i + 1) {
+        let slot_offset = f32(i) * 47.0;
+        let cycle_time = 15.0 + sky_hash11(slot_offset) * 20.0;
+        let t = (time + slot_offset) % cycle_time;
+
+        let duration = 0.5 + sky_hash11(slot_offset + 10.0) * 1.0;
+        if (t > duration) { continue; }
+
+        let start_phi = sky_hash11(slot_offset + 20.0) * 6.28318;
+        let start_theta = 0.2 + sky_hash11(slot_offset + 30.0) * 0.6;
+        let start_dir = vec3f(
+            cos(start_phi) * cos(start_theta),
+            sin(start_theta),
+            sin(start_phi) * cos(start_theta)
+        );
+
+        let travel_angle = sky_hash11(slot_offset + 40.0) * 6.28318;
+        let travel_dir = normalize(vec3f(cos(travel_angle), -0.3, sin(travel_angle)));
+
+        let speed = 0.3 + sky_hash11(slot_offset + 50.0) * 0.4;
+        let current_pos = normalize(start_dir + travel_dir * t * speed);
+
+        let to_viewer = d - current_pos;
+        let along = dot(to_viewer, travel_dir);
+        let perp_dist = length(to_viewer - travel_dir * along);
+
+        let trail_width = 0.003;
+        let trail_length = 0.08 * (1.0 - t / duration);
+
+        if (perp_dist < trail_width && along > -trail_length && along < 0.01) {
+            var intensity = (1.0 - perp_dist / trail_width);
+            intensity = intensity * smoothstep(-trail_length, 0.0, along);
+            intensity = intensity * (1.0 - t / duration);
+            intensity = intensity * 5.0;  // STAR_SHOOTING_BRIGHTNESS
+            result = result + vec3f(0.9, 0.95, 1.0) * intensity;
+        }
+    }
+    return result;
+}
+
+// --- Night nebula (CazToon's skyNightNebula) ---
+// NIGHT_NEBULA_INTENSITY=0.40, NIGHT_NEBULA_SCALE=0.8, NIGHT_NEBULA_SPEED=0.015
+// R1=0.2 G1=0.1 B1=0.8, R2=0.0 G2=0.8 B2=0.9
+fn sky_night_nebula(dir: vec3f, time: f32) -> vec3f {
+    let d = normalize(dir);
+    let scale = 0.8 * 2.0;  // NIGHT_NEBULA_SCALE * 2
+    let drift = time * 0.015;  // NIGHT_NEBULA_SPEED
+
+    let p1 = d * scale + vec3f(drift * 0.4, drift * 0.15, 0.0);
+    let p2 = d * scale * 1.4 + vec3f(31.7, 17.3, 5.1) + vec3f(-drift * 0.25, drift * 0.35, 0.0);
+    let p3 = d * scale * 0.3 + vec3f(-50.0, 25.0, 12.3) + vec3f(drift * 0.08, 0.0, 0.0);
+
+    let large1 = sky_fbm3d(p1, 4);
+    let large2 = sky_fbm3d(p2, 3);
+    let color_layer = sky_fbm3d(p3, 3);
+
+    var mask = smoothstep(0.28, 0.60, large1);
+    mask = mask * (0.55 + 0.45 * large2);
+    mask = max(mask, smoothstep(0.50, 0.80, large1) * 0.5);
+
+    let height_fade = smoothstep(-0.05, 0.18, d.y) * (1.0 - smoothstep(0.88, 1.00, d.y));
+    mask = mask * height_fade;
+
+    let col1 = vec3f(0.2, 0.1, 0.8);   // NIGHT_NEBULA_R1,G1,B1
+    let col2 = vec3f(0.0, 0.8, 0.9);   // NIGHT_NEBULA_R2,G2,B2
+    var nebula_color = mix(col1, col2, smoothstep(0.3, 0.7, color_layer));
+    nebula_color = nebula_color + vec3f(0.5, 0.4, 0.8) * smoothstep(0.65, 0.85, large1) * 0.35;
+
+    return nebula_color * mask * 0.40;  // NIGHT_NEBULA_INTENSITY
+}
+
 struct SkyFOut {
     @location(0) color: vec4f,
     @location(1) normal: vec4f,
@@ -54,11 +255,6 @@ struct SkyFOut {
 
 @fragment
 fn fs(in: VOut) -> SkyFOut {
-    // Reconstruct the world-space view ray per-pixel from the
-    // interpolated NDC coordinates. Computing it per-vertex and
-    // interpolating the normalized direction causes squashing at
-    // screen edges — the linear interpolation doesn't preserve
-    // angular distribution. Per-fragment reconstruction is correct.
     let tan_half_fov = cam.cam_pos.w;
     let aspect = cam.sky_color.w;
     let dir = normalize(
@@ -68,6 +264,7 @@ fn fs(in: VOut) -> SkyFOut {
     );
     let sun_dir = normalize(cam.sun_dir.xyz);
     let sun_strength = cam.sun_dir.w;
+    let time = cam.sun_color.w;
 
     // Sun elevation: 0 = horizon, 1 = directly overhead.
     let sun_up = clamp(sun_dir.y, 0.0, 1.0);
@@ -76,9 +273,7 @@ fn fs(in: VOut) -> SkyFOut {
     // Cosine of angle between view direction and sun.
     let cos_angle = dot(dir, sun_dir);
 
-    // Sky colors from the 6-phase ToD system (cam.sky_color.xyz
-    // carries the weighted blend from day_night.rs). Use it as the
-    // horizon color and derive zenith + mid colors from it.
+    // Sky colors from the 6-phase ToD system.
     let horizon_color = cam.sky_color.xyz;
     let top_color = cam.zenith_color.xyz;
     let mid_color = mix(horizon_color, top_color, 0.5);
@@ -108,37 +303,54 @@ fn fs(in: VOut) -> SkyFOut {
     sky += cam.sun_color.xyz * sun_glow * sun_strength;
 
     // Sun atmospheric glow — wide halo, strong at sunrise/sunset.
-    let sun_atmo = exp(-sun_angle * sun_angle * 30.0) * 0.3;
-    sky += cam.sun_color.xyz * sun_atmo * sun_strength;
+    // CazToon: glow = exp(-d²/r²), r = SUN_GLOW_RADIUS * 0.08; halo = 1/(1+(d/r2)⁴)
+    let glow_r = 0.08;
+    let sun_atmo_glow = exp(-sun_angle * sun_angle / (glow_r * glow_r)) * 0.35;
+    let halo_r2 = 0.2;
+    let sun_atmo_halo = 1.0 / (1.0 + pow(sun_angle / halo_r2, 4.0)) * 0.08;
+    sky += cam.sun_color.xyz * (sun_atmo_glow + sun_atmo_halo) * sun_strength;
 
-    // Sun halo — softer glow around the disc, fades with the sun.
-    let halo = exp(-sun_angle * sun_angle * 80.0) * 0.4;
-    sky += cam.sun_color.xyz * halo * sun_strength;
+    // --- Moon disc (opposite the sun) ---
+    // CazToon renders the moon via the vanilla sun/moon texture, but we
+    // draw it procedurally: a soft white disc opposite the sun direction,
+    // visible at night (when sun_strength is low).
+    let moon_dir = -sun_dir;
+    let moon_cos = dot(dir, moon_dir);
+    let moon_angle = acos(clamp(moon_cos, -1.0, 1.0));
+    let moon_visibility = clamp(1.0 - sun_strength * 2.0, 0.0, 1.0);
+    let moon_disc = exp(-moon_angle * moon_angle * 600.0) * moon_visibility;
+    let moon_glow_r = 0.12;
+    let moon_glow = exp(-moon_angle * moon_angle / (moon_glow_r * moon_glow_r)) * 0.25 * moon_visibility;
+    let moon_halo_r2 = 0.35;
+    let moon_halo = 1.0 / (1.0 + pow(moon_angle / moon_halo_r2, 4.0)) * 0.04 * moon_visibility;
+    let moon_color = vec3f(0.9, 0.92, 0.95);
+    sky += moon_color * (moon_disc * 2.0 + moon_glow + moon_halo);
 
-    // Stars at night — CazToon-style with density, size, and twinkle.
-    if (sun_strength < 0.15) {
-        let star_fade = (0.15 - sun_strength) / 0.15;
-        let above_horizon = step(0.0, dir.y);
+    // --- Night features (CazToon's skyAddNightFeatures) ---
+    // Night visibility: driven by how low sun_strength is (0 = full night).
+    // CazToon uses smoothstep on the sun angle; we use sun_strength as a proxy.
+    let night_vis = clamp((0.2 - sun_strength) / 0.2, 0.0, 1.0);
+    let blue_hour_vis = clamp((0.3 - sun_strength) / 0.15, 0.0, 1.0) * (1.0 - night_vis);
 
-        // Grid-based star field (STAR_SCALE=40, STAR_DENSITY=0.20)
-        let grid_dir = floor(dir * 40.0) / 40.0;
-        let star_hash = fract(sin(grid_dir.x * 127.1 + grid_dir.y * 311.7 + grid_dir.z * 74.7) * 43758.5453);
-        let star_density = step(0.80, star_hash);  // 20% of cells have stars
+    if (night_vis > 0.01 && dir.y > -0.1) {
+        let horizon_fade = smoothstep(-0.1, 0.15, dir.y);
 
-        // Star size (STAR_SIZE=0.18) — soft circle within the cell
-        let cell_fract = fract(dir * 40.0);
-        let star_dist = length(cell_fract - 0.5);
-        let star_shape = 1.0 - smoothstep(0.0, 0.18, star_dist);
+        // Star field
+        let stars = sky_star_field(dir, time);
+        sky += vec3f(stars) * night_vis * horizon_fade;
 
-        // Twinkle (STAR_TWINKLE=0.6) — time-based brightness variation
-        let twinkle = 0.7 + 0.3 * sin(cam.sun_color.w * 3.0 + star_hash * 6.28);
-        let star_brightness = star_density * star_shape * star_fade * 0.5 * twinkle * above_horizon;
-        sky += vec3f(star_brightness);
+        // Shooting stars (only at full night)
+        if (night_vis > 0.5) {
+            let shooting = sky_shooting_star(dir, time);
+            sky += shooting * horizon_fade * night_vis;
+        }
+    }
 
-        // Night nebula — subtle colored cloud patches (CazToon-style)
-        let neb_noise = fract(sin(grid_dir.x * 13.1 + grid_dir.z * 27.7) * 43758.5453);
-        let nebula = smoothstep(0.7, 0.95, neb_noise) * star_fade * 0.15 * above_horizon;
-        sky += vec3f(nebula * 0.2, nebula * 0.1, nebula * 0.8);  // blue-purple
+    // Night nebula (visible at night + partial during blue hour)
+    let nebula_vis = night_vis + blue_hour_vis * 0.4;
+    if (nebula_vis > 0.01) {
+        let nebula = sky_night_nebula(dir, time);
+        sky += nebula * nebula_vis;
     }
 
     var out: SkyFOut;

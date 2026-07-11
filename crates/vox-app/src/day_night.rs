@@ -44,13 +44,23 @@ const BLUE_HOUR_ZENITH: Vec3 = Vec3::new(0.15, 0.22, 0.50);
 const NIGHT_ZENITH: Vec3 = Vec3::new(0.00, 0.08, 0.27);
 const DAWN_ZENITH: Vec3 = Vec3::new(0.12, 0.18, 0.45);
 const SUNRISE_ZENITH: Vec3 = Vec3::new(0.65, 0.45, 0.65);
-/// Per-phase brightness values (from CazToon's getTimelineBrightness).
+/// Per-phase sky-gradient brightness (from CazToon's settings/sky.glsl).
+/// Drives the sky color blend — the night sky stays visible (0.75).
 const DAY_BRIGHTNESS: f32 = 1.0;
 const SUNSET_BRIGHTNESS: f32 = 0.85;
-const BLUE_HOUR_BRIGHTNESS: f32 = 0.45;
-const NIGHT_BRIGHTNESS: f32 = 0.04;
-const DAWN_BRIGHTNESS: f32 = 0.45;
-const SUNRISE_BRIGHTNESS: f32 = 0.80;
+const BLUE_HOUR_BRIGHTNESS: f32 = 0.60;
+const NIGHT_BRIGHTNESS: f32 = 0.75;
+const DAWN_BRIGHTNESS: f32 = 0.55;
+const SUNRISE_BRIGHTNESS: f32 = 0.85;
+/// Per-phase LIGHTING brightness (from CazToon's getTimelineBrightness,
+/// n17rjzyukf.glsl:145-150). Drives sun_strength, fill, ambient — at
+/// night the world goes dark (0.04) even though the sky is visible.
+const DAY_LIGHT: f32 = 1.0;
+const SUNSET_LIGHT: f32 = 0.85;
+const BLUE_HOUR_LIGHT: f32 = 0.45;
+const NIGHT_LIGHT: f32 = 0.04;
+const DAWN_LIGHT: f32 = 0.45;
+const SUNRISE_LIGHT: f32 = 0.80;
 
 /// Lighting parameters computed from game_time.
 pub struct DayNightParams {
@@ -135,13 +145,22 @@ pub fn compute(game_time: f32) -> DayNightParams {
     let w = get_time_weights(cycle_t);
     let t = cycle_t / CYCLE_SECS;
 
-    // Brightness: weighted sum of per-phase brightness values.
-    let brightness = w.day * DAY_BRIGHTNESS
+    // Sky-gradient brightness: drives sun_color lerp (CazToon
+    // settings/sky.glsl — night=0.75 so the sun color stays warm).
+    let sky_brightness = w.day * DAY_BRIGHTNESS
         + w.sunset * SUNSET_BRIGHTNESS
         + w.blue_hour * BLUE_HOUR_BRIGHTNESS
         + w.night * NIGHT_BRIGHTNESS
         + w.dawn * DAWN_BRIGHTNESS
         + w.sunrise * SUNRISE_BRIGHTNESS;
+    // Lighting brightness: drives sun_strength/fill/ambient (CazToon
+    // getTimelineBrightness — night=0.04 so terrain goes dark).
+    let light_brightness = w.day * DAY_LIGHT
+        + w.sunset * SUNSET_LIGHT
+        + w.blue_hour * BLUE_HOUR_LIGHT
+        + w.night * NIGHT_LIGHT
+        + w.dawn * DAWN_LIGHT
+        + w.sunrise * SUNRISE_LIGHT;
 
     // Sun height: arcs across the sky during day, dips below at night.
     // During day (t=0..0.5): sin(t * 2π) gives 0→1→0 arc.
@@ -168,13 +187,13 @@ pub fn compute(game_time: f32) -> DayNightParams {
     let night_tint = Vec3::new(0.3, 0.35, 0.5);
     let sunset_glow = w.sunset + w.sunrise;
     let sun_color = if sun_height > 0.0 {
-        warm.lerp(white, brightness * (1.0 - sunset_glow * 0.7))
+        warm.lerp(white, sky_brightness * (1.0 - sunset_glow * 0.7))
     } else {
         night_tint
     };
 
     // Sun strength: zero at night, full at noon.
-    let sun_strength = brightness.max(0.0) * 0.85;
+    let sun_strength = light_brightness.max(0.0) * 0.85;
 
     // Sky color (horizon): weighted blend of all 6 phase colors.
     let mut sky = DAY_SKY * w.day
@@ -202,12 +221,12 @@ pub fn compute(game_time: f32) -> DayNightParams {
     zenith = zenith.lerp(Vec3::new(0.20, 0.10, 0.60), sunset_blue_mix * 0.5);
 
     // Fill light: dimmer at night.
-    let fill_strength = 0.12 * brightness.max(0.15);
+    let fill_strength = 0.12 * light_brightness.max(0.15);
 
     // Ambient: dimmer and cooler at night.
-    let ambient_strength = 0.55 * brightness.max(0.15);
-    let ambient_sky = Vec3::new(0.50, 0.58, 0.70).lerp(Vec3::new(0.15, 0.18, 0.25), 1.0 - brightness);
-    let ambient_ground = Vec3::new(0.30, 0.27, 0.24).lerp(Vec3::new(0.08, 0.07, 0.06), 1.0 - brightness);
+    let ambient_strength = 0.55 * light_brightness.max(0.15);
+    let ambient_sky = Vec3::new(0.50, 0.58, 0.70).lerp(Vec3::new(0.15, 0.18, 0.25), 1.0 - light_brightness);
+    let ambient_ground = Vec3::new(0.30, 0.27, 0.24).lerp(Vec3::new(0.08, 0.07, 0.06), 1.0 - light_brightness);
 
     DayNightParams {
         sun_dir,
