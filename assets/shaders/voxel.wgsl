@@ -16,6 +16,7 @@ struct Camera {
 
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(0) @binding(1) var<storage, read> palette: array<vec4f>; // rgb + jitter
+@group(0) @binding(2) var<storage, read> emissive: array<vec4f>; // xyz = emissive color, w = intensity (w < 0 = not emissive)
 // Shadow camera uniform, must match `shadow.wgsl`'s `ShadowCam`.
 struct ShadowCam {
     view_proj: mat4x4f,
@@ -202,6 +203,20 @@ fn fs(in: VOut) -> @location(0) vec4f {
     // Pass selection: each pipeline variant only draws its own materials.
     if (water_pass == 0u && in.mat_id == 9u) { discard; }
     if (water_pass == 1u && in.mat_id != 9u) { discard; }
+
+    // Emissive materials (fire, ember, lava): render at full brightness,
+    // skipping sun/shadow/ambient/AO so they glow regardless of time of day
+    // or occlusion. `in.color` already carries base rgb * jitter factor, so
+    // we tint with the emissive color and scale by intensity. Fog is still
+    // applied so distant emissive voxels fade into the sky correctly.
+    let emi = emissive[in.mat_id];
+    if (emi.w >= 0.0) {
+        var ec = in.color * emi.xyz * emi.w;
+        let dist = length(in.world_pos - cam.cam_pos.xyz);
+        let f = clamp((dist - cam.fog.x) / (cam.fog.y - cam.fog.x), 0.0, 1.0);
+        ec = mix(ec, cam.sky_color.xyz, f * f);
+        return vec4f(ec, 1.0);
+    }
 
     let n = normalize(in.world_normal);
     let ndotl = dot(n, cam.sun_dir.xyz);

@@ -119,6 +119,30 @@ impl VoxelPipeline {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
+        // Emissive params: xyz = emissive color tint, w = intensity; w < 0
+        // marks a non-emissive material so the fragment shader can branch
+        // on a single sign test without a separate flag buffer.
+        let emissive: Vec<[f32; 4]> = registry
+            .iter()
+            .map(|(_, def)| {
+                if def.emissive {
+                    [
+                        def.emissive_color[0],
+                        def.emissive_color[1],
+                        def.emissive_color[2],
+                        def.emissive_intensity,
+                    ]
+                } else {
+                    [0.0, 0.0, 0.0, -1.0]
+                }
+            })
+            .collect();
+        let emissive_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("emissive params"),
+            contents: bytemuck::cast_slice(&emissive),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("voxel camera uniform"),
             size: std::mem::size_of::<CameraUniform>() as u64,
@@ -149,6 +173,16 @@ impl VoxelPipeline {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -162,6 +196,10 @@ impl VoxelPipeline {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: palette_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: emissive_buf.as_entire_binding(),
                 },
             ],
         });

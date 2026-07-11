@@ -51,6 +51,17 @@ pub struct MaterialDef {
     /// flammable material can be solid (wood) or non-solid (none yet, but
     /// dry grass could be).
     pub flammable: bool,
+    /// Whether this material emits light: rendered at full brightness with
+    /// an optional color tint, ignoring sun/shadow/ambient. Fire, ember, and
+    /// lava are emissive; everything else is not.
+    pub emissive: bool,
+    /// Emissive tint (linear RGB, 0..=1). Multiplied with the base color for
+    /// the output when `emissive` is true. Defaults to white (no tint).
+    pub emissive_color: [f32; 3],
+    /// Emissive brightness multiplier applied on top of the tinted base
+    /// color. Defaults to 1.0; values > 1 make the material glow brighter
+    /// than its base color.
+    pub emissive_intensity: f32,
 }
 
 /// Registry of material definitions with stable `u16` ids.
@@ -85,6 +96,9 @@ struct RawMaterial {
     fluid: Option<bool>,
     powder: Option<bool>,
     flammable: Option<bool>,
+    emissive: Option<bool>,
+    emissive_color: Option<[f32; 3]>,
+    emissive_intensity: Option<f32>,
 }
 
 /// Validation error for a named material: `material '{name}': {detail}`.
@@ -108,6 +122,9 @@ impl MaterialRegistry {
             fluid: false,
             powder: false,
             flammable: false,
+            emissive: false,
+            emissive_color: [0.0, 0.0, 0.0],
+            emissive_intensity: 0.0,
         };
         let mut by_name = HashMap::new();
         by_name.insert(air.name.clone(), MaterialId::AIR);
@@ -269,6 +286,27 @@ impl MaterialRegistry {
         let fluid = raw.fluid.unwrap_or(false);
         let powder = raw.powder.unwrap_or(false);
         let flammable = raw.flammable.unwrap_or(false);
+        let emissive = raw.emissive.unwrap_or(false);
+        let emissive_color = raw.emissive_color.unwrap_or([1.0, 1.0, 1.0]);
+        let emissive_intensity = raw.emissive_intensity.unwrap_or(1.0);
+        if emissive {
+            for (i, &c) in emissive_color.iter().enumerate() {
+                if !(0.0..=1.0).contains(&c) {
+                    return Err(material_error(
+                        origin,
+                        &name,
+                        format!("emissive_color[{i}] must be in 0..=1, got {c}"),
+                    ));
+                }
+            }
+            if !emissive_intensity.is_finite() || emissive_intensity < 0.0 {
+                return Err(material_error(
+                    origin,
+                    &name,
+                    format!("emissive_intensity must be >= 0, got {emissive_intensity}"),
+                ));
+            }
+        }
 
         if self.defs.len() > usize::from(u16::MAX) {
             return Err(material_error(
@@ -290,6 +328,9 @@ impl MaterialRegistry {
             fluid,
             powder,
             flammable,
+            emissive,
+            emissive_color,
+            emissive_intensity,
         });
         Ok(())
     }
