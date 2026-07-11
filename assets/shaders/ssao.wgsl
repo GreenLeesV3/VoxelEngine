@@ -34,7 +34,11 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 }
 
 fn view_pos_from_ndc(uv: vec2f, depth: f32) -> vec4f {
-    let clip = vec4f(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    // glam's perspective_rh produces [0,1] clip Z (wgpu/D3D convention —
+    // see camera.rs:53, frustum.rs:29-30). The depth buffer stores this
+    // directly, so no remapping is needed. X and Y are still UV [0,1]
+    // → NDC [-1,1].
+    let clip = vec4f(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, depth, 1.0);
     let view = params.inv_view_proj * clip;
     return view / view.w;
 }
