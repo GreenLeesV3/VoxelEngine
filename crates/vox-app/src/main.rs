@@ -401,7 +401,7 @@ impl VoxApp {
             debris_order: VecDeque::new(),
             mario_mode: None,
             mario_units_per_meter,
-            game_time: 300.0, // Start at midday (5 min into 10-min day phase)
+            game_time: 330.0, // Start at midday (quarter through 22-min cycle)
             pending_body_removal: HashMap::new(),
             editor_active: false,
             editor_radius: 2.0,

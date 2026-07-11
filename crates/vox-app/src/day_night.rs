@@ -1,157 +1,214 @@
 //! Day/night cycle: computes sun direction, sky color, and lighting
-//! parameters from a time-of-day value (0..24 hours).
+//! parameters from a time-of-day value.
 //!
-//! The cycle runs continuously, advancing `game_time` each frame. All
-//! lighting parameters (sun direction, sun color/intensity, ambient
-//! colors, sky/fog color) are derived from the time and passed to both
-//! the voxel and Mario pipelines via their camera uniforms.
+//! Uses a 6-phase smoothstep-weighted time-of-day system inspired by
+//! CazToon's sky_timeline.glsl. Instead of hard phase boundaries, all
+//! phase weights are computed via smoothstep from a single normalized
+//! sun angle, producing naturally continuous transitions with no pops.
+//!
+//! Phases: day, sunset, blue hour, night, sunrise, dawn.
+//! Cycle: 10 min day + 1.5 min sunset + 1 min blue hour + 7 min night
+//!        + 1 min dawn + 1.5 min sunrise = 22 min total.
 
 use glam::Vec3;
 
-/// Day/night cycle timing (in seconds of real time):
-/// 10 min day, 1.5 min sunrise, 7 min night, 1.5 min sunset = 20 min total.
+/// Cycle timing (seconds of real time).
 const DAY_SECS: f32 = 600.0;       // 10 minutes
-const SUNSET_SECS: f32 = 90.0;     // 1.5 minutes (day→night transition)
+const SUNSET_SECS: f32 = 90.0;     // 1.5 minutes
+const BLUE_HOUR_SECS: f32 = 60.0;  // 1 minute
 const NIGHT_SECS: f32 = 420.0;     // 7 minutes
-const SUNRISE_SECS: f32 = 90.0;    // 1.5 minutes (night→day transition)
-const CYCLE_SECS: f32 = DAY_SECS + SUNSET_SECS + NIGHT_SECS + SUNRISE_SECS; // 1200
+const DAWN_SECS: f32 = 60.0;       // 1 minute
+const SUNRISE_SECS: f32 = 90.0;    // 1.5 minutes
+const CYCLE_SECS: f32 = DAY_SECS + SUNSET_SECS + BLUE_HOUR_SECS + NIGHT_SECS + DAWN_SECS + SUNRISE_SECS; // 1320
 
-/// Phase boundaries (start times within the cycle).
-const DAY_END: f32 = DAY_SECS;                          // 600
-const SUNSET_END: f32 = DAY_END + SUNSET_SECS;          // 690
-const NIGHT_END: f32 = SUNSET_END + NIGHT_SECS;         // 1110
-// SUNRISE_END = CYCLE_SECS = 1200
+/// Phase start times within the cycle.
+const DAY_START: f32 = 0.0;
+const SUNSET_START: f32 = DAY_SECS;                                    // 600
+const BLUE_HOUR_START: f32 = SUNSET_START + SUNSET_SECS;               // 690
+const NIGHT_START: f32 = BLUE_HOUR_START + BLUE_HOUR_SECS;             // 750
+const DAWN_START: f32 = NIGHT_START + NIGHT_SECS;                      // 1170
+const SUNRISE_START: f32 = DAWN_START + DAWN_SECS;                     // 1230
+// CYCLE_END = CYCLE_SECS = 1320
 
-/// Computes all lighting parameters for the current time of day.
-/// `game_time` is in seconds (unbounded — wraps modulo CYCLE_SECS).
+/// Per-phase sky color constants (zenith colors from CazToon).
+const DAY_SKY: Vec3 = Vec3::new(0.45, 0.66, 0.90);
+const SUNSET_SKY: Vec3 = Vec3::new(0.95, 0.45, 0.25);
+const BLUE_HOUR_SKY: Vec3 = Vec3::new(0.20, 0.25, 0.55);
+const NIGHT_SKY: Vec3 = Vec3::new(0.03, 0.04, 0.08);
+const DAWN_SKY: Vec3 = Vec3::new(0.12, 0.18, 0.45);
+const SUNRISE_SKY: Vec3 = Vec3::new(0.65, 0.45, 0.55);
+
+/// Per-phase brightness values (from CazToon's getTimelineBrightness).
+const DAY_BRIGHTNESS: f32 = 1.0;
+const SUNSET_BRIGHTNESS: f32 = 0.85;
+const BLUE_HOUR_BRIGHTNESS: f32 = 0.45;
+const NIGHT_BRIGHTNESS: f32 = 0.04;
+const DAWN_BRIGHTNESS: f32 = 0.45;
+const SUNRISE_BRIGHTNESS: f32 = 0.80;
+
+/// Lighting parameters computed from game_time.
 pub struct DayNightParams {
-    /// Normalized sun direction (points toward the sun from the scene).
     pub sun_dir: Vec3,
-    /// Sun brightness multiplier (0 at night, 1 at noon).
     pub sun_strength: f32,
-    /// Sun color (warm at dawn/dusk, white at noon, cool at night).
     pub sun_color: Vec3,
-    /// Sky/fog color (blue at day, dark blue at night, orange at dawn/dusk).
     pub sky_color: Vec3,
-    /// Fill light strength (bounce light from opposite direction).
     pub fill_strength: f32,
     pub ambient_strength: f32,
-    /// Ambient sky tint (cool blue during day, dim at night).
     pub ambient_sky: Vec3,
-    /// Ambient ground tint (warm during day, dim at night).
     pub ambient_ground: Vec3,
+}
+
+/// Phase weights — each is 0..1, all sum to ~1.0. Computed via smoothstep
+/// from the normalized sun angle so transitions are continuous.
+struct TimeWeights {
+    day: f32,
+    sunset: f32,
+    blue_hour: f32,
+    night: f32,
+    sunrise: f32,
+    dawn: f32,
+}
+
+/// Compute phase weights from the normalized cycle position (0..1).
+/// Edges are derived from the actual timing constants so the user's
+/// requested phase durations are authoritative.
+fn get_time_weights(cycle_t: f32) -> TimeWeights {
+    let t = cycle_t / CYCLE_SECS;
+
+    // Convert phase boundaries to normalized 0..1 positions.
+    let day_e = DAY_START / CYCLE_SECS;
+    let sunset_s = SUNSET_START / CYCLE_SECS;
+    let sunset_e = BLUE_HOUR_START / CYCLE_SECS;
+    let blue_e = NIGHT_START / CYCLE_SECS;
+    let night_e = DAWN_START / CYCLE_SECS;
+    let dawn_e = SUNRISE_START / CYCLE_SECS;
+    let sunrise_e = 1.0; // wraps to cycle end
+
+    // Overlap regions for smooth transitions: each phase ramps in
+    // over a small normalized width and out at the next boundary.
+    let ramp = 0.005; // normalized overlap width
+
+    let w = TimeWeights {
+        day: smoothstep(day_e - ramp, day_e + ramp, t)
+            * (1.0 - smoothstep(sunset_s - ramp, sunset_s + ramp, t)),
+        sunset: smoothstep(sunset_s - ramp, sunset_s + ramp, t)
+            * (1.0 - smoothstep(sunset_e - ramp, sunset_e + ramp, t)),
+        blue_hour: smoothstep(sunset_e - ramp, sunset_e + ramp, t)
+            * (1.0 - smoothstep(blue_e - ramp, blue_e + ramp, t)),
+        night: smoothstep(blue_e - ramp, blue_e + ramp, t)
+            * (1.0 - smoothstep(night_e - ramp, night_e + ramp, t)),
+        dawn: smoothstep(night_e - ramp, night_e + ramp, t)
+            * (1.0 - smoothstep(dawn_e - ramp, dawn_e + ramp, t)),
+        // Sunrise wraps around the cycle boundary (0/1).
+        sunrise: smoothstep(dawn_e - ramp, dawn_e + ramp, t)
+            + (1.0 - smoothstep(sunrise_e - ramp, sunrise_e + ramp, t))
+            + (1.0 - smoothstep(0.0, ramp, t)),
+    };
+
+    // Normalize so weights sum to 1.0
+    let total = w.day + w.sunset + w.blue_hour + w.night + w.dawn + w.sunrise;
+    if total > 0.001 {
+        let inv = 1.0 / total;
+        TimeWeights {
+            day: w.day * inv,
+            sunset: w.sunset * inv,
+            blue_hour: w.blue_hour * inv,
+            night: w.night * inv,
+            dawn: w.dawn * inv,
+            sunrise: w.sunrise * inv,
+        }
+    } else {
+        TimeWeights { day: 1.0, sunset: 0.0, blue_hour: 0.0, night: 0.0, dawn: 0.0, sunrise: 0.0 }
+    }
 }
 
 /// Compute lighting parameters from game_time (seconds).
 pub fn compute(game_time: f32) -> DayNightParams {
-    // Wrap into the 20-minute cycle.
     let cycle_t = (game_time % CYCLE_SECS).max(0.0);
+    let w = get_time_weights(cycle_t);
+    let t = cycle_t / CYCLE_SECS;
 
-    // Determine which phase we're in and compute a normalized sun
-    // height (0=horizon, 1=zenith) and sun azimuth for each phase.
-    //
-    // Cycle layout:
-    //   0..600     DAY      — full daylight, sun arcs overhead
-    //   600..690   SUNSET   — sun descends to horizon, warm light
-    //   690..1110  NIGHT    — dark, stars
-    //   1110..1200 SUNRISE  — sun rises from horizon, warm light
+    // Brightness: weighted sum of per-phase brightness values.
+    let brightness = w.day * DAY_BRIGHTNESS
+        + w.sunset * SUNSET_BRIGHTNESS
+        + w.blue_hour * BLUE_HOUR_BRIGHTNESS
+        + w.night * NIGHT_BRIGHTNESS
+        + w.dawn * DAWN_BRIGHTNESS
+        + w.sunrise * SUNRISE_BRIGHTNESS;
 
-    let (sun_height, azimuth_phase, daylight, horizon_glow);
-
-    if cycle_t < DAY_END {
-        // DAY: sun arcs from east horizon → zenith → west horizon.
-        // Starts at sin(0)=0 (matching sunrise end) and ends at sin(PI)=0
-        // (matching sunset start).
-        let day_t = cycle_t / DAY_END; // 0..1
-        let angle = day_t * std::f32::consts::PI;
-        sun_height = angle.sin(); // 0→1→0
-        azimuth_phase = day_t; // 0=east, 1=west
-        daylight = clamp01(sun_height * 1.8);
-        horizon_glow = clamp01(1.0 - sun_height * 4.0);
-    } else if cycle_t < SUNSET_END {
-        // SUNSET: sun descends from horizon into night depth.
-        // daylight stays 0 (sun at/below horizon). horizon_glow
-        // ramps 1→0 so the orange tint fades into full dark.
-        let sunset_t = (cycle_t - DAY_END) / SUNSET_SECS; // 0..1
-        sun_height = sunset_t * -0.3; // 0→-0.3
-        azimuth_phase = 1.0; // west
-        daylight = 0.0;
-        horizon_glow = 1.0 - sunset_t; // 1→0 (continuous: day ends at glow=1, night starts at glow=0)
-    } else if cycle_t < NIGHT_END {
-        // NIGHT: sun well below horizon. Starts and ends at -0.3
-        // (matching sunset end and sunrise start).
-        let night_t = (cycle_t - SUNSET_END) / NIGHT_SECS; // 0..1
-        sun_height = -0.3 - 0.5 * (night_t * std::f32::consts::PI).sin();
-        azimuth_phase = 1.0 - night_t; // west→east
-        daylight = 0.0;
-        horizon_glow = 0.0;
+    // Sun height: arcs across the sky during day, dips below at night.
+    // During day (t=0..0.5): sin(t * 2π) gives 0→1→0 arc.
+    // During night (t=0.5..1.0): negative, dipping lowest at midnight.
+    let sun_height = if t < 0.5 {
+        (t * 2.0 * std::f32::consts::PI).sin()
     } else {
-        // SUNRISE: sun rises from night depth to horizon.
-        // daylight stays 0 (sun still below/at horizon). horizon_glow
-        // ramps 0→1 so the orange tint builds up into dawn.
-        let sunrise_t = (cycle_t - NIGHT_END) / SUNRISE_SECS; // 0..1
-        sun_height = -0.3 + sunrise_t * 0.3; // -0.3→0
-        azimuth_phase = 0.0; // east
-        daylight = 0.0;
-        horizon_glow = sunrise_t; // 0→1 (continuous: night ends at glow=0, day starts at glow=1)
-    }
+        // Night: sun below horizon, gentle dip
+        -0.3 - 0.5 * ((t - 0.5) * 2.0 * std::f32::consts::PI).sin().abs()
+    };
 
-    // Sun azimuth: 0 = east (+X), 1 = west (-X).
-    let sun_azimuth = (azimuth_phase - 0.5) * -2.0; // 1→-1 east→west
+    // Azimuth: east→west sweep during day, west→east during night.
+    let azimuth_phase = if t < 0.5 { t * 2.0 } else { 1.0 - (t - 0.5) * 2.0 };
+    let sun_azimuth = (azimuth_phase - 0.5) * -2.0;
     let sun_dir = Vec3::new(
         sun_azimuth * sun_height.abs().max(0.15),
         sun_height,
         -0.2,
     ).normalize();
 
-    // Sun color: warm orange at horizon (driven by horizon_glow),
-    // white at noon, dim cool at night.
+    // Sun color: warm at sunset/sunrise, white at noon, cool at night.
     let warm = Vec3::new(1.0, 0.6, 0.3);
     let white = Vec3::new(1.0, 0.95, 0.85);
     let night_tint = Vec3::new(0.3, 0.35, 0.5);
+    let sunset_glow = w.sunset + w.sunrise;
     let sun_color = if sun_height > 0.0 {
-        // Reduce white blend when horizon_glow is high so warm tones
-        // dominate at sunrise/sunset.
-        warm.lerp(white, daylight * (1.0 - horizon_glow * 0.7))
+        warm.lerp(white, brightness * (1.0 - sunset_glow * 0.7))
     } else {
         night_tint
     };
 
-    // Sun strength: zero at night, full at noon. Fades smoothly
-    // through sunset and sunrise.
-    let sun_strength = daylight.max(0.0) * 0.85;
+    // Sun strength: zero at night, full at noon.
+    let sun_strength = brightness.max(0.0) * 0.85;
 
-    // Sky color: blue sky during day, dark navy at night, orange at
-    // dawn/dusk. The transition is driven by daylight (which goes
-    // to 0 at night) and horizon_glow (peaks at sunrise/sunset).
-    let day_sky = Vec3::new(0.45, 0.66, 0.90);
-    let night_sky = Vec3::new(0.03, 0.04, 0.08);
-    let dusk_sky = Vec3::new(0.6, 0.35, 0.2);
-    // Blend: night ↔ dusk ↔ day. At daylight=1 → day_sky.
-    // At daylight=0 + horizon_glow=1 → dusk_sky (sunset/sunrise glow).
-    // At daylight=0 + horizon_glow=0 → night_sky (full dark).
-    let sky_color = night_sky
-        .lerp(dusk_sky, horizon_glow)
-        .lerp(day_sky, daylight);
+    // Sky color: weighted blend of all 6 phase colors.
+    // Special blends for day↔sunset and sunset↔blue hour transitions.
+    let mut sky = DAY_SKY * w.day
+        + SUNSET_SKY * w.sunset
+        + BLUE_HOUR_SKY * w.blue_hour
+        + NIGHT_SKY * w.night
+        + DAWN_SKY * w.dawn
+        + SUNRISE_SKY * w.sunrise;
+
+    // Day↔sunset warm blend
+    let day_sunset_mix = (w.day.min(w.sunset + w.sunrise) * 2.5).min(1.0);
+    sky = sky.lerp(Vec3::new(0.92, 0.55, 0.35), day_sunset_mix * 0.5);
+
+    // Sunset↔blue hour purple blend
+    let sunset_blue_mix = (w.sunset.min(w.blue_hour) * 2.0).min(1.0);
+    sky = sky.lerp(Vec3::new(0.40, 0.15, 0.75), sunset_blue_mix * 0.5);
 
     // Fill light: dimmer at night.
-    let fill_strength = 0.12 * daylight.max(0.15);
+    let fill_strength = 0.12 * brightness.max(0.15);
 
     // Ambient: dimmer and cooler at night.
-    let ambient_strength = 0.55 * daylight.max(0.15);
-    let ambient_sky = Vec3::new(0.50, 0.58, 0.70).lerp(Vec3::new(0.15, 0.18, 0.25), 1.0 - daylight);
-    let ambient_ground = Vec3::new(0.30, 0.27, 0.24).lerp(Vec3::new(0.08, 0.07, 0.06), 1.0 - daylight);
+    let ambient_strength = 0.55 * brightness.max(0.15);
+    let ambient_sky = Vec3::new(0.50, 0.58, 0.70).lerp(Vec3::new(0.15, 0.18, 0.25), 1.0 - brightness);
+    let ambient_ground = Vec3::new(0.30, 0.27, 0.24).lerp(Vec3::new(0.08, 0.07, 0.06), 1.0 - brightness);
 
     DayNightParams {
         sun_dir,
         sun_strength,
         sun_color,
-        sky_color,
+        sky_color: sky,
         fill_strength,
         ambient_strength,
         ambient_sky,
         ambient_ground,
     }
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).max(0.0).min(1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Clear color (wgpu format) derived from the sky color.
@@ -162,8 +219,4 @@ pub fn clear_color(p: &DayNightParams) -> wgpu::Color {
         b: p.sky_color.z as f64,
         a: 1.0,
     }
-}
-
-fn clamp01(v: f32) -> f32 {
-    v.max(0.0).min(1.0)
 }
