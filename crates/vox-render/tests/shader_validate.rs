@@ -30,6 +30,7 @@ fn auxiliary_wgsl_shaders_parse() {
         "assets/shaders/mario.wgsl",
         "assets/shaders/mesh_compute.wgsl",
         "assets/shaders/bloom.wgsl",
+        "assets/shaders/ssao.wgsl",
     ] {
         parse_shader(shader);
     }
