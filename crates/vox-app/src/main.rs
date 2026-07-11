@@ -1254,6 +1254,10 @@ impl App for VoxApp {
             // Right stick camera look (gamepad) — applies regardless of
             // mouse grab so a controller-only session works.
             if input.gamepad_connected && input.right_stick.length_squared() > 0.0 {
+                // Controller right stick: gilrs uses +Y=up. look() uses
+                // +delta.y = look up (inverted for mouse which has +Y=down).
+                // Passing stick Y directly gives non-inverted controller
+                // look (stick up = look up), which is the standard scheme.
                 self.mario_mode.as_mut().unwrap().look(input.right_stick * 20.0);
             }
             // Tick Mario's simulation
