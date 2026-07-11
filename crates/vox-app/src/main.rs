@@ -1608,6 +1608,16 @@ impl App for VoxApp {
         if input.key_pressed(KeyCode::KeyP) {
             self.replay.start_playback();
         }
+        if input.key_pressed(KeyCode::KeyQ) {
+            let next = match self.chunk_loader.quality() {
+                Quality::Low => Quality::Medium,
+                Quality::Medium => Quality::High,
+                Quality::High => Quality::Ultra,
+                Quality::Ultra => Quality::Low,
+            };
+            self.chunk_loader.set_quality(next);
+            tracing::info!(?next, "quality switched");
+        }
         if input.key_down(KeyCode::ControlLeft) && input.key_pressed(KeyCode::KeyZ) {
             self.undo();
         }
@@ -2138,6 +2148,12 @@ impl App for VoxApp {
             material_names: &self.material_names,
             selected_material: &mut self.selected_material,
             always_day: &mut self.always_day,
+            quality_label: match self.chunk_loader.quality() {
+                Quality::Low => "low",
+                Quality::Medium => "medium",
+                Quality::High => "high",
+                Quality::Ultra => "ultra",
+            },
         });
         let prepared_overlay = self.debug_overlay.prepare(
             &self.window,

@@ -44,6 +44,7 @@ fn stats_window(ctx: &Context, state: &OverlayState<'_>) {
                 state.bodies_awake, state.bodies_total
             ));
             ui.label(format!("particles: {}", state.particles));
+            ui.label(format!("quality: {}", state.quality_label));
         });
 }
 
