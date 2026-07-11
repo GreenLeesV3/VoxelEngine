@@ -14,6 +14,7 @@ struct Params {
     cam_up: vec3f,       // camera up (unit)
     tan_half_fov: f32,   // tan(fov_y / 2)
     aspect: f32,         // width / height
+    z_far: f32,          // far clip distance (600.0)
     _pad3: f32,
     _pad4: f32,
     _pad5: f32,
@@ -77,33 +78,30 @@ fn boost_saturation(c: vec3f, amount: f32) -> vec3f {
 // Screen-Space Reflections (SSR): ray-march the linear depth buffer
 // for reflections, blended subtly (max 20%) into bright/smooth surfaces.
 // Depth is linear (dist / 600.0), so world position is reconstructed
-// from the camera basis vectors — same pattern as the sky shader.
 fn ssr(uv: vec2f, color: vec3f) -> vec3f {
-    let depth = textureSample(depth_tex, samp, uv).r;
-    if (depth >= 0.99) { return color; }  // sky — no reflection
+    let depth_sample = textureSampleLevel(depth_tex, samp, uv, 0.0);
+    let depth = depth_sample.r;
+    let reflectivity = depth_sample.g;
+    if (depth >= 0.99 || reflectivity < 0.05) { return color; }  // sky or matte
 
     // Reconstruct world position from linear depth using camera basis.
-    // depth = dist / 600.0  →  dist = depth * 600.0
-    let ndc = uv * 2.0 - 1.0;
+    let ndc = vec2f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
     let view_dir = normalize(
         params.cam_forward
         + params.cam_right * (ndc.x * params.tan_half_fov * params.aspect)
         + params.cam_up * (ndc.y * params.tan_half_fov)
     );
-    let world_pos = params.cam_pos + view_dir * (depth * 600.0);
+    let world_pos = params.cam_pos + view_dir * (depth * params.z_far);
 
     // Normal from MRT (world-space).
-    let normal = normalize(textureSample(normal_tex, samp, uv).xyz);
+    let normal = normalize(textureSampleLevel(normal_tex, samp, uv, 0.0).xyz);
 
     // Reflection direction (view_dir points from cam to surface).
     let refl_dir = reflect(view_dir, normal);
 
-    // Screen-space ray-march: step along the reflection direction in
-    // screen space. Project the reflection end-point back to screen UV
-    // by reprojecting via the camera basis approximation.
+    // Screen-space ray-march: step along the reflection direction.
     var step_uv = uv;
-    let step_size = params.texel_size * 3.0;  // 3 texels per step
-    // Approximate screen-space direction from reflection xy in view basis.
+    let step_size = params.texel_size * 3.0;
     let step_dir = normalize(refl_dir.xy);
     var hit_color = vec3f(0.0);
     var hit_weight = 0.0;
@@ -115,10 +113,9 @@ fn ssr(uv: vec2f, color: vec3f) -> vec3f {
         }
         let sample_depth = textureSampleLevel(depth_tex, samp, step_uv, 0.0).r;
         if (sample_depth < depth - 0.002 && sample_depth < 0.99) {
-            // Hit geometry closer than the start — reflection.
             hit_color = textureSampleLevel(color_tex, samp, step_uv, 0.0).rgb;
             hit_color = hit_color / (hit_color + vec3f(0.6));  // tone map
-            hit_weight = (1.0 - f32(i) / 24.0) * 0.2;  // fade + max 20% blend
+            hit_weight = (1.0 - f32(i) / 24.0) * 0.2 * reflectivity;
             break;
         }
     }

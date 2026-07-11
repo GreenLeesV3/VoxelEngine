@@ -386,9 +386,13 @@ fn fs(in: VOut) -> FOut {
     }
 
     // MRT outputs: normal + linear depth for postprocess (SSR, edge detection).
+    // linear_depth.y = reflectivity (0 = matte, 1 = mirror) so SSR can skip
+    // non-reflective surfaces without needing the PBR buffer.
     var out: FOut;
     out.color = vec4f(c, alpha);
     out.normal = vec4f(normalize(in.world_normal), 1.0);
-    out.linear_depth = vec4f(dist / 600.0, 0.0, 0.0, 0.0);  // 600 = Z_FAR
+    let pbr = pbr_params[in.mat_id];
+    let reflectivity = (1.0 - pbr.x) * max(pbr.y, 0.04);
+    out.linear_depth = vec4f(dist / 600.0, reflectivity, 0.0, 0.0);
     return out;
 }

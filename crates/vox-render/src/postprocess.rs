@@ -35,7 +35,7 @@ struct ParamsUniform {
     cam_up: [f32; 3],
     tan_half_fov: f32,
     aspect: f32,
-    _pad3: f32,
+    z_far: f32,           // far clip distance (600.0)
     _pad4: f32,
     _pad5: f32,
 }
@@ -96,7 +96,7 @@ impl PostProcessPipeline {
             cam_up: [0.0; 3],
             tan_half_fov: 0.0,
             aspect: 1.0,
-            _pad3: 0.0,
+            z_far: 600.0,
             _pad4: 0.0,
             _pad5: 0.0,
         };
@@ -278,7 +278,7 @@ impl PostProcessPipeline {
             cam_up: [self.cam_up.x, self.cam_up.y, self.cam_up.z],
             tan_half_fov: self.tan_half_fov,
             aspect: self.aspect,
-            _pad3: 0.0,
+            z_far: 600.0,
             _pad4: 0.0,
             _pad5: 0.0,
         }
