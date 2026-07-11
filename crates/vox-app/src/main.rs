@@ -1529,6 +1529,27 @@ impl App for VoxApp {
                 vox_debug::hud::MarioHudState {
                     health: mode.health(),
                     action: mode.action(),
+                    textures: mode.hud_textures.as_ref().map(|ht| {
+                        std::sync::Arc::new(vox_debug::hud::MarioHudTextures {
+                            power_meter_left: ht.power_meter_left.as_slice().into(),
+                            power_meter_right: ht.power_meter_right.as_slice().into(),
+                            power_meter_segments: std::array::from_fn(|i| {
+                                ht.power_meter_segments[i].as_slice().into()
+                            }),
+                            coin_icon: ht.coin_icon.as_slice().into(),
+                            star_icon: ht.star_icon.as_slice().into(),
+                            mario_head: ht.mario_head.as_slice().into(),
+                            multiply: ht.multiply.as_slice().into(),
+                            digits: std::array::from_fn(|i| {
+                                ht.digits[i].as_slice().into()
+                            }),
+                        })
+                    }),
+                    // Placeholders — wired when collectibles (#29) and
+                    // death/respawn are implemented.
+                    coins: 0,
+                    stars: 0,
+                    lives: 4,
                 }
             }),
         };

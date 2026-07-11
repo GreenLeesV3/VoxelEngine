@@ -31,8 +31,10 @@
 
 pub mod ffi;
 mod surface;
+pub mod hud_textures;
 
 pub use surface::{voxel_surfaces_near, SurfaceProvider, SURFACE_RADIUS_M};
+pub use hud_textures::{HudTextures, HudTextureError};
 pub use ffi::{
     ACT_FLAG_AIR, ACT_FLAG_ATTACKING, ACT_GROUND_POUND, ACT_GROUND_POUND_LAND,
     ACT_TRIPLE_JUMP,

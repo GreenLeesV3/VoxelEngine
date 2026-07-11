@@ -111,6 +111,10 @@ echo.
 echo  ========================================
 echo   Mario mode is now ready!
 echo   Press M in-game to activate Mario.
-echo  ========================================
 echo.
+echo   The ROM also provides authentic SM64 HUD
+echo   textures (power meter, coins, stars) at
+echo   runtime — no copyrighted data is stored
+echo   or uploaded to GitHub.
+echo  ========================================
 exit /b 0

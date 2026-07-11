@@ -3,19 +3,65 @@
 //! material). Distinct from the F3 debug windows in `panels` -- this is
 //! player-facing UI, drawn every frame whether or not debug is open.
 //!
-//! In Mario mode the FPS HUD is replaced by the SM64 power meter: a
-//! circular health pie (8 wedges, green→red as health drops) in the
-//! upper-right corner, plus a short action label.
+//! In Mario mode the FPS HUD is replaced by the authentic SM64 HUD:
+//! the power meter (real ROM-extracted textures), coin/star/lives
+//! counters with outlines for when collectibles are implemented, and
+//! an action label. Textures are uploaded to egui once and cached.
 
-use egui::{Align2, Color32, Context, FontId, Rect, Rounding, Stroke, pos2, vec2};
+use egui::{Align2, Color32, Context, FontId, Rect, Rounding, Stroke, TextureHandle, TextureOptions, pos2, vec2};
+use std::sync::Arc;
+
+/// Raw RGBA8 textures extracted from the SM64 ROM, passed from MarioMode
+/// to the HUD each frame. The HUD uploads them to egui TextureHandles on
+/// first encounter and caches them in the egui context for reuse.
+pub struct MarioHudTextures {
+    /// Power meter base left half (32×64, RGBA8)
+    pub power_meter_left: Arc<[u8]>,
+    /// Power meter base right half (32×64, RGBA8)
+    pub power_meter_right: Arc<[u8]>,
+    /// 8 health segment textures (32×32 each, RGBA8), index 0 = 1 wedge
+    pub power_meter_segments: [Arc<[u8]>; 8],
+    /// Coin icon (16×16, RGBA8)
+    pub coin_icon: Arc<[u8]>,
+    /// Star icon (16×16, RGBA8)
+    pub star_icon: Arc<[u8]>,
+    /// Mario head icon (16×16, RGBA8) — for lives display
+    pub mario_head: Arc<[u8]>,
+    /// "×" multiply icon (16×16, RGBA8)
+    pub multiply: Arc<[u8]>,
+    /// Digit 0-9 (16×16 each, RGBA8)
+    pub digits: [Arc<[u8]>; 10],
+}
+
+/// Cached egui texture handles for the SM64 HUD. Stored in egui's
+/// memory so they persist across frames and are uploaded only once.
+struct MarioHudCache {
+    power_meter_left: TextureHandle,
+    power_meter_right: TextureHandle,
+    power_meter_segments: [TextureHandle; 8],
+    coin_icon: TextureHandle,
+    star_icon: TextureHandle,
+    mario_head: TextureHandle,
+    multiply: TextureHandle,
+    digits: [TextureHandle; 10],
+}
 
 /// Mario-mode HUD data. When present in [`HudState`], the FPS hotbar/
-/// crosshair is suppressed and the SM64 power meter is drawn instead.
+/// crosshair is suppressed and the authentic SM64 HUD is drawn instead.
 pub struct MarioHudState {
-    /// Health 0-8 (8 = full). Drives the power meter pie.
+    /// Health 0-8 (8 = full). Drives the power meter.
     pub health: i16,
     /// Current action bitmask for a short label.
     pub action: u32,
+    /// ROM-extracted textures. When None, falls back to egui-drawn
+    /// approximation.
+    pub textures: Option<Arc<MarioHudTextures>>,
+    /// Coin count (placeholder — collectibles not yet implemented).
+    pub coins: i32,
+    /// Star count (placeholder — collectibles not yet implemented).
+    pub stars: i32,
+    /// Lives (placeholder — death/respawn not yet implemented).
+    pub lives: i32,
 }
 
 /// Everything the HUD draws from. Built fresh by the app each frame.
@@ -30,8 +76,8 @@ pub struct HudState<'a> {
     pub material_name: &'a str,
     /// Its palette color, for the little swatch next to the name.
     pub material_color: [f32; 3],
-    /// When `Some`, the engine is in Mario mode — draw the SM64 power
-    /// meter instead of the FPS crosshair/hotbar.
+    /// When `Some`, the engine is in Mario mode — draw the SM64 HUD
+    /// instead of the FPS crosshair/hotbar.
     pub mario: Option<MarioHudState>,
 }
 
@@ -39,10 +85,47 @@ const SLOT_SIZE: f32 = 52.0;
 const SLOT_GAP: f32 = 6.0;
 const BAR_MARGIN_BOTTOM: f32 = 16.0;
 
+/// egui memory key for the cached HUD textures.
+const HUD_CACHE_KEY: &str = "mario_hud_texture_cache";
+
+/// Upload raw RGBA8 data to an egui TextureHandle.
+fn make_texture(ctx: &Context, name: &str, data: &[u8], w: usize, h: usize) -> TextureHandle {
+    ctx.load_texture(name, egui::ColorImage {
+        size: [w, h],
+        pixels: data.chunks_exact(4)
+            .map(|c| egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
+            .collect(),
+    }, TextureOptions::NEAREST)
+}
+
+/// Get or create the cached egui texture handles from raw ROM data.
+fn get_hud_cache(ctx: &Context, tex: &MarioHudTextures) -> Arc<MarioHudCache> {
+    let id = egui::Id::new(HUD_CACHE_KEY);
+    if let Some(cached) = ctx.data(|d| d.get_temp::<Arc<MarioHudCache>>(id)) {
+        return cached;
+    }
+    let cache = Arc::new(MarioHudCache {
+        power_meter_left: make_texture(ctx, "pm_left", &tex.power_meter_left, 32, 64),
+        power_meter_right: make_texture(ctx, "pm_right", &tex.power_meter_right, 32, 64),
+        power_meter_segments: std::array::from_fn(|i| {
+            make_texture(ctx, &format!("pm_seg_{i}"), &tex.power_meter_segments[i], 32, 32)
+        }),
+        coin_icon: make_texture(ctx, "coin_icon", &tex.coin_icon, 16, 16),
+        star_icon: make_texture(ctx, "star_icon", &tex.star_icon, 16, 16),
+        mario_head: make_texture(ctx, "mario_head", &tex.mario_head, 16, 16),
+        multiply: make_texture(ctx, "multiply", &tex.multiply, 16, 16),
+        digits: std::array::from_fn(|i| {
+            make_texture(ctx, &format!("digit_{i}"), &tex.digits[i], 16, 16)
+        }),
+    });
+    ctx.data_mut(|d| d.insert_temp(id, cache.clone()));
+    cache
+}
+
 /// Draw the full HUD for one frame.
 pub fn build(ctx: &Context, state: &HudState<'_>) {
-    if state.mario.is_some() {
-        mario_hud(ctx, state.mario.as_ref().unwrap());
+    if let Some(mario) = &state.mario {
+        mario_hud(ctx, mario);
     } else {
         crosshair(ctx);
         hotbar(ctx, state);
@@ -50,10 +133,16 @@ pub fn build(ctx: &Context, state: &HudState<'_>) {
     }
 }
 
-/// SM64 power meter: 8-wedge circular health pie in the upper-right,
-/// plus a short action label below it.
+/// SM64 HUD: power meter (upper-right), lives/coins/stars (upper-left),
+/// and action label. Uses authentic ROM-extracted textures when available.
 fn mario_hud(ctx: &Context, mario: &MarioHudState) {
-    power_meter(ctx, mario.health);
+    if let Some(tex_arc) = &mario.textures {
+        let cache = get_hud_cache(ctx, tex_arc);
+        authentic_power_meter(ctx, &cache, mario.health);
+        authentic_counters(ctx, &cache, mario.lives, mario.coins, mario.stars);
+    } else {
+        power_meter_fallback(ctx, mario.health);
+    }
     action_label(ctx, mario.action);
 }
 
@@ -155,24 +244,154 @@ fn info_line(ctx: &Context, state: &HudState<'_>) {
     );
 }
 
-/// SM64 power meter: a circular pie chart with 8 wedges representing
-/// health (0-8, 8 = full). Wedges are filled or empty depending on
-/// current health. Color shifts green→yellow→red as health drops.
-/// Drawn in the upper-right corner, matching SM64's HUD position.
-fn power_meter(ctx: &Context, health: i16) {
+/// Authentic SM64 power meter using ROM-extracted textures.
+/// Draws the base (left+right halves = 64×64) with the health segment
+/// overlay on top. Positioned in the upper-right, matching SM64.
+fn authentic_power_meter(ctx: &Context, cache: &MarioHudCache, health: i16) {
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::background());
+
+    // SM64 draws the power meter at ~140,166 in its 320×240 screen.
+    // We scale to match the upper-right area. The base is 64×64.
+    let scale = 2.0; // 2x for visibility on modern displays
+    let size = 64.0 * scale;
+    // Position: upper-right with some margin
+    let x = screen.right() - size - 20.0;
+    let y = screen.top() + 20.0;
+
+    // Draw the base: left half (32×64) then right half (32×64).
+    let half_w = 32.0 * scale;
+    painter.image(
+        cache.power_meter_left.id(),
+        Rect::from_min_size(pos2(x, y), vec2(half_w, size)),
+        Rect::from_min_size(pos2(0.0, 0.0), vec2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    painter.image(
+        cache.power_meter_right.id(),
+        Rect::from_min_size(pos2(x + half_w, y), vec2(half_w, size)),
+        Rect::from_min_size(pos2(0.0, 0.0), vec2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+
+    // Draw the health segment overlay (32×32) centered on the base.
+    let h = health.clamp(0, 8) as usize;
+    if h > 0 {
+        let seg_size = 32.0 * scale;
+        let seg_x = x + (size - seg_size) * 0.5;
+        let seg_y = y + (size - seg_size) * 0.5;
+        painter.image(
+            cache.power_meter_segments[h - 1].id(),
+            Rect::from_min_size(pos2(seg_x, seg_y), vec2(seg_size, seg_size)),
+            Rect::from_min_size(pos2(0.0, 0.0), vec2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
+}
+
+/// Authentic SM64 HUD counters: lives (Mario head × N), coins (coin × N),
+/// stars (star × N). Uses the colorful HUD font digits from the ROM.
+/// Positioned in the upper-left, matching SM64's layout.
+fn authentic_counters(ctx: &Context, cache: &MarioHudCache, lives: i32, coins: i32, stars: i32) {
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    let scale = 2.0;
+    let icon_size = 16.0 * scale;
+    let gap = 4.0 * scale;
+    let digit_w = 16.0 * scale;
+
+    // SM64 layout (top-left, y from top):
+    // Lives:  MarioHead × N        (y ≈ 209 in 240-tall screen)
+    // Coins:  Coin × N             (y ≈ 209, x ≈ 168)
+    // Stars:  Star × N             (y ≈ 209, x ≈ 78)
+    // We adapt: lives top-left, stars below, coins below that.
+
+    let mut y = screen.top() + 20.0;
+    let x = screen.left() + 20.0;
+
+    // Lives: Mario head icon, ×, then digit(s)
+    draw_icon_with_count(
+        &painter, &cache.mario_head, &cache.multiply, &cache.digits,
+        lives, pos2(x, y), icon_size, digit_w, gap,
+    );
+    y += icon_size + 8.0;
+
+    // Stars: star icon, ×, then digit(s)
+    draw_icon_with_count(
+        &painter, &cache.star_icon, &cache.multiply, &cache.digits,
+        stars, pos2(x, y), icon_size, digit_w, gap,
+    );
+    y += icon_size + 8.0;
+
+    // Coins: coin icon, ×, then digit(s)
+    draw_icon_with_count(
+        &painter, &cache.coin_icon, &cache.multiply, &cache.digits,
+        coins, pos2(x, y), icon_size, digit_w, gap,
+    );
+}
+
+/// Draw an icon followed by "×" and a count using the ROM font digits.
+fn draw_icon_with_count(
+    painter: &egui::Painter,
+    icon: &TextureHandle,
+    multiply: &TextureHandle,
+    digits: &[TextureHandle; 10],
+    count: i32,
+    pos: egui::Pos2,
+    icon_size: f32,
+    digit_w: f32,
+    gap: f32,
+) {
+    let mut x = pos.x;
+    let y = pos.y;
+
+    // Icon
+    painter.image(
+        icon.id(),
+        Rect::from_min_size(pos2(x, y), vec2(icon_size, icon_size)),
+        Rect::from_min_size(pos2(0.0, 0.0), vec2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    x += icon_size + gap;
+
+    // × symbol
+    painter.image(
+        multiply.id(),
+        Rect::from_min_size(pos2(x, y), vec2(icon_size, icon_size)),
+        Rect::from_min_size(pos2(0.0, 0.0), vec2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    x += icon_size + gap;
+
+    // Digits
+    let s = count.to_string();
+    for ch in s.chars() {
+        if let Some(d) = ch.to_digit(10) {
+            painter.image(
+                digits[d as usize].id(),
+                Rect::from_min_size(pos2(x, y), vec2(digit_w, icon_size)),
+                Rect::from_min_size(pos2(0.0, 0.0), vec2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            x += digit_w;
+        }
+    }
+}
+
+/// Fallback power meter drawn with egui primitives when ROM textures
+/// are not available.
+fn power_meter_fallback(ctx: &Context, health: i16) {
     let screen = ctx.screen_rect();
     let radius = 36.0;
     let center = pos2(screen.right() - 60.0, screen.top() + 60.0);
     let painter = ctx.layer_painter(egui::LayerId::background());
 
-    // Background circle (dark, semi-transparent).
     painter.circle_filled(
         center,
         radius + 4.0,
         Color32::from_rgba_unmultiplied(10, 10, 20, 180),
     );
 
-    // Health color: green at 6-8, yellow at 3-5, red at 0-2.
     let health_color = if health >= 6 {
         Color32::from_rgb(80, 220, 80)
     } else if health >= 3 {
@@ -185,25 +404,15 @@ fn power_meter(ctx: &Context, health: i16) {
     let n_wedges = 8u16;
     let h = health.clamp(0, 8) as u16;
 
-    // Draw 8 wedges as filled sectors. egui doesn't have a direct arc
-    // sector primitive, so we approximate each wedge with a triangle
-    // fan from the center to two points on the circle.
     for i in 0..n_wedges {
         let a0 = (i as f32 / n_wedges as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
         let a1 = ((i + 1) as f32 / n_wedges as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-
-        // Wedge i represents health unit (i+1). Filled if i < h.
         let filled = i < h;
         let color = if filled { health_color } else { empty_color };
-
-        // Midpoint of the wedge arc for a triangle approximation.
         let am = (a0 + a1) * 0.5;
         let p0 = pos2(center.x + a0.cos() * radius, center.y + a0.sin() * radius);
         let p1 = pos2(center.x + a1.cos() * radius, center.y + a1.sin() * radius);
         let pm = pos2(center.x + am.cos() * radius, center.y + am.sin() * radius);
-
-        // Draw the wedge as a filled triangle (center → p0 → pm → p1).
-        // Two triangles for a better arc approximation.
         painter.add(egui::Shape::convex_polygon(
             vec![center, p0, pm, p1],
             color,
@@ -211,14 +420,12 @@ fn power_meter(ctx: &Context, health: i16) {
         ));
     }
 
-    // Outline ring.
     painter.circle_stroke(
         center,
         radius,
         Stroke::new(2.0, Color32::from_rgba_unmultiplied(255, 255, 255, 160)),
     );
 
-    // Health number in the center.
     painter.text(
         center,
         Align2::CENTER_CENTER,

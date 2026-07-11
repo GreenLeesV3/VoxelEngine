@@ -88,6 +88,10 @@ pub struct MarioMode {
     /// body leaves range or despawns. Lets Mario stand on / wall-slide
     /// / ride falling debris.
     debris_objects: HashMap<u64, vox_sm64::SurfaceObject>,
+    /// HUD textures extracted from the ROM (power meter, icons, digits).
+    /// None if extraction failed — Mario mode works without them, the
+    /// HUD just falls back to the egui-drawn approximation.
+    pub hud_textures: Option<vox_sm64::HudTextures>,
 }
 
 impl MarioMode {
@@ -125,6 +129,20 @@ impl MarioMode {
             tex_h,
         );
 
+        // Extract HUD textures (power meter, icons, digits) from the same
+        // ROM. Best-effort — if it fails, Mario mode still works, the HUD
+        // just uses the egui-drawn approximation.
+        let hud_textures = match vox_sm64::HudTextures::from_rom(&rom) {
+            Ok(tex) => {
+                tracing::info!("SM64 HUD textures extracted from ROM");
+                Some(tex)
+            }
+            Err(e) => {
+                tracing::warn!("HUD texture extraction failed, using fallback: {e}");
+                None
+            }
+        };
+
         tracing::info!("Mario mode initialized (ROM loaded, pipeline built)");
         Ok(Self {
         sm64,
@@ -146,6 +164,7 @@ impl MarioMode {
         last_health: 8,
         last_action: 0,
         debris_objects: HashMap::new(),
+        hud_textures,
         tick_alpha: 0.0,
         prev_action: 0,
         })
