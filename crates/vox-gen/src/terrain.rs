@@ -44,6 +44,20 @@ const DIRT_DEPTH_M: f32 = 1.5;
 /// Terrain height clamp margins (meters above floor / below ceiling).
 const MIN_HEIGHT_M: f32 = 4.0;
 const CEIL_MARGIN_M: f32 = 6.0;
+/// How a single chunk should be filled, determined by its vertical band
+/// relative to the surface. Mirrors the three-case logic in
+/// [`TerrainGen::generate`] so the streaming `ChunkLoader` avoids
+/// allocating air chunks (absent chunks read as air for free) and uses
+/// compact `Uniform(stone)` for deep-basalt chunks instead of dense 64 KB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChunkBand {
+    /// Entirely below the surface band: uniform stone.
+    Stone,
+    /// Entirely above the surface: skip — absent chunks read as air.
+    Air,
+    /// Straddles the surface: needs per-column fill (+ tree stamping).
+    Surface,
+}
 
 /// Heightmap terrain generator for one world configuration.
 pub struct TerrainGen {
@@ -115,7 +129,7 @@ impl TerrainGen {
     }
 
     /// Build one chunk in the surface band, column by column.
-    fn fill_surface_chunk(&self, key: IVec3, s: f32, mats: TerrainMaterials) -> Chunk {
+    pub fn fill_surface_chunk(&self, key: IVec3, s: f32, mats: TerrainMaterials) -> Chunk {
         let mut chunk = Chunk::new();
         let origin = key * CHUNK_SIZE as i32;
         for lz in 0..CHUNK_SIZE as i32 {
@@ -144,6 +158,38 @@ impl TerrainGen {
             }
         }
         chunk
+    }
+
+    /// Classify a chunk by its vertical band relative to the terrain
+    /// surface, using the same conservative 5-corner height sampling as
+    /// [`TerrainGen::generate`]. Lets the streaming `ChunkLoader` fill
+    /// deep chunks as `Uniform(stone)` and skip air chunks entirely
+    /// instead of calling [`fill_surface_chunk`] for every chunk.
+    ///
+    /// `key` is the chunk index; `s` is the voxel edge length in meters.
+    pub fn chunk_band(&self, key: IVec3, s: f32) -> ChunkBand {
+        let chunk_m = CHUNK_SIZE as f32 * s;
+        let x0 = key.x as f32 * chunk_m;
+        let z0 = key.z as f32 * chunk_m;
+        let mut min_h = f32::INFINITY;
+        let mut max_h = f32::NEG_INFINITY;
+        for (sx, sz) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)] {
+            let h = self.height_m(x0 + sx * chunk_m, z0 + sz * chunk_m);
+            min_h = min_h.min(h);
+            max_h = max_h.max(h);
+        }
+        min_h -= 2.0;
+        max_h += 2.0;
+
+        let bottom_m = key.y as f32 * chunk_m;
+        let top_m = bottom_m + chunk_m;
+        if top_m < min_h - DIRT_DEPTH_M {
+            ChunkBand::Stone
+        } else if bottom_m > max_h {
+            ChunkBand::Air
+        } else {
+            ChunkBand::Surface
+        }
     }
 
     /// Topmost solid voxel surface height in meters, by column scan.

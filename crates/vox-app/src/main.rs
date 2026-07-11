@@ -4,6 +4,7 @@ mod args;
 #[cfg(feature = "mario")]
 mod audio;
 mod body_mesh;
+mod chunk_loader;
 mod day_night;
 mod grass;
 #[cfg(feature = "mario")]
@@ -24,8 +25,9 @@ use std::time::Instant;
 
 use glam::{IVec3, Mat4, Vec3};
 use rayon::prelude::*;
-
+use args::Quality;
 use body_mesh::BodyMeshQueue;
+use chunk_loader::ChunkLoader;
 use particles::{Burst, ParticleSystem};
 use player::Player;
 use remesh::RemeshQueue;
@@ -38,7 +40,7 @@ use vox_core::{
 };
 use vox_debug::hud::HudState;
 use vox_debug::{DebugOverlay, OverlayState};
-use vox_gen::{TerrainGen, TerrainMaterials, TreeMaterials, generate_trees};
+use vox_gen::{TerrainGen, TerrainMaterials, TreeMaterials};
 use vox_mesh::{VoxelSlab, mesh_slab};
 use vox_physics::{Body, BodyId, ImpactEvent, PhysicsWorld, VoxelGrid};
 use vox_platform::{App, FrameControl, FrameTiming, InputState, run_app};
@@ -63,20 +65,18 @@ fn assets_dir() -> PathBuf {
     PathBuf::from("assets")
 }
 
-/// Build the world: noise terrain + forest from the world config.
-fn build_terrain_world(
+/// Build an empty streaming world: validates the config, creates the
+/// `World`, attaches the solidity table — but performs NO upfront terrain
+/// or tree generation. The `ChunkLoader` generates chunks lazily around
+/// the player instead.
+fn build_streaming_world(
     cfg: WorldConfig,
     registry: &MaterialRegistry,
 ) -> Result<World, Box<dyn std::error::Error + Send + Sync>> {
     cfg.validate()?;
     let mut world = World::new(cfg);
     world.set_solid_table(solid_table(registry));
-    let mats = TerrainMaterials::from_registry(registry)?;
-    let terrain = TerrainGen::new(&world.cfg);
-    terrain.generate(&mut world, mats);
-    let tree_mats = TreeMaterials::from_registry(registry)?;
-    let planted = generate_trees(&mut world, &terrain, tree_mats);
-    tracing::info!(trees = planted, "forest planted");
+    // No upfront generation — ChunkLoader generates lazily.
     Ok(world)
 }
 
@@ -342,6 +342,9 @@ struct VoxApp {
     /// and re-orients with the sun each frame.
     shadow_pipeline: ShadowPipeline,
     world: World,
+    /// Player-centered chunk streaming: generates chunks on demand within
+    /// render distance, evicts pristine chunks beyond it.
+    chunk_loader: ChunkLoader,
     registry: MaterialRegistry,
     player: Player,
     camera: Camera,
@@ -500,6 +503,7 @@ impl VoxApp {
         window: Arc<Window>,
         cfg: WorldConfig,
         mario_units_per_meter: f32,
+        quality: Quality,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let assets = assets_dir();
         let registry = MaterialRegistry::load_dir(&assets.join("materials"))?;
@@ -508,13 +512,17 @@ impl VoxApp {
         let particle_shader = std::fs::read_to_string(assets.join("shaders/particle.wgsl"))?;
         let post_shader = std::fs::read_to_string(assets.join("shaders/postprocess.wgsl"))?;
         let grass_shader = std::fs::read_to_string(assets.join("shaders/grass.wgsl"))?;
-
         let build_start = Instant::now();
-        let world = build_terrain_world(cfg, &registry)?;
+        let world = build_streaming_world(cfg, &registry)?;
+        // Terrain generator + materials for lazy chunk generation.
+        let terrain = TerrainGen::new(&world.cfg);
+        let terrain_mats = TerrainMaterials::from_registry(&registry)?;
+        let tree_mats = TreeMaterials::from_registry(&registry)?;
+        let chunk_loader = ChunkLoader::new(&world.cfg, quality, terrain, terrain_mats, tree_mats);
         tracing::info!(
             chunks = world.chunk_count(),
             elapsed_ms = build_start.elapsed().as_millis() as u64,
-            "world built"
+            "streaming world initialized"
         );
 
         let size = window.inner_size();
@@ -572,6 +580,7 @@ impl VoxApp {
             pipeline,
             shadow_pipeline,
             world,
+            chunk_loader,
             fluid: vox_sim::FluidSim::with_fluids_and_powders(
                 fluids.clone(),
                 powder_materials(&registry),
@@ -628,9 +637,13 @@ impl VoxApp {
             grass_pipeline,
             grass_cache: grass::GrassCache::new(),
         };
+        // Pre-generate spawn chunks before meshing and surface height
+        // scan — both need solid voxels to exist. Disjoint field borrows.
+        let center = Vec3::from(app.world.cfg.extent_m) * 0.5;
+        app.chunk_loader.pregenerate_spawn(center, &mut app.world, &mut app.pipeline, &app.gpu);
+
         app.initial_mesh();
 
-        let center = Vec3::from(app.world.cfg.extent_m) * 0.5;
         let surface = TerrainGen::surface_height_m(&app.world, center.x, center.z)
             .unwrap_or(app.world.cfg.extent_m[1] * 0.5);
         app.player = Player::new(Vec3::new(center.x, surface + 0.2, center.z));
@@ -2328,6 +2341,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let cfg = cli.world;
     let mario_units_per_meter = cli.mario_units_per_meter;
+    let quality = cli.quality;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -2344,7 +2358,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     run_app(vox_core::consts::PHYSICS_DT, |window| {
-        Ok(Box::new(VoxApp::new(window, cfg, mario_units_per_meter)?))
+        Ok(Box::new(VoxApp::new(window, cfg, mario_units_per_meter, quality)?))
     })?;
     Ok(())
 }
