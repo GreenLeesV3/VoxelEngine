@@ -476,9 +476,9 @@ fn action_name(action: u32) -> &'static str {
         "Running"
     } else if action == 0x04000447 {
         "Walking"
-    } else if action == 0x0C000220 {
+    } else if action == 0x008008A9 {
         "Ground Pound"
-    } else if action == 0x0800023C {
+    } else if action == 0x0080023C {
         "Pound Land"
     } else if action == 0x00000480 {
         "Crouching"

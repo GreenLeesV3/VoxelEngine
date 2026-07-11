@@ -1258,7 +1258,7 @@ impl App for VoxApp {
                 // +delta.y = look up (inverted for mouse which has +Y=down).
                 // Passing stick Y directly gives non-inverted controller
                 // look (stick up = look up), which is the standard scheme.
-                self.mario_mode.as_mut().unwrap().look(input.right_stick * 20.0);
+                self.mario_mode.as_mut().unwrap().look(input.right_stick * 20.0 * timing.dt_frame * 60.0);
             }
             // Tick Mario's simulation
             mario_pos = self

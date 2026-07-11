@@ -56,6 +56,10 @@ pub struct TerrainGen {
 
 impl TerrainGen {
     pub fn new(cfg: &WorldConfig) -> Self {
+        debug_assert!(
+            cfg.extent_m[1] >= MIN_HEIGHT_M + CEIL_MARGIN_M,
+            "world extent_m.y must be >= MIN_HEIGHT_M + CEIL_MARGIN_M for terrain"
+        );
         let s = |k: u32| -> u32 { (cfg.seed as u32).wrapping_add((cfg.seed >> 32) as u32) ^ k };
         Self {
             continents: Fbm::new(5, s(0x0001)),
@@ -73,7 +77,7 @@ impl TerrainGen {
             + self.continents.sample2(p / 900.0) * 22.0
             + self.hills.sample2(p / 160.0) * 9.0
             + self.rough.sample2(p / 28.0) * 2.2;
-        h.clamp(MIN_HEIGHT_M, self.max_m)
+        h.clamp(MIN_HEIGHT_M, self.max_m.max(MIN_HEIGHT_M))
     }
 
     /// Generate terrain into an empty world (chunk-batched: uniform stone

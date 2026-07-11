@@ -40,6 +40,8 @@ pub use ffi::{
     ACT_TRIPLE_JUMP,
 };
 
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use ffi::*;
 use sha1::{Sha1, Digest};
 
@@ -54,6 +56,8 @@ pub enum Sm64Error {
     /// Mario could not be created at the given position (must be above
     /// a loaded surface).
     InvalidMarioPosition,
+    /// libsm64 global state was already initialized.
+    Init(&'static str),
 }
 
 impl std::fmt::Display for Sm64Error {
@@ -67,6 +71,7 @@ impl std::fmt::Display for Sm64Error {
             Self::InvalidMarioPosition => {
                 write!(f, "Mario spawn position is not above a loaded surface")
             }
+            Self::Init(msg) => write!(f, "libsm64 init error: {msg}"),
         }
     }
 }
@@ -101,12 +106,29 @@ pub fn sm64_to_meters(u: f32) -> f32 {
 pub struct Sm64 {
     /// Mario's texture atlas (RGBA8, 704×64). Upload to GPU once.
     texture: Vec<u8>,
+    _marker: PhantomData<*const ()>,
 }
+
+/// Guards against double-initializing libsm64's global state.
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 impl Sm64 {
     /// Initialize libsm64 with a SM64 US ROM. Extracts Mario's texture
     /// and animation data. Must be called once before any other API.
     pub fn init(rom: &[u8]) -> Result<Self, Sm64Error> {
+        // Guard against double-initializing libsm64's global state,
+        // which would corrupt the C library's internals.
+        if INITIALIZED.swap(true, Ordering::SeqCst) {
+            return Err(Sm64Error::Init("Sm64 already initialized"));
+        }
+
+        // Defense-in-depth: validate ROM length (US ROM = 8 MiB) on top
+        // of the SHA1 check below.
+        if rom.len() != 8_388_608 {
+            INITIALIZED.store(false, Ordering::SeqCst);
+            return Err(Sm64Error::InvalidRom);
+        }
+
         // Validate the ROM hash before passing it to libsm64 — a wrong
         // ROM would crash the C code or produce garbage. This lets us
         // fail gracefully with a clear error message instead.
@@ -118,6 +140,7 @@ impl Sm64 {
                 expected = %ROM_SHA1,
                 "ROM SHA1 mismatch"
             );
+            INITIALIZED.store(false, Ordering::SeqCst);
             return Err(Sm64Error::InvalidRom);
         }
 
@@ -137,7 +160,7 @@ impl Sm64 {
             "libsm64 initialized"
         );
 
-        Ok(Self { texture })
+        Ok(Self { texture, _marker: PhantomData })
     }
 
     /// Mario's texture atlas as RGBA8 bytes (704 wide × 64 tall).
@@ -186,6 +209,7 @@ impl Drop for Sm64 {
         unsafe {
             sm64_global_terminate();
         }
+        INITIALIZED.store(false, Ordering::SeqCst);
     }
 }
 
@@ -194,6 +218,7 @@ impl Drop for Sm64 {
 pub struct Mario {
     id: i32,
     geometry: MarioGeometry,
+    _marker: PhantomData<*const ()>,
 }
 
 impl Mario {
@@ -201,6 +226,7 @@ impl Mario {
         Self {
             id,
             geometry: MarioGeometry::new(),
+            _marker: PhantomData,
         }
     }
 
@@ -424,6 +450,7 @@ pub struct SurfaceObject {
     /// case a future libsm64 build stops copying. The pointer is only
     /// read inside `sm64_surface_object_create`.
     _surfaces: Vec<SM64Surface>,
+    _marker: PhantomData<*const ()>,
 }
 
 impl SurfaceObject {
@@ -434,8 +461,8 @@ impl SurfaceObject {
     ///
     /// `transform.position` is in **SM64 units** (meters ×
     /// [`SM64_UNITS_PER_METER`]); `transform.eulerRotation` is in
-    /// **degrees** (pitch, yaw, roll).
     pub fn create(
+        _sm64: &Sm64,
         surfaces: &[SM64Surface],
         transform: SM64ObjectTransform,
     ) -> Result<Self, Sm64Error> {
@@ -449,8 +476,7 @@ impl SurfaceObject {
         // points at a valid SM64SurfaceObject whose `surfaces` pointer
         // references `owned`, alive for this entire call.
         let id = unsafe { sm64_surface_object_create(&obj) };
-        tracing::debug!(surface_object_id = id, count = owned.len(), "surface object created");
-        Ok(Self { id, _surfaces: owned })
+        Ok(Self { id, _surfaces: owned, _marker: PhantomData })
     }
 
     /// Update the surface object's transform. libsm64 rebakes the local

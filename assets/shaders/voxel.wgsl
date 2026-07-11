@@ -132,7 +132,7 @@ fn shadow_visibility(world_pos: vec3f) -> f32 {
     }
     let ndc = clip.xyz / clip.w;
     // NDC outside [-1,1]: beyond the orthographic box -- lit.
-    if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z > 1.0 || ndc.z < -1.0) {
+    if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z > 1.0 || ndc.z < 0.0) {
         return 1.0;
     }
     // Convert to shadow-map UV (flip Y: WGSL texture coords have origin at
@@ -141,7 +141,7 @@ fn shadow_visibility(world_pos: vec3f) -> f32 {
     // Depth the fragment *would* write to the shadow map, biased to avoid
     // self-shadowing (acne). 0.002 was tuned for a 100 m ortho box at
     // 2048x2048 with the writer-side bias of constant 2 / slope 1.5.
-    let ref_depth = ndc.z * 0.5 + 0.5 - 0.002;
+    let ref_depth = ndc.z - 0.002;
 
     // PCF 3x3: sample the comparison sampler at 9 offsets, average the
     // result. texel size is 1/2048.

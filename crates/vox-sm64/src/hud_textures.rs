@@ -84,8 +84,18 @@ pub fn mio0_decode(input: &[u8]) -> Result<Vec<u8>, HudTextureError> {
     let mut comp_idx: usize = 0;
     let mut uncomp_idx: usize = 0;
 
+    // Bit stream starts right after the header; hoist the slice so the
+    // loop only does a bounds check, not a reslice each iteration.
+    let bit_buf = &input[MIO0_HEADER_LENGTH..];
     while out.len() < dest_size {
-        if get_bit(&input[MIO0_HEADER_LENGTH..], bit_idx) {
+        // Bounds-check before indexing: corrupt/truncated input would
+        // otherwise panic inside `get_bit` (`buf[bit / 8]`).
+        if bit_idx / 8 >= bit_buf.len() {
+            return Err(HudTextureError::Mio0Decode(
+                "bit stream read out of bounds".to_owned(),
+            ));
+        }
+        if get_bit(bit_buf, bit_idx) {
             // 1 — pull one raw byte from the uncompressed section.
             let src = uncomp_offset
                 .checked_add(uncomp_idx)

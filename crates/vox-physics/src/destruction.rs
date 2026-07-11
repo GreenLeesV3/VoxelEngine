@@ -238,7 +238,11 @@ impl ExplosionShape {
         }
         for &(dir, length, spike_radius) in &self.spikes {
             let seg = dir * length;
-            let t = ((p - self.center).dot(seg) / seg.length_squared()).clamp(0.0, 1.0);
+            let seg_len_sq = seg.length_squared();
+            if seg_len_sq < 1e-12 {
+                continue;
+            }
+            let t = ((p - self.center).dot(seg) / seg_len_sq).clamp(0.0, 1.0);
             let closest = self.center + seg * t;
             if (p - closest).length() <= spike_radius {
                 return true;
@@ -464,7 +468,7 @@ fn flood_from(
         component.push(v);
         for d in DIRS {
             let n = v + d;
-            if lookup.present(n) && visited.insert(n) {
+            if lookup.solid(n) && visited.insert(n) {
                 heap.push(Reverse(key(n)));
             }
         }
@@ -500,7 +504,7 @@ pub fn detach_unsupported(
     for &r in removed {
         for d in DIRS {
             let seed = r + d;
-            if visited.contains(seed) || !lookup.present(seed) {
+            if visited.contains(seed) || !lookup.solid(seed) {
                 continue;
             }
             if let FloodResult::Bounded(component) = flood_from(world, &mut lookup, seed, &mut visited)

@@ -7,7 +7,7 @@
 
 
 use glam::{Quat, Vec3};
-use vox_core::{FxHashMap, Tunables};
+use vox_core::{FxHashMap, FxHashSet, Tunables};
 use vox_core::consts::{
     CLUTTER_LIFETIME_MAX_S, CLUTTER_LIFETIME_MIN_S, CLUTTER_MAX_VOXELS, CONTACT_SLOP, GRAVITY,
     SLEEP_FRAMES, SOLVER_ITERS, SUBSTEPS,
@@ -241,6 +241,13 @@ impl PhysicsWorld {
             self.slots[slot] = None;
             self.generations[slot] += 1;
             self.free.push(slot);
+            // Drop warm-start entries that referenced this slot —
+            // otherwise they'd match a future body that reuses the slot
+            // (generation bump makes the BodyId stale, but `warm` is
+            // keyed by raw slot index, not generation).
+            let slot_u32 = slot as u32;
+            self.warm
+                .retain(|k, _| k.0 != slot_u32 && k.1 != slot_u32);
         }
     }
 
@@ -305,6 +312,14 @@ impl PhysicsWorld {
                 self.free.push(slot);
             }
         }
+        if !removed.is_empty() {
+            // Same warm-start cleanup as `despawn`, batched for all freed
+            // slots at once.
+            let freed: FxHashSet<u32> =
+                removed.iter().map(|id| id.slot).collect();
+            self.warm
+                .retain(|k, _| !freed.contains(&k.0) && !freed.contains(&k.1));
+        }
         removed
     }
 
@@ -327,7 +342,7 @@ impl PhysicsWorld {
         }
         if let Some(body) = self.slots[slot].as_mut() {
             body.vel += impulse * body.inv_mass;
-            body.omega += angular;
+            body.omega += body.inv_iw * angular;
             body.sleep.asleep = false;
             body.sleep.quiet_steps = 0;
         }
@@ -685,13 +700,18 @@ impl PhysicsWorld {
             }
             let om = body.omega;
             let dq = Quat::from_xyzw(om.x, om.y, om.z, 0.0) * body.rot;
-            body.rot = Quat::from_xyzw(
+            let q = Quat::from_xyzw(
                 body.rot.x + 0.5 * h * dq.x,
                 body.rot.y + 0.5 * h * dq.y,
                 body.rot.z + 0.5 * h * dq.z,
                 body.rot.w + 0.5 * h * dq.w,
-            )
-            .normalize();
+            );
+            // Length-gate the normalization: a degenerate rotation (e.g.
+            // from a zero-length quaternion after a NaN leak) would
+            // produce NaNs from `normalize()`, poisoning every downstream
+            // transform. Only renormalize when the length is meaningful.
+            let len_sq = q.length_squared();
+            body.rot = if len_sq > 1e-12 { q / len_sq.sqrt() } else { body.rot };
             body.refresh_aabb();
         }
 

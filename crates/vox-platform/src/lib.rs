@@ -126,8 +126,19 @@ pub fn run_app(
             Event::WindowEvent { window_id, event } if window_id == window.id() => match event {
                 WindowEvent::CloseRequested => elwt.exit(),
                 WindowEvent::Resized(size) => {
+                    let was_minimized = minimized;
                     minimized = size.width == 0 || size.height == 0;
                     if !minimized {
+                        if was_minimized {
+                            // Clear per-frame deltas accumulated while
+                            // minimized — RedrawRequested early-returns
+                            // before `input.end_frame()` during that
+                            // span, so MouseMotion/wheel deltas would
+                            // otherwise carry into the first restored
+                            // frame as a huge jump.
+                            input.mouse_delta = glam::Vec2::ZERO;
+                            input.wheel_delta = 0.0;
+                        }
                         app.resize(size.width, size.height);
                     }
                 }

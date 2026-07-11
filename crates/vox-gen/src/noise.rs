@@ -132,6 +132,9 @@ impl Fbm {
 
     /// Sample at `p` (feature wavelength ≈ 1 unit at the first octave).
     pub fn sample2(&self, p: Vec2) -> f32 {
+        if self.octaves == 0 {
+            return 0.0;
+        }
         let mut sum = 0.0;
         let mut amp = 1.0;
         let mut freq = 1.0;

@@ -310,6 +310,11 @@ impl MarioPipeline {
         if n_verts == 0 {
             return;
         }
+        // Cap at the pre-allocated vertex buffer size (1024 triangles × 3
+        // verts = 3072). Clamp rather than assert so a corrupt or runaway
+        // geometry from libsm64 can't overrun the GPU buffer.
+        const MAX_VERTS: usize = 1024 * 3;
+        let n_verts = n_verts.min(MAX_VERTS);
 
         use std::sync::atomic::Ordering;
 

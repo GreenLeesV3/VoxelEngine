@@ -85,7 +85,9 @@ impl RemeshQueue {
                 .remove(&key)
                 .expect("key came from pending set");
             let origin = chunk_origin(key);
-            let chunk = world.chunk_at(key).expect("pending key has no chunk");
+            let Some(chunk) = world.chunk_at(key) else {
+                continue;
+            };
             let dims = IVec3::splat(CHUNK_SIZE as i32);
             let slab = match chunk.uniform_value() {
                 Some(v) => VoxelSlab::extract_uniform(world, origin, dims, v),

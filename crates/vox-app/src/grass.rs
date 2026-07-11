@@ -73,12 +73,16 @@ pub fn generate_grass(
     let radius_voxels = (GRASS_RADIUS_M / vs) as i32;
 
     // Determine chunk range to scan.
-    let min_chunk = chunk_origin(
-        IVec3::new(cam_voxel.x - radius_voxels, 0, cam_voxel.z - radius_voxels) / CHUNK_SIZE as i32,
-    ) / CHUNK_SIZE as i32;
-    let max_chunk = chunk_origin(
-        IVec3::new(cam_voxel.x + radius_voxels, 0, cam_voxel.z + radius_voxels) / CHUNK_SIZE as i32,
-    ) / CHUNK_SIZE as i32;
+    let min_chunk = IVec3::new(
+        (cam_voxel.x - radius_voxels).div_euclid(CHUNK_SIZE as i32),
+        0,
+        (cam_voxel.z - radius_voxels).div_euclid(CHUNK_SIZE as i32),
+    );
+    let max_chunk = IVec3::new(
+        (cam_voxel.x + radius_voxels).div_euclid(CHUNK_SIZE as i32),
+        0,
+        (cam_voxel.z + radius_voxels).div_euclid(CHUNK_SIZE as i32),
+    );
 
 
     for cx in min_chunk.x..=max_chunk.x {

@@ -60,11 +60,6 @@ pub struct MarioMode {
     /// interpolation — translate the whole mesh by the delta,
     /// smooth 120 FPS movement without per-vertex interpolation.
     prev_tick_pos: [f32; 3],
-    /// Previous tick's vertex positions (for interpolation between
-    /// 30 Hz ticks). Same layout as MarioGeometry::positions.
-    prev_positions: Vec<[f32; 3]>,
-    /// Vertex count at the previous tick (for safe interpolation).
-    prev_vertex_count: usize,
     /// Previous tick's Mario action — used to detect action transitions
     /// (e.g. ground pound → ground pound land) that should trigger
     /// engine-side effects like terrain carving.
@@ -158,8 +153,6 @@ impl MarioMode {
         model_scale: 1.0,
         units_per_meter,
         prev_tick_pos: [0.0; 3],
-        prev_positions: vec![[0.0; 3]; vox_sm64::ffi::SM64_GEO_MAX_TRIANGLES as usize * 3],
-        prev_vertex_count: 0,
         pending_ground_pound: None,
         last_health: 8,
         last_action: 0,
@@ -265,10 +258,6 @@ impl MarioMode {
             ticks_this_frame += 1;
             // Save previous state for position interpolation
             self.prev_tick_pos = self.last_pos_sm64;
-            // Previous geometry capture for interpolation (currently
-            // disabled — the `if false` block below skips it). Kept
-            // for when 30→120fps animation interpolation is re-enabled.
-            let _geo = self.mario.as_ref().unwrap().geometry();
             let state = self.mario.as_mut().unwrap().tick(inputs);
             self.last_pos_sm64 = [state.position.x, state.position.y, state.position.z];
             self.last_health = state.health;
@@ -396,7 +385,7 @@ impl MarioMode {
                 obj.move_to(&transform);
             } else {
                 let surfaces = aabb_box_surfaces(min_i, max_i);
-                match SurfaceObject::create(&surfaces, transform) {
+                match SurfaceObject::create(&self.sm64, &surfaces, transform) {
                     Ok(obj) => {
                         tracing::debug!(key, surfaces = surfaces.len(), "debris surface object created");
                         self.debris_objects.insert(key, obj);
@@ -565,12 +554,18 @@ impl MarioMode {
 
 impl Drop for MarioMode {
     fn drop(&mut self) {
-        // CRITICAL ordering: stop the audio feeder before `sm64` (and the
-        // other fields) drop. Sm64::drop calls sm64_global_terminate(),
-        // which frees the C audio state the feeder thread is still ticking
-        // against — a use-after-free if the feeder outlives it. Taking
-        // `audio` here joins the feeder, so the subsequent field-drop of
-        // Sm64Audio (now None) is a no-op.
+        // CRITICAL ordering: clean up Mario and debris SurfaceObjects
+        // BEFORE the sm64 field drops. Sm64::drop calls
+        // sm64_global_terminate(), which frees the C state these
+        // SurfaceObjects still reference — a use-after-free if they
+        // outlive it. Clearing them here (while sm64 is still
+        // initialized) makes their subsequent field-drop a no-op.
+        self.mario = None;
+        self.debris_objects.clear();
+        // Also stop the audio feeder before `sm64` drops: the feeder
+        // thread ticks against C audio state that sm64_global_terminate
+        // frees. Taking `audio` here joins the feeder, so the
+        // subsequent field-drop of Sm64Audio (now None) is a no-op.
         if let Some(audio) = self.audio.take() {
             drop(audio);
         }
