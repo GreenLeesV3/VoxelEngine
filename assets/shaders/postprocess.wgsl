@@ -153,11 +153,10 @@ fn fs(@builtin(position) frag_pos: vec4f) -> @location(0) vec4f {
     // functions have real edges to detect. Subtle dark outlines on
     // geometry boundaries for a toon look.
     // Edge detection (#64): Sobel on depth + normal. Only apply on
-    // flat-shaded voxels (axis-aligned normals), not on Mario's
-    // smooth interpolated normals which create false edges.
+    // voxel geometry (normal.w=1.0), not Mario (normal.w=0.0) whose
+    // smooth interpolated normals create false edges.
     let n_sample = textureSampleLevel(normal_tex, samp, uv, 0.0);
-    let is_flat = max(max(abs(n_sample.x), abs(n_sample.y)), abs(n_sample.z)) > 0.95;
-    if (is_flat) {
+    if (n_sample.w > 0.5) {
         let edge_d = sobel_depth(uv, params.texel_size);
         let edge_n = sobel_vec3(normal_tex, uv, params.texel_size);
         let edge = clamp(edge_d + edge_n * 0.5, 0.0, 1.0);

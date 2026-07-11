@@ -95,7 +95,7 @@ fn fs_main(in: VOut) -> MarioFOut {
 
     var out: MarioFOut;
     out.color = vec4f(final_color, 1.0);
-    out.normal = vec4f(normal, 1.0);
+    out.normal = vec4f(normal, 0.0);  // w=0: exclude from edge detection
     out.linear_depth = vec4f(dist / 600.0, 0.0, 0.0, 0.0);
     return out;
 }
