@@ -855,6 +855,52 @@ impl VoxApp {
                 impact_speed,
                 self.tunables.fracture_sensitivity,
             ) else {
+                // Below fracture threshold -- try the damage path. Impacts
+                // between 30% and 100% of the threshold accumulate damage
+                // instead of fracturing outright.
+                let fracture_threshold = self.tunables.fracture_sensitivity * def.strength;
+                if impact_speed >= fracture_threshold * DAMAGE_THRESHOLD_FACTOR {
+                    let ratio = impact_speed / fracture_threshold;
+                    let damage_amount = ratio * ratio * DAMAGE_RATE;
+
+                    const DIRS6: [IVec3; 6] = [
+                        IVec3::X,
+                        IVec3::NEG_X,
+                        IVec3::Y,
+                        IVec3::NEG_Y,
+                        IVec3::Z,
+                        IVec3::NEG_Z,
+                    ];
+                    let mut damage_voxels = vec![(local_voxel, damage_amount)];
+                    for &d in &DIRS6 {
+                        damage_voxels.push((local_voxel + d, damage_amount * 0.5));
+                    }
+
+                    let result = vox_physics::apply_body_damage(
+                        &mut self.phys,
+                        &self.registry,
+                        event.body,
+                        &damage_voxels,
+                        voxel_size_m,
+                    );
+                    if let Some(spawned) = result {
+                        // Body was despawned (voxels crumbled). Dust + replace.
+                        self.particles.burst(Burst {
+                            center: event.point_m,
+                            count: 4,
+                            color: def.color,
+                            speed: 1.0,
+                            upward: 0.5,
+                            life: 0.5,
+                            size: 0.03,
+                            buoyant: false,
+                        });
+                        self.replace_body(event.body, spawned);
+                    }
+                    // If result is None, the body was mutated in-place with
+                    // damage_dirty set. Re-meshing will be handled by the
+                    // damage_dirty check in the render loop.
+                }
                 continue;
             };
             let radius_m = voxel_size_m * radius_vox;
@@ -2069,11 +2115,12 @@ impl App for VoxApp {
         }
 
         // SSAO + bloom passes: generate AO and bloom from the scene's HDR color + depth.
-        let inv_view_proj = view_proj.inverse();
+        let proj = self.camera.projection(aspect);
+        let inv_proj = proj.inverse();
         self.bloom_ssao.write_params(
             self.gpu.queue(),
-            view_proj.to_cols_array_2d(),
-            inv_view_proj.to_cols_array_2d(),
+            proj.to_cols_array_2d(),
+            inv_proj.to_cols_array_2d(),
             self.tunables.ssao_intensity,
             self.tunables.ssao_radius,
             self.tunables.bloom_intensity,
@@ -2233,6 +2280,16 @@ const MAX_FRACTURE_RADIUS_VOX: f32 = 3.0;
 /// churn was both the "debris glitches around" report and a large share of
 /// the "lots of debris causes lag" one.
 const MIN_FRACTURE_BODY_VOXELS: usize = 16;
+
+/// Impacts below this fraction of the fracture threshold do nothing.
+const DAMAGE_THRESHOLD_FACTOR: f32 = 0.3;
+/// Damage gained per hit at exactly the fracture threshold.
+const DAMAGE_RATE: f32 = 0.3;
+/// Damage at which a voxel crumbles (becomes air). The actual crumble check
+/// lives in `vox_physics::apply_body_damage` (`>= 1.0`); this constant
+/// documents the threshold and is reserved for future app-side gating.
+#[expect(dead_code, reason = "documents the crumble threshold; enforced in vox-physics")]
+const DAMAGE_CRUMBLE: f32 = 1.0;
 
 /// Pure impact-fracture decision, kept free of live GPU/registry state so
 /// it's unit-testable without a whole `VoxApp`: given a material's
