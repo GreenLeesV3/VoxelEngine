@@ -125,9 +125,6 @@ const MAX_ANGULAR_SPEED_RAD_S: f32 = 20.0;
 /// purpose: a blast-kicked fragment (`BLAST_SPIN_MAX` = 3 rad/s) still has
 /// most of its tumble after a full second of flight.
 const ANGULAR_DAMPING_AIR: f32 = 0.3;
-/// Water density in kg/m³ for buoyancy calculations. Matches the water
-/// material's density in core.toml.
-const WATER_DENSITY: f32 = 1000.0;
 /// Per-second velocity/angular damping while submerged in water — higher
 /// than air drag to make water feel viscous.
 const WATER_DRAG: f32 = 3.0;
@@ -169,10 +166,10 @@ pub struct PhysicsWorld {
     pub tunables: Tunables,
     lifetime_rng: u64,
     joints: Vec<Joint>,
-    /// Fluid materials for buoyancy (water, muddy_water, ...). Empty (default)
-    /// disables buoyancy — bodies fall through fluids. Set by the app at
-    /// construction from the registry's fluid materials.
-    fluid_voxels: Vec<Voxel>,
+    /// Fluid materials with their densities for buoyancy. Each entry is
+    /// (material id, density kg/m³). Empty (default) disables buoyancy.
+    /// Set by the app at construction from the registry's fluid materials.
+    fluids: Vec<(Voxel, f32)>,
 }
 
 impl PhysicsWorld {
@@ -183,17 +180,16 @@ impl PhysicsWorld {
         }
     }
 
-    /// Set a single water material id for buoyancy (backward compat). Called
-    /// once by the app at construction. Replaces any prior fluid set with a
-    /// single-element vec.
+    /// Set a single water material id for buoyancy (backward compat).
+    /// Uses the standard water density (1000 kg/m³).
     pub fn set_water_voxel(&mut self, v: Voxel) {
-        self.fluid_voxels = vec![v];
+        self.fluids = vec![(v, 1000.0)];
     }
 
-    /// Set the fluid materials for buoyancy (water, muddy_water, ...).
-    /// Called once by the app at construction. Replaces any prior fluid set.
-    pub fn set_fluid_voxels(&mut self, fluids: Vec<Voxel>) {
-        self.fluid_voxels = fluids;
+    /// Set the fluid materials with their densities for buoyancy.
+    /// Called once by the app at construction. Replaces any prior set.
+    pub fn set_fluid_voxels(&mut self, fluids: Vec<(Voxel, f32)>) {
+        self.fluids = fluids;
     }
 
     /// xorshift64* -- deterministic, dependency-free spawn jitter (same
@@ -566,7 +562,8 @@ impl PhysicsWorld {
             );
             let bottom_vox = vox_core::voxel_at(bottom, s);
             if world.in_bounds(bottom_vox) {
-                if self.fluid_voxels.contains(&world.get_voxel(bottom_vox)) {
+                let voxel = world.get_voxel(bottom_vox);
+                if let Some(&(_, fluid_density)) = self.fluids.iter().find(|(v, _)| *v == voxel) {
                     let body_height = (body.aabb_max.y - body.aabb_min.y).max(1e-6);
                     let submerge_depth = body_height.min(body.aabb_max.y - bottom.y + s);
                     let fraction = (submerge_depth / body_height).clamp(0.0, 1.0);
@@ -574,7 +571,7 @@ impl PhysicsWorld {
                     let volume = (dims.x * dims.y * dims.z) as f32 * s * s * s;
                     let mass = body.mass();
                     let avg_density = mass / volume.max(1e-6);
-                    let buoy_accel = (WATER_DENSITY / avg_density - 1.0) * GRAVITY * fraction;
+                    let buoy_accel = (fluid_density / avg_density - 1.0) * GRAVITY * fraction;
                     if buoy_accel > 0.0 {
                         body.vel.y += buoy_accel * h;
                     }
@@ -1563,7 +1560,7 @@ mod tests {
         let mut phys = PhysicsWorld::new();
         // Register both water and muddy_water as buoyancy fluids. The key
         // assertion: muddy_water (the *second* fluid) triggers buoyancy.
-        phys.set_fluid_voxels(vec![WATER, MUDDY_WATER]);
+        phys.set_fluid_voxels(vec![(WATER, 1000.0), (MUDDY_WATER, 1100.0)]);
 
         // Foam (density 300) is much lighter than water (1000), so
         // buoy_accel = (1000/300 - 1)*GRAVITY ≈ 2.33*GRAVITY, far exceeding

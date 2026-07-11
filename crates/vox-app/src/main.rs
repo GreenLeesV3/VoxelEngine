@@ -170,6 +170,18 @@ fn fluid_materials(registry: &MaterialRegistry) -> Vec<Voxel> {
         .collect()
 }
 
+/// All fluid materials with their densities, as (Voxel, density) pairs.
+/// Used for per-fluid buoyancy — muddy water (1100) provides more buoyancy
+/// than clean water (1000).
+fn fluid_densities(registry: &MaterialRegistry) -> Vec<(Voxel, f32)> {
+    (1..registry.len())
+        .filter_map(|i| {
+            let def = registry.get(vox_core::MaterialId(i as u16))?;
+            def.fluid.then(|| (Voxel(i as u16), def.density))
+        })
+        .collect()
+}
+
 /// Place smoke just inside the face-adjacent air voxel selected by FireSim,
 /// with tangent-only jitter so the origin can never be pushed back through
 /// the burning surface. `salt` varies repeat emissions from the same cell.
@@ -564,6 +576,14 @@ impl VoxApp {
                 fluids.clone(),
                 powder_materials(&registry),
             ),
+            phys: {
+                let mut phys = PhysicsWorld::new();
+                let fluid_buoyancy = fluid_densities(&registry);
+                if !fluid_buoyancy.is_empty() {
+                    phys.set_fluid_voxels(fluid_buoyancy);
+                }
+                phys
+            },
             fluid_clock: vox_platform::FrameClock::new(vox_core::consts::FLUID_DT),
             weathering,
             fire,
@@ -574,13 +594,6 @@ impl VoxApp {
             tools,
             remesh: RemeshQueue::new(),
             body_mesh: BodyMeshQueue::new(),
-            phys: {
-                let mut phys = PhysicsWorld::new();
-                if !fluids.is_empty() {
-                    phys.set_fluid_voxels(fluids.clone());
-                }
-                phys
-            },
             fluids,
             blast_seed: 0,
             impact_seed: 0,
