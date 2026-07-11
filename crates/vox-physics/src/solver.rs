@@ -369,6 +369,16 @@ impl PhysicsWorld {
             })
             .collect();
 
+        // Tick damage decay on awake bodies with damage. Once per full step
+        // (not per substep): 0.05/s means ~20s to heal, so substep granularity
+        // is pointless. Sleeping bodies freeze their damage until woken.
+        let decay = vox_core::consts::DAMAGE_DECAY_PER_S;
+        for body in self.slots.iter_mut().flatten() {
+            if !body.sleep.asleep && body.grid.has_damage() {
+                body.grid.tick_damage_decay(dt, decay);
+            }
+        }
+
         // Update per-body quiet counters.
         for body in self.slots.iter_mut().flatten() {
             if body.sleep.asleep {

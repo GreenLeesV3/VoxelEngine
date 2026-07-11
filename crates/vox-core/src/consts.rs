@@ -69,3 +69,5 @@ pub const CLUTTER_LIFETIME_MIN_S: f32 = 35.0;
 /// Maximum lifetime, in seconds, for a body at or under `CLUTTER_MAX_VOXELS`
 /// before it despawns.
 pub const CLUTTER_LIFETIME_MAX_S: f32 = 60.0;
+/// Damage decay per second for awake debris bodies (20s to fully heal).
+pub const DAMAGE_DECAY_PER_S: f32 = 0.05;

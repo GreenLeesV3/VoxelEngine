@@ -355,6 +355,8 @@ pub struct Body {
     /// `vox_core::consts::CLUTTER_MAX_VOXELS` -- and ticked down by
     /// `PhysicsWorld::tick_lifetimes`.
     pub lifetime_s: Option<f32>,
+    /// True when damage values changed since last mesh. Cleared after re-mesh.
+    pub damage_dirty: bool,
 }
 
 impl Body {
@@ -389,8 +391,9 @@ impl Body {
             aabb_max: Vec3::ZERO,
             prev_pos: com_world,
             prev_rot: Quat::IDENTITY,
-            inv_iw: Mat3::IDENTITY,
             lifetime_s: None,
+            damage_dirty: false,
+            inv_iw: Mat3::IDENTITY,
         };
         body.refresh_aabb();
         body.inv_iw = body.inv_inertia_world();
