@@ -45,8 +45,14 @@ fn mie(dot_val: f32, g: f32) -> f32 {
     return num / (den * sqrt(abs(den)) + 0.0001);
 }
 
+struct SkyFOut {
+    @location(0) color: vec4f,
+    @location(1) normal: vec4f,
+    @location(2) linear_depth: vec4f,
+};
+
 @fragment
-fn fs(in: VOut) -> @location(0) vec4f {
+fn fs(in: VOut) -> SkyFOut {
     // Reconstruct the world-space view ray per-pixel from the
     // interpolated NDC coordinates. Computing it per-vertex and
     // interpolating the normalized direction causes squashing at
@@ -109,10 +115,13 @@ fn fs(in: VOut) -> @location(0) vec4f {
         let star_hash = fract(sin(grid_dir.x * 127.1 + grid_dir.y * 311.7 + grid_dir.z * 74.7) * 43758.5453);
         let star_brightness = smoothstep(0.992, 1.0, star_hash);
         let star_fade = (0.15 - sun_strength) / 0.15;
-        // Only show stars above the horizon.
         let above_horizon = step(0.0, dir.y);
         sky += vec3f(star_brightness * star_fade * above_horizon);
     }
 
-    return vec4f(sky, 1.0);
+    var out: SkyFOut;
+    out.color = vec4f(sky, 1.0);
+    out.normal = vec4f(0.0, 0.0, 0.0, 0.0);    // sky has no normal
+    out.linear_depth = vec4f(1.0, 0.0, 0.0, 0.0); // sky = far depth
+    return out;
 }

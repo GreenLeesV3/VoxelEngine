@@ -47,22 +47,25 @@ fn vs_main(in: VIn) -> VOut {
     return out;
 }
 
+struct GrassFOut {
+    @location(0) color: vec4f,
+    @location(1) normal: vec4f,
+    @location(2) linear_depth: vec4f,
+};
+
 @fragment
-fn fs_main(in: VOut) -> @location(0) vec4f {
+fn fs_main(in: VOut) -> GrassFOut {
     // Color gradient: match the voxel grass palette (material 3).
     let base_green = vec3f(0.20, 0.35, 0.15);
     let tip_green = vec3f(0.33, 0.55, 0.25);
     let color = mix(base_green, tip_green, in.height_factor);
 
-    // Lighting: hemisphere ambient + sun, matching the voxel pipeline.
-    // Grass faces up (+Y), so hemi_t ≈ 1.0 (full sky ambient).
     // Sky-tinted lighting matching voxel.wgsl (CazToon-style).
     let sky_tint = normalize(cam.sky_color.xyz + vec3f(0.001));
     let lit_tint = normalize(mix(vec3f(1.0), sky_tint, 0.35));
     let shadow_tint = normalize(mix(vec3f(0.5), sky_tint, 0.45));
     let ambient = cam.ambient_sky.xyz * shadow_tint * cam.fog.w;
     let ndotl = dot(vec3f(0.0, 1.0, 0.0), cam.sun_dir.xyz);
-    // Cel-shading: 4-band quantization matching voxel.wgsl (#71).
     let raw = clamp(ndotl * 0.5 + 0.5, 0.0, 1.0);
     let bands = 4.0;
     let quantized = floor(raw * bands + 0.5) / bands;
@@ -76,5 +79,9 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
     let f = clamp((dist - cam.fog.x) / (cam.fog.y - cam.fog.x), 0.0, 1.0);
     let final_color = mix(lit, cam.sky_color.xyz, f * f);
 
-    return vec4f(final_color, 0.95);
+    var out: GrassFOut;
+    out.color = vec4f(final_color, 0.95);
+    out.normal = vec4f(0.0, 1.0, 0.0, 1.0);  // grass faces up
+    out.linear_depth = vec4f(dist / 600.0, 0.0, 0.0, 0.0);
+    return out;
 }

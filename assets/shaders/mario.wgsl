@@ -61,13 +61,18 @@ fn vs_main(in: VIn) -> VOut {
     return out;
 }
 
+struct MarioFOut {
+    @location(0) color: vec4f,
+    @location(1) normal: vec4f,
+    @location(2) linear_depth: vec4f,
+};
+
 @fragment
-fn fs_main(in: VOut) -> @location(0) vec4f {
+fn fs_main(in: VOut) -> MarioFOut {
     let normal = normalize(in.world_normal);
     let sun_dir = normalize(cam.sun_dir.xyz);
     let ndotl = dot(normal, sun_dir);
 
-    // Cel-shading: 4-band quantization matching voxel.wgsl (#71).
     let raw = clamp(ndotl * 0.5 + 0.5, 0.0, 1.0);
     let bands = 4.0;
     let quantized = floor(raw * bands + 0.5) / bands;
@@ -80,18 +85,17 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
     let hemi_t = clamp(0.5 + 0.5 * normal.y, 0.0, 1.0);
     let ambient = mix(cam.ambient_ground.xyz, cam.ambient_sky.xyz * shadow_tint, hemi_t) * cam.fog.w;
 
-    // Alpha-masked overlay: vertex color is the base body color
-    // (skin, hat, overalls), texture overrides only where alpha=1
-    // (eyes, buttons, sideburns, emblem). This is exactly how
-    // libsm64's reference GL renderer does it.
     let tex_color = textureSample(mario_texture, mario_sampler, in.uv);
     let main_color = mix(in.color, tex_color.rgb, tex_color.a);
     let lit = main_color * (ambient + sun + vec3f(fill));
 
-    // Distance fog — matches the voxel pipeline
     let dist = length(cam.cam_pos.xyz - in.world_pos);
     let fog_factor = clamp((cam.fog.y - dist) / (cam.fog.y - cam.fog.x), 0.0, 1.0);
     let final_color = mix(cam.sky_color.xyz, lit, fog_factor);
 
-    return vec4f(final_color, 1.0);
+    var out: MarioFOut;
+    out.color = vec4f(final_color, 1.0);
+    out.normal = vec4f(normal, 1.0);
+    out.linear_depth = vec4f(dist / 600.0, 0.0, 0.0, 0.0);
+    return out;
 }

@@ -229,8 +229,14 @@ fn g_smith(nov: f32, nol: f32, a: f32) -> f32 {
 // behind water is not depth-culled.
 override water_pass: u32 = 0u;
 
+struct FOut {
+    @location(0) color: vec4f,
+    @location(1) normal: vec4f,       // xyz = world normal, w = 1
+    @location(2) linear_depth: vec4f, // x = linear depth (0..1), yzw = unused
+};
+
 @fragment
-fn fs(in: VOut) -> @location(0) vec4f {
+fn fs(in: VOut) -> FOut {
     // Pass selection: each pipeline variant only draws its own materials.
     if (water_pass == 0u && in.mat_id == 9u) { discard; }
     if (water_pass == 1u && in.mat_id != 9u) { discard; }
@@ -246,7 +252,11 @@ fn fs(in: VOut) -> @location(0) vec4f {
         let dist = length(in.world_pos - cam.cam_pos.xyz);
         let f = clamp((dist - cam.fog.x) / (cam.fog.y - cam.fog.x), 0.0, 1.0);
         ec = mix(ec, cam.sky_color.xyz, f * f);
-        return vec4f(ec, 1.0);
+        var out: FOut;
+        out.color = vec4f(ec, 1.0);
+        out.normal = vec4f(normalize(in.world_normal), 1.0);
+        out.linear_depth = vec4f(dist / 600.0, 0.0, 0.0, 0.0);
+        return out;
     }
 
     let n = normalize(in.world_normal);
@@ -375,5 +385,10 @@ fn fs(in: VOut) -> @location(0) vec4f {
         c = mix(c, vec3f(0.12, 0.28, 0.50) * night_factor, 0.30);
     }
 
-    return vec4f(c, alpha);
+    // MRT outputs: normal + linear depth for postprocess (SSR, edge detection).
+    var out: FOut;
+    out.color = vec4f(c, alpha);
+    out.normal = vec4f(normalize(in.world_normal), 1.0);
+    out.linear_depth = vec4f(dist / 600.0, 0.0, 0.0, 0.0);  // 600 = Z_FAR
+    return out;
 }
