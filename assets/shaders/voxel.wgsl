@@ -391,7 +391,6 @@ fn fs(in: VOut) -> FOut {
     var out: FOut;
     out.color = vec4f(c, alpha);
     out.normal = vec4f(normalize(in.world_normal), 1.0);
-    let pbr = pbr_params[in.mat_id];
     let reflectivity = (1.0 - pbr.x) * max(pbr.y, 0.04);
     out.linear_depth = vec4f(dist / 600.0, reflectivity, 0.0, 0.0);
     return out;

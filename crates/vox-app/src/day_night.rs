@@ -37,7 +37,13 @@ const BLUE_HOUR_SKY: Vec3 = Vec3::new(0.00, 0.70, 1.00);
 const NIGHT_SKY: Vec3 = Vec3::new(0.39, 0.40, 0.62);
 const DAWN_SKY: Vec3 = Vec3::new(0.12, 0.18, 0.45);
 const SUNRISE_SKY: Vec3 = Vec3::new(0.65, 0.45, 0.55);
-
+/// Per-phase zenith colors (from CazToon's settings/sky.glsl).
+const DAY_ZENITH: Vec3 = Vec3::new(0.60, 0.69, 0.98);
+const SUNSET_ZENITH: Vec3 = Vec3::new(1.00, 0.58, 0.17);
+const BLUE_HOUR_ZENITH: Vec3 = Vec3::new(0.15, 0.22, 0.50);
+const NIGHT_ZENITH: Vec3 = Vec3::new(0.00, 0.08, 0.27);
+const DAWN_ZENITH: Vec3 = Vec3::new(0.12, 0.18, 0.45);
+const SUNRISE_ZENITH: Vec3 = Vec3::new(0.65, 0.45, 0.65);
 /// Per-phase brightness values (from CazToon's getTimelineBrightness).
 const DAY_BRIGHTNESS: f32 = 1.0;
 const SUNSET_BRIGHTNESS: f32 = 0.85;
@@ -51,7 +57,8 @@ pub struct DayNightParams {
     pub sun_dir: Vec3,
     pub sun_strength: f32,
     pub sun_color: Vec3,
-    pub sky_color: Vec3,
+    pub sky_color: Vec3,       // horizon color (6-phase blend)
+    pub zenith_color: Vec3,    // zenith color (6-phase blend, distinct hue)
     pub fill_strength: f32,
     pub ambient_strength: f32,
     pub ambient_sky: Vec3,
@@ -169,22 +176,30 @@ pub fn compute(game_time: f32) -> DayNightParams {
     // Sun strength: zero at night, full at noon.
     let sun_strength = brightness.max(0.0) * 0.85;
 
-    // Sky color: weighted blend of all 6 phase colors.
-    // Special blends for day↔sunset and sunset↔blue hour transitions.
+    // Sky color (horizon): weighted blend of all 6 phase colors.
     let mut sky = DAY_SKY * w.day
         + SUNSET_SKY * w.sunset
         + BLUE_HOUR_SKY * w.blue_hour
         + NIGHT_SKY * w.night
         + DAWN_SKY * w.dawn
         + SUNRISE_SKY * w.sunrise;
-
     // Day↔sunset warm blend
     let day_sunset_mix = (w.day.min(w.sunset + w.sunrise) * 2.5).min(1.0);
     sky = sky.lerp(Vec3::new(0.92, 0.55, 0.35), day_sunset_mix * 0.5);
-
     // Sunset↔blue hour purple blend
     let sunset_blue_mix = (w.sunset.min(w.blue_hour) * 2.0).min(1.0);
     sky = sky.lerp(Vec3::new(0.40, 0.15, 0.75), sunset_blue_mix * 0.5);
+
+    // Zenith color: distinct hue from horizon (CazToon uses different
+    // RGB values per layer — not a scalar multiple).
+    let mut zenith = DAY_ZENITH * w.day
+        + SUNSET_ZENITH * w.sunset
+        + BLUE_HOUR_ZENITH * w.blue_hour
+        + NIGHT_ZENITH * w.night
+        + DAWN_ZENITH * w.dawn
+        + SUNRISE_ZENITH * w.sunrise;
+    zenith = zenith.lerp(Vec3::new(0.85, 0.40, 0.20), day_sunset_mix * 0.5);
+    zenith = zenith.lerp(Vec3::new(0.20, 0.10, 0.60), sunset_blue_mix * 0.5);
 
     // Fill light: dimmer at night.
     let fill_strength = 0.12 * brightness.max(0.15);
@@ -199,6 +214,7 @@ pub fn compute(game_time: f32) -> DayNightParams {
         sun_strength,
         sun_color,
         sky_color: sky,
+        zenith_color: zenith,
         fill_strength,
         ambient_strength,
         ambient_sky,

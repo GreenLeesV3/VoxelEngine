@@ -16,6 +16,7 @@ pub struct SkyUniform {
     pub cam_pos: [f32; 4],
     pub sun_dir: [f32; 4],
     pub sky_color: [f32; 4],
+    pub zenith_color: [f32; 4],
     pub sun_color: [f32; 4],
     pub cam_forward: [f32; 4],
     pub cam_right: [f32; 4],

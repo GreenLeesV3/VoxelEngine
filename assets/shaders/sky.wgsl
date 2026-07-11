@@ -7,6 +7,7 @@ struct SkyCam {
     cam_pos: vec4f,      // xyz = cam pos, w = tan(fov_y / 2)
     sun_dir: vec4f,      // xyz = sun direction (unit), w = sun strength
     sky_color: vec4f,    // xyz = sky/fog color, w = aspect ratio
+    zenith_color: vec4f, // xyz = zenith color (distinct hue), w = unused
     sun_color: vec4f,    // xyz = sun color, w = game time
     cam_forward: vec4f,  // xyz = camera forward (unit)
     cam_right: vec4f,    // xyz = camera right (unit)
@@ -78,10 +79,9 @@ fn fs(in: VOut) -> SkyFOut {
     // Sky colors from the 6-phase ToD system (cam.sky_color.xyz
     // carries the weighted blend from day_night.rs). Use it as the
     // horizon color and derive zenith + mid colors from it.
-    // CazToon-style 3-layer gradient: horizon → mid → zenith.
     let horizon_color = cam.sky_color.xyz;
-    let mid_color = horizon_color * 0.75;
-    let top_color = horizon_color * 0.5;
+    let top_color = cam.zenith_color.xyz;
+    let mid_color = mix(horizon_color, top_color, 0.5);
 
     // 3-layer sky gradient matching CazToon's horizon/mid/zenith blend.
     let gradient = clamp(dir_up * 0.5 + 0.5, 0.0, 1.0);
