@@ -428,16 +428,35 @@ fn spawn_impact_chips(
     for &(h, i) in ranked.iter().take(target) {
         let (v, mat) = removed[i];
         let chip_center_world = parent.local_to_world_m(voxel_center_m(v, voxel_size_m));
-
-        let mut voxels = vec![mat; 4];
-        voxels[(h as usize) % 4] = AIR;
-        let grid = VoxelGrid::new(IVec3::new(2, 2, 1), voxels);
+        // Chip shape: pick from 3 templates by hash (same variety as
+        // spawn_debris_chips in destruction.rs).
+        let template = h % 3;
+        let (dims, voxels) = if template == 0 {
+            let mut vs = vec![mat; 4];
+            vs[(h as usize) % 4] = AIR;
+            (IVec3::new(2, 2, 1), vs)
+        } else if template == 1 {
+            let mut vs = vec![AIR; 9];
+            vs[1] = mat; vs[3] = mat; vs[4] = mat; vs[5] = mat; vs[7] = mat;
+            (IVec3::new(3, 3, 1), vs)
+        } else {
+            let mut vs = vec![mat; 8];
+            vs[(h as usize) % 8] = AIR;
+            (IVec3::new(2, 2, 2), vs)
+        };
+        let grid = VoxelGrid::new(dims, voxels);
         let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, chip_center_world)
         else {
-            continue; // Shouldn't happen for a solid grid, but no reason to crash if it does.
+            continue;
         };
 
-        body.vel = parent.vel + dir * speed;
+        // Radial scatter: blend the impact direction with a per-chip
+        // outward radial direction from the impact center. This makes
+        // debris fly outward from the hit point, not all in one stream.
+        let radial_dir = (chip_center_world - parent.pos).normalize_or(dir);
+        let blend = 0.4 + (small_hash(h, 42) as f32 / u32::MAX as f32) * 0.4; // 0.4..0.8
+        let chip_dir = (dir * (1.0 - blend) + radial_dir * blend).normalize_or(dir);
+        body.vel = parent.vel + chip_dir * speed;
         let h2 = small_hash(h, i as u32);
         body.omega = parent.omega
             + Vec3::new(

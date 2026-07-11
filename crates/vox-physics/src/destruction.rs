@@ -48,7 +48,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use glam::{IVec3, Vec3};
+use glam::{IVec3, Vec3, Vec3Swizzles};
 use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
 use vox_core::{FxHashSet, MaterialRegistry, voxel_at, voxel_center_m};
 use vox_world::{AIR, SolidLookup, Voxel, World};
@@ -526,6 +526,19 @@ pub fn apply_blast_impulse(
         let mass = body.mass();
         let speed = power / dist.max(BLAST_MIN_DIST_M) / mass.sqrt();
 
+        // Clamp the upward velocity component. Without this, debris whose
+        // COM is above the blast center (common for ground-level blasts
+        // whose downward ExplosionShape spikes carve vertical channels into
+        // terrain) gets launched straight up at unrealistic speeds, producing
+        // "tall pillars rising from the ground." Horizontal outburst is the
+        // dominant visual of a real explosion; the vertical component is
+        // secondary. Cap it at 40% of the horizontal speed.
+        let mut vel = dir * speed;
+        let h_speed = vel.xz().length();
+        if vel.y > h_speed * 0.4 {
+            vel.y = h_speed * 0.4;
+        }
+
         let h = small_hash(seed, i as u32);
         let spin = Vec3::new(
             ((h & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
@@ -534,8 +547,8 @@ pub fn apply_blast_impulse(
         ) * BLAST_SPIN_MAX;
 
         // `apply_impulse` scales its first argument by inverse mass, so
-        // passing `dir * speed * mass` yields exactly `dir * speed` velocity.
-        phys.apply_impulse(id, dir * speed * mass, spin);
+        // passing `vel * mass` yields exactly `vel` velocity.
+        phys.apply_impulse(id, vel * mass, spin);
     }
 }
 
@@ -612,23 +625,39 @@ fn spawn_debris_chips(
     for &(h, i) in ranked.iter().take(target) {
         let (v, mat) = removed[i];
         let chip_center_m = voxel_center_m(v, voxel_size_m);
-        // A small L-shaped triomino (2x2x1 minus one corner), not a single
-        // voxel or a straight bar: a literal single-voxel body is a physics
-        // degenerate case (its only surface sample point sits exactly at
-        // its own center of mass, so contact friction can never generate
-        // torque there); a straight two-voxel bar fixes that for rotation
-        // *across* its length but is still degenerate for spin *around*
-        // its own long axis (every contact point still lies exactly on
-        // that axis, zero arm, so that one rotation component never damps
-        // either -- confirmed by a chip holding an *exactly constant*
-        // angular velocity across a 30-second settle window). An L-shape
-        // has no straight line through all its voxel centers, so no axis
-        // of rotation is ever torque-free.
-        let mut voxels = vec![mat; 4];
-        voxels[(h as usize) % 4] = AIR;
-        let grid = VoxelGrid::new(IVec3::new(2, 2, 1), voxels);
+        // Chip shape: pick from 3 templates by hash for visual variety.
+        // All avoid the single-voxel and straight-bar degenerate cases
+        // (no torque-free axis of rotation — see the L-shape comment below).
+        // Template 0 (33%): 3-voxel L-triomino (2x2x1 minus one corner).
+        // Template 1 (33%): 5-voxel plus-sign (3x3x1 cross).
+        // Template 2 (33%): 7-voxel block (2x2x2 minus one corner).
+        // Larger chips (5, 7 voxels) are above CLUTTER_MAX_VOXELS (4) so
+        // they persist — smaller center rubble clears in 35-60s, larger
+        // edge chunks stay as permanent debris.
+        let template = h % 3;
+        let (dims, voxels) = if template == 0 {
+            // 3-voxel L-triomino: 2x2x1 minus one corner.
+            let mut vs = vec![mat; 4];
+            vs[(h as usize) % 4] = AIR;
+            (IVec3::new(2, 2, 1), vs)
+        } else if template == 1 {
+            // 5-voxel plus-sign: 3x3x1 cross, 4 arms + center.
+            let mut vs = vec![AIR; 9];
+            vs[1] = mat; // top
+            vs[3] = mat; // left
+            vs[4] = mat; // center
+            vs[5] = mat; // right
+            vs[7] = mat; // bottom
+            (IVec3::new(3, 3, 1), vs)
+        } else {
+            // 7-voxel block: 2x2x2 minus one corner.
+            let mut vs = vec![mat; 8];
+            vs[(h as usize) % 8] = AIR;
+            (IVec3::new(2, 2, 2), vs)
+        };
+        let grid = VoxelGrid::new(dims, voxels);
         let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, chip_center_m) else {
-            continue; // Shouldn't happen for a solid grid, but no reason to crash if it does.
+            continue;
         };
 
         let offset = chip_center_m - center_m;
@@ -1266,10 +1295,10 @@ mod tests {
              chips, not just vanish into air"
         );
         for (_, body) in phys.iter() {
-            assert_eq!(
-                body.grid.solid_count(),
-                3,
-                "each chip is a small L-shaped triomino"
+            let sc = body.grid.solid_count();
+            assert!(
+                sc == 3 || sc == 5 || sc == 7,
+                "each chip is a small debris fragment (3/5/7 voxels), got {sc}"
             );
             assert!(!body.sleep.asleep);
         }
