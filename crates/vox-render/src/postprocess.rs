@@ -26,18 +26,12 @@ pub const DEPTH_COPY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Fl
 struct ParamsUniform {
     resolution: [f32; 2],
     texel_size: [f32; 2],
-    cam_pos: [f32; 3],
-    _pad0: f32,
-    cam_forward: [f32; 3],
-    _pad1: f32,
-    cam_right: [f32; 3],
-    _pad2: f32,
-    cam_up: [f32; 3],
-    tan_half_fov: f32,
-    aspect: f32,
-    z_far: f32,           // far clip distance (600.0)
-    _pad4: f32,
-    _pad5: f32,
+    cam_pos: [f32; 4],          // xyz + _pad0
+    cam_forward: [f32; 4],      // xyz + _pad1
+    cam_right: [f32; 4],        // xyz + _pad2
+    cam_up_tan: [f32; 4],       // xyz + tan_half_fov
+    aspect_zfar: [f32; 4],      // aspect + z_far + _pad3 + _pad4
+    _trailing: [f32; 4],        // _pad5 + struct-align padding (112 total)
 }
 
 /// Owns the offscreen textures, the post-process pipeline, and the
@@ -87,25 +81,18 @@ impl PostProcessPipeline {
         let params = ParamsUniform {
             resolution: [width as f32, height as f32],
             texel_size: [1.0 / width.max(1) as f32, 1.0 / height.max(1) as f32],
-            cam_pos: [0.0; 3],
-            _pad0: 0.0,
-            cam_forward: [0.0; 3],
-            _pad1: 0.0,
-            cam_right: [0.0; 3],
-            _pad2: 0.0,
-            cam_up: [0.0; 3],
-            tan_half_fov: 0.0,
-            aspect: 1.0,
-            z_far: 600.0,
-            _pad4: 0.0,
-            _pad5: 0.0,
+            cam_pos: [0.0, 0.0, 0.0, 0.0],
+            cam_forward: [0.0, 0.0, 0.0, 0.0],
+            cam_right: [0.0, 0.0, 0.0, 0.0],
+            cam_up_tan: [0.0, 0.0, 0.0, 0.0],
+            aspect_zfar: [1.0, 600.0, 0.0, 0.0],
+            _trailing: [0.0; 4],
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("postprocess-params"),
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-
         // --- Shader ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("postprocess-shader"),
@@ -269,18 +256,12 @@ impl PostProcessPipeline {
         ParamsUniform {
             resolution: [width as f32, height as f32],
             texel_size: [1.0 / width.max(1) as f32, 1.0 / height.max(1) as f32],
-            cam_pos: [self.cam_pos.x, self.cam_pos.y, self.cam_pos.z],
-            _pad0: 0.0,
-            cam_forward: [self.cam_forward.x, self.cam_forward.y, self.cam_forward.z],
-            _pad1: 0.0,
-            cam_right: [self.cam_right.x, self.cam_right.y, self.cam_right.z],
-            _pad2: 0.0,
-            cam_up: [self.cam_up.x, self.cam_up.y, self.cam_up.z],
-            tan_half_fov: self.tan_half_fov,
-            aspect: self.aspect,
-            z_far: 600.0,
-            _pad4: 0.0,
-            _pad5: 0.0,
+            cam_pos: [self.cam_pos.x, self.cam_pos.y, self.cam_pos.z, 0.0],
+            cam_forward: [self.cam_forward.x, self.cam_forward.y, self.cam_forward.z, 0.0],
+            cam_right: [self.cam_right.x, self.cam_right.y, self.cam_right.z, 0.0],
+            cam_up_tan: [self.cam_up.x, self.cam_up.y, self.cam_up.z, self.tan_half_fov],
+            aspect_zfar: [self.aspect, 600.0, 0.0, 0.0],
+            _trailing: [0.0; 4],
         }
     }
 
