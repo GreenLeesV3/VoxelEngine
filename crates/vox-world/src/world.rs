@@ -110,6 +110,11 @@ pub struct World {
     /// controller, rigidbody-vs-world contacts, and the destruction
     /// connectivity flood all key off `World::solid`/`SolidLookup::solid`.
     solid_table: Option<Vec<bool>>,
+    /// When set, `set_voxel` silently drops writes outside this half-open
+    /// voxel box. Used during chunk generation to prevent tree stamping from
+    /// allocating neighbor chunks. `get_voxel` is unaffected — reads always
+    /// pass through. `None` = no clip (normal gameplay).
+    clip: Option<(IVec3, IVec3)>,
 }
 
 impl World {
@@ -124,6 +129,7 @@ impl World {
             bounds_voxels,
             warned_out_of_bounds: false,
             solid_table: None,
+            clip: None,
         }
     }
 
@@ -167,6 +173,18 @@ impl World {
         self.solid_table = Some(table);
     }
 
+    /// Set a clip region: subsequent `set_voxel`/`edit_box` writes outside
+    /// `[min, max)` are silently dropped. Used during chunk generation so tree
+    /// stamping only writes into the target chunk. Reads are never clipped.
+    pub fn set_clip(&mut self, min: IVec3, max: IVec3) {
+        self.clip = Some((min, max));
+    }
+
+    /// Remove the clip region — all in-bounds writes succeed normally.
+    pub fn clear_clip(&mut self) {
+        self.clip = None;
+    }
+
     /// True when material id `id` counts as solid, consulting the attached
     /// table if there is one. Shared by `solid()` and `SolidLookup::solid()`
     /// so the two can never disagree.
@@ -187,6 +205,11 @@ impl World {
                 tracing::warn!(?pos, "ignoring out-of-bounds voxel write (warned once)");
             }
             return;
+        }
+        if let Some((clip_min, clip_max)) = self.clip {
+            if pos.cmplt(clip_min).any() || pos.cmpge(clip_max).any() {
+                return;
+            }
         }
         let key = chunk_of(pos);
         let local = local_of(pos);
@@ -231,8 +254,12 @@ impl World {
         mut edit: impl FnMut(IVec3, Voxel) -> Option<Voxel>,
     ) {
         let (bmin, bmax) = self.bounds_voxels;
-        let min = min.max(bmin);
-        let max = max.min(bmax);
+        let mut min = min.max(bmin);
+        let mut max = max.min(bmax);
+        if let Some((clip_min, clip_max)) = self.clip {
+            min = min.max(clip_min);
+            max = max.min(clip_max);
+        }
         if min.cmpge(max).any() {
             return;
         }
@@ -546,5 +573,37 @@ mod tests {
             w.solid(IVec3::new(1, 1, 1)),
             "unknown material ids default solid, never silently pass through"
         );
+    }
+
+    #[test]
+    fn clip_blocks_writes_outside_region() {
+        let mut w = world();
+        w.set_clip(IVec3::new(0, 0, 0), IVec3::new(32, 32, 32));
+
+        // Inside clip region — write succeeds.
+        w.set_voxel(IVec3::new(10, 10, 10), STONE);
+        assert_eq!(w.get_voxel(IVec3::new(10, 10, 10)), STONE);
+
+        // Outside clip region — write silently dropped.
+        w.set_voxel(IVec3::new(40, 10, 10), STONE);
+        assert_eq!(w.get_voxel(IVec3::new(40, 10, 10)), AIR);
+        assert!(!w.chunks().any(|(k, _)| k == IVec3::new(1, 0, 0)),
+            "clip must not allocate chunk outside region");
+
+        // After clearing clip — writes work again.
+        w.clear_clip();
+        w.set_voxel(IVec3::new(40, 10, 10), STONE);
+        assert_eq!(w.get_voxel(IVec3::new(40, 10, 10)), STONE);
+    }
+
+    #[test]
+    fn clip_does_not_block_reads() {
+        let mut w = world();
+        w.set_voxel(IVec3::new(40, 10, 10), STONE);
+        w.set_clip(IVec3::new(0, 0, 0), IVec3::new(32, 32, 32));
+
+        // Read outside clip returns the actual voxel, not air.
+        assert_eq!(w.get_voxel(IVec3::new(40, 10, 10)), STONE);
+        assert!(w.solid(IVec3::new(40, 10, 10)));
     }
 }
