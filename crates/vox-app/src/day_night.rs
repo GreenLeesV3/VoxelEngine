@@ -40,8 +40,6 @@ pub struct DayNightParams {
     pub ambient_sky: Vec3,
     /// Ambient ground tint (warm during day, dim at night).
     pub ambient_ground: Vec3,
-    /// Normalized time of day 0..1.
-    pub time_of_day: f32,
 }
 
 /// Compute lighting parameters from game_time (seconds).
@@ -150,7 +148,6 @@ pub fn compute(game_time: f32) -> DayNightParams {
         ambient_strength,
         ambient_sky,
         ambient_ground,
-        time_of_day: cycle_t / CYCLE_SECS,
     }
 }
 

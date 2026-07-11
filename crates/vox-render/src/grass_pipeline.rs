@@ -7,7 +7,6 @@
 //! is rewritten each frame — like the particle system, not the chunk mesher.
 
 use bytemuck::{Pod, Zeroable};
-use wgpu::util::DeviceExt;
 
 use crate::gpu::{DEPTH_FORMAT, Gpu};
 
