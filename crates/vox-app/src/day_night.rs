@@ -69,13 +69,14 @@ pub fn compute(game_time: f32) -> DayNightParams {
         daylight = clamp01(sun_height * 1.8);
         horizon_glow = clamp01(1.0 - sun_height * 4.0);
     } else if cycle_t < SUNSET_END {
-        // SUNSET: sun descends from the horizon into the start-of-night
-        // depth. Continuous with day end (sin(PI)=0) and night start (-0.3).
+        // SUNSET: sun descends from horizon into night depth.
+        // daylight stays 0 (sun at/below horizon). horizon_glow
+        // ramps 1→0 so the orange tint fades into full dark.
         let sunset_t = (cycle_t - DAY_END) / SUNSET_SECS; // 0..1
         sun_height = sunset_t * -0.3; // 0→-0.3
         azimuth_phase = 1.0; // west
-        daylight = clamp01((1.0 - sunset_t) * 0.6);
-        horizon_glow = 1.0;
+        daylight = 0.0;
+        horizon_glow = 1.0 - sunset_t; // 1→0 (continuous: day ends at glow=1, night starts at glow=0)
     } else if cycle_t < NIGHT_END {
         // NIGHT: sun well below horizon. Starts and ends at -0.3
         // (matching sunset end and sunrise start).
@@ -85,13 +86,14 @@ pub fn compute(game_time: f32) -> DayNightParams {
         daylight = 0.0;
         horizon_glow = 0.0;
     } else {
-        // SUNRISE: sun rises from the start-of-night depth up to the
-        // horizon. Continuous with night end (-0.3) and day start (0).
+        // SUNRISE: sun rises from night depth to horizon.
+        // daylight stays 0 (sun still below/at horizon). horizon_glow
+        // ramps 0→1 so the orange tint builds up into dawn.
         let sunrise_t = (cycle_t - NIGHT_END) / SUNRISE_SECS; // 0..1
         sun_height = -0.3 + sunrise_t * 0.3; // -0.3→0
         azimuth_phase = 0.0; // east
-        daylight = clamp01(sunrise_t * 0.6);
-        horizon_glow = 1.0;
+        daylight = 0.0;
+        horizon_glow = sunrise_t; // 0→1 (continuous: night ends at glow=0, day starts at glow=1)
     }
 
     // Sun azimuth: 0 = east (+X), 1 = west (-X).
@@ -115,21 +117,22 @@ pub fn compute(game_time: f32) -> DayNightParams {
         night_tint
     };
 
-    // Sun strength: zero at night, full at noon.
+    // Sun strength: zero at night, full at noon. Fades smoothly
+    // through sunset and sunrise.
     let sun_strength = daylight.max(0.0) * 0.85;
 
     // Sky color: blue sky during day, dark navy at night, orange at
-    // dawn/dusk (driven by horizon_glow).
+    // dawn/dusk. The transition is driven by daylight (which goes
+    // to 0 at night) and horizon_glow (peaks at sunrise/sunset).
     let day_sky = Vec3::new(0.45, 0.66, 0.90);
     let night_sky = Vec3::new(0.03, 0.04, 0.08);
     let dusk_sky = Vec3::new(0.6, 0.35, 0.2);
-    let sky_color = if sun_height > 0.05 {
-        // Mix in dusk tint based on horizon_glow for warm sunrises/sunsets.
-        day_sky.lerp(dusk_sky, horizon_glow * 0.5).lerp(night_sky, 1.0 - daylight)
-    } else {
-        let glow = clamp01(sun_height + 0.15) / 0.2;
-        night_sky.lerp(dusk_sky, glow * horizon_glow).lerp(day_sky, daylight)
-    };
+    // Blend: night ↔ dusk ↔ day. At daylight=1 → day_sky.
+    // At daylight=0 + horizon_glow=1 → dusk_sky (sunset/sunrise glow).
+    // At daylight=0 + horizon_glow=0 → night_sky (full dark).
+    let sky_color = night_sky
+        .lerp(dusk_sky, horizon_glow)
+        .lerp(day_sky, daylight);
 
     // Fill light: dimmer at night.
     let fill_strength = 0.12 * daylight.max(0.15);
