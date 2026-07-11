@@ -701,7 +701,11 @@ impl VoxApp {
             .map(|m| body_smoke_outlets(body, Voxel(m.0), self.world.cfg.voxel_size_m));
         let voxel_count = (body.grid.dims.x * body.grid.dims.y * body.grid.dims.z) as usize;
         let dispatch = if voxel_count <= INLINE_MESH_VOXEL_BUDGET {
-            let slab = VoxelSlab::from_grid(body.grid.dims, &body.grid.voxels);
+            let slab = VoxelSlab::from_grid_with_damage(
+                body.grid.dims,
+                &body.grid.voxels,
+                &body.grid.damage,
+            );
             let mesh = mesh_slab(&slab, IVec3::ZERO, &self.fluids);
             self.pipeline
                 .upload_body(&self.gpu, (id.slot, id.generation), &mesh);
@@ -711,6 +715,7 @@ impl VoxApp {
                 (id.slot, id.generation),
                 body.grid.dims,
                 body.grid.voxels.clone(),
+                body.grid.damage.clone(),
                 &self.fluids,
             );
             MeshDispatch::Async

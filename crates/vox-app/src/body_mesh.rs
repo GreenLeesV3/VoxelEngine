@@ -51,13 +51,14 @@ impl BodyMeshQueue {
         key: BodyMeshKey,
         dims: IVec3,
         voxels: Vec<Voxel>,
+        damage: Vec<f32>,
         fluids: &[Voxel],
     ) {
         let tx = self.tx.clone();
         self.in_flight += 1;
         let fluids = fluids.to_vec();
         rayon::spawn(move || {
-            let slab = VoxelSlab::from_grid(dims, &voxels);
+            let slab = VoxelSlab::from_grid_with_damage(dims, &voxels, &damage);
             // Zero seed: a body has no meaningful "world origin" (it moves),
             // so the jitter pattern is anchored to its own local grid only.
             let mesh = mesh_slab(&slab, IVec3::ZERO, &fluids);

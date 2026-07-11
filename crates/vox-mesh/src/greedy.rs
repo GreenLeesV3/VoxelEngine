@@ -176,6 +176,21 @@ pub fn mesh_slab(slab: &VoxelSlab, jitter_seed: IVec3, fluids: &[Voxel]) -> Mesh
                                 slab.opaque(outer + u_off + v_off, fluids),
                             );
                         }
+                        // Darken AO by per-voxel damage: the shader's AO
+                        // term is `0.45 + 0.55 * ao`, so reducing a fully-
+                        // open corner (ao=3) toward 0 visibly darkens the
+                        // voxel. Damage 1.0 halves AO (3 -> 1, ~0.63x
+                        // brightness); damage 0.0 is a no-op. Because
+                        // `Cell::eq` compares ao4, damaged and pristine
+                        // voxels won't greedy-merge -- the damage boundary
+                        // shows as a natural seam, not a smear.
+                        let dmg = slab.damage_at(p);
+                        if dmg > 0.0 {
+                            let factor = 1.0 - dmg * 0.5;
+                            for ao in &mut ao4 {
+                                *ao = (*ao as f32 * factor) as u8;
+                            }
+                        }
                         // Compute water column depth: for water faces,
                         // count same-material voxels below (Y down) until
                         // a different material or out of bounds. This is
