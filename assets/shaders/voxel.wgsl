@@ -35,7 +35,7 @@ struct Inst {
 };
 
 struct VIn {
-    @location(0) pos_ao: vec4<u32>,   // x, y, z corner (voxel units), ao 0..3
+    @location(0) pos_ao: vec4<u32>,   // x, y, z corner (voxel units), w = packed AO(0-3) | skylight(<<4)
     @location(1) norm_mat: vec4<u32>, // normal id, jitter 0..255, material lo, material hi
 };
 
@@ -43,6 +43,8 @@ struct VOut {
     @builtin(position) clip: vec4f,
     @location(0) color: vec3f,
     @location(1) world_normal: vec3f,
+    // Packed in the low byte: bits 0-1 = corner AO (0..3), bits 4-7 =
+    // skylight (0..=15). Unpacked in the fragment shader.
     @location(2) ao: f32,
     @location(3) world_pos: vec3f,
     @location(4) @interpolate(flat) mat_id: u32,
@@ -184,9 +186,9 @@ fn vs(v: VIn, inst: Inst) -> VOut {
     // world's actual sun direction: it looks like the light is glued to the
     // object and spinning with it. Rotating the normal by the model matrix
     // here (translation-free, via w=0) fixes that for both cases uniformly.
+    out.ao = f32(v.pos_ao.w);  // packed AO + skylight byte
     let local_n = face_normal(v.norm_mat.x);
     out.world_normal = normalize((model * vec4f(local_n, 0.0)).xyz);
-    out.ao = f32(v.pos_ao.w) / 3.0;
     out.world_pos = wp;
     out.mat_id = mat_id;
     return out;
@@ -261,9 +263,16 @@ fn fs(in: VOut) -> @location(0) vec4f {
 
     let hemi_t = clamp(0.5 + 0.5 * n.y, 0.0, 1.0);
     // Ambient uses sky tint: shadow areas get sky-colored ambient (not flat gray)
-    let ambient = mix(cam.ambient_ground.xyz, cam.ambient_sky.xyz * shadow_tint, hemi_t) * cam.fog.w;
+    var ambient = mix(cam.ambient_ground.xyz, cam.ambient_sky.xyz * shadow_tint, hemi_t) * cam.fog.w;
 
-    let ao = 0.45 + 0.55 * in.ao;
+    // Unpack AO (bits 0-1, 0..3) and skylight (bits 4-7, 0..=15) from the
+    // packed vertex byte. Skylight attenuates ambient so enclosed/underground
+    // voxels are dimmer than open-sky ones, with a floor so they're not black.
+    let ao_raw = u32(in.ao);
+    let ao = 0.45 + 0.55 * (f32(ao_raw & 3u) / 3.0);
+    let skylight = f32((ao_raw >> 4u) & 15u) / 15.0;
+    ambient = ambient * mix(0.3, 1.0, skylight);
+
     // Apply per-face shade: multiply final lit color by face brightness
     var c = in.color * (ambient + sun + vec3f(fill)) * ao * mix(1.0, face_shade, cam.sun_dir.w);
 

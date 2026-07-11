@@ -14,12 +14,16 @@ use crate::slab::VoxelSlab;
 /// One mesh vertex, 8 bytes. Positions are voxel-corner coordinates relative
 /// to the slab's inner minimum (`0..=dims`), scaled by `voxel_size` and
 /// transformed in the shader.
+///
+/// The `ao` byte packs two fields: bits 0-1 are the corner AO level (0..=3),
+/// bits 4-7 are the skylight level (0..=15, 15 = open sky). Bits 2-3 are
+/// unused. The shader extracts both with bitmask ops.
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VoxelVertex {
     /// Corner position in voxel units, relative to the region minimum.
     pub pos: [u8; 3],
-    /// Ambient-occlusion level, `0` (fully occluded) ..= `3` (open).
+    /// Packed AO (bits 0-1, 0..=3) and skylight (bits 4-7, 0..=15).
     pub ao: u8,
     /// Face normal id: 0..6 = +X, -X, +Y, -Y, +Z, -Z.
     pub normal: u8,
@@ -74,9 +78,10 @@ fn ao(side1: bool, side2: bool, corner: bool) -> u8 {
 }
 
 /// A meshable face cell: merged only with cells equal in material AND all
-/// four corner AO values. Water depth is NOT part of the merge comparison
-/// (it varies across a surface over uneven terrain) — merged quads take
-/// the first cell's depth, which is less precise but keeps mesh density low.
+/// four corner AO values AND skylight. Water depth is NOT part of the merge
+/// comparison (it varies across a surface over uneven terrain) — merged
+/// quads take the first cell's depth, which is less precise but keeps mesh
+/// density low.
 #[derive(Copy, Clone)]
 struct Cell {
     material: Voxel,
@@ -87,11 +92,16 @@ struct Cell {
     /// non-water materials. Used by the shader for depth-based water
     /// darkening (stored in the jitter field for water faces).
     water_depth: u8,
+    /// Skylight level (0..=15): how many air voxels are above this face's
+    /// voxel before hitting something solid (or the slab top). 15 = open
+    /// sky, 0 = enclosed/underground. Packed into the vertex `ao` byte's
+    /// upper nibble so the shader can attenuate ambient light by it.
+    skylight: u8,
 }
 
 impl PartialEq for Cell {
     fn eq(&self, other: &Self) -> bool {
-        self.material == other.material && self.ao4 == other.ao4
+        self.material == other.material && self.ao4 == other.ao4 && self.skylight == other.skylight
     }
 }
 
@@ -127,6 +137,27 @@ fn jitter_hash(seed: IVec3, local: [u8; 3]) -> u8 {
     x = x.wrapping_mul(0x297a_2d39);
     x ^= x >> 15;
     (x & 0xFF) as u8
+}
+
+/// Skylight at a face voxel: count air voxels above `p` (starting at
+/// `p.y + 1`) until hitting something solid or the slab's top padding row
+/// (`inner_dims.y`). Capped at 15. This is a simple top-down column scan --
+/// no horizontal propagation -- so voxels under overhangs get a gradient
+/// (air gap depth) and fully enclosed voxels get 0. Water (material 9) is
+/// treated as transparent to skylight, matching its visual translucency.
+#[inline]
+fn skylight_above(slab: &VoxelSlab, p: IVec3) -> u8 {
+    let top = slab.inner_dims.y;
+    let mut count: u8 = 0;
+    let mut y = p.y + 1;
+    while y <= top && count < 15 {
+        if slab.opaque(IVec3::new(p.x, y, p.z)) {
+            break;
+        }
+        count += 1;
+        y += 1;
+    }
+    count
 }
 
 /// Greedy-mesh a slab into quads. `jitter_seed` anchors the baked per-vertex
@@ -228,6 +259,7 @@ pub fn mesh_slab(
                             material: mat,
                             ao4,
                             water_depth: depth,
+                            skylight: skylight_above(slab, p),
                         })
                     } else {
                         None
@@ -310,7 +342,7 @@ fn emit_quad(
     for (i, pos) in positions.into_iter().enumerate() {
         mesh.vertices.push(VoxelVertex {
             pos,
-            ao: cell.ao4[i],
+            ao: cell.ao4[i] | (cell.skylight << 4),
             normal: normal_id,
             jitter: if cell.material == water_voxel { cell.water_depth } else { jitter_hash(jitter_seed, pos) },
             material: cell.material.0,
@@ -462,7 +494,11 @@ mod tests {
         }
         let slab = slab_of(dims, &solids);
         let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
-        assert_eq!(mesh.quads(), 6, "each full face merges into one quad");
+        // Skylight splits each side face at the top row (the topmost voxel
+        // sees air above in the padding, so skylight=1; the rest see solid
+        // above, skylight=0). Top and bottom faces are uniform. So: 2 caps
+        // + 4 sides × 2 = 10 quads, not 6.
+        assert_eq!(mesh.quads(), 10, "skylight seam splits side faces at the top row");
         // Corner coordinates must span the whole region.
         let max = mesh.vertices.iter().map(|v| v.pos[0]).max().unwrap();
         assert_eq!(max, 32);
@@ -599,8 +635,8 @@ mod tests {
             .filter(|v| v.normal == 2 && v.pos[1] == 1)
             .collect();
         assert!(!top_floor.is_empty(), "floor top faces exist");
-        let occluded = top_floor.iter().filter(|v| v.ao < 3).count();
-        let open = top_floor.iter().filter(|v| v.ao == 3).count();
+        let occluded = top_floor.iter().filter(|v| (v.ao & 3) < 3).count();
+        let open = top_floor.iter().filter(|v| (v.ao & 3) == 3).count();
         assert!(occluded > 0, "vertices near the wall must darken");
         assert!(open > 0, "vertices away from the wall must stay open");
 
@@ -614,6 +650,59 @@ mod tests {
             top_quads > 1,
             "AO seam must prevent merging into a single quad"
         );
+    }
+
+    /// Skylight: a top face under open sky gets skylight > 0, while a side
+    /// face of a voxel buried under a solid block gets skylight=0. Values
+    /// are packed into the upper nibble of the vertex `ao` byte.
+    #[test]
+    fn skylight_open_vs_enclosed() {
+        // An L-shaped structure: a floor voxel at (0,0,0) with open air
+        // above, and a 2-tall pillar at (2,0,0)+(2,1,0). The bottom voxel
+        // of the pillar (2,0,0) has solid directly above it, so its -Z
+        // side face (normal 4) has skylight=0. The isolated floor voxel's
+        // top face (0,0,0) has skylight > 0.
+        let slab = slab_of(
+            IVec3::new(4, 3, 3),
+            &[
+                (IVec3::new(0, 0, 0), STONE), // open above
+                (IVec3::new(2, 0, 0), STONE), // buried (solid above)
+                (IVec3::new(2, 1, 0), STONE), // covers (2,0,0)
+            ],
+        );
+        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), None);
+
+        // Top face (+Y, normal 2) of (0,0,0): plane at y=1. Corner (1,1,1).
+        // Air above → skylight > 0.
+        let open_top: Vec<&VoxelVertex> = mesh
+            .vertices
+            .iter()
+            .filter(|v| v.normal == 2 && v.pos[0] == 1 && v.pos[1] == 1 && v.pos[2] == 1)
+            .collect();
+        assert!(!open_top.is_empty(), "open-sky top face exists");
+        for v in &open_top {
+            let sky = (v.ao >> 4) & 0xF;
+            assert!(sky > 0, "open-sky top must have skylight > 0, got {sky}");
+        }
+
+        // -Z face (normal 5) of (2,0,0): plane at z=0. Corner (3,1,0).
+        // Voxel above (2,1,0) is solid → skylight=0. This face is unique
+        // to the bottom voxel (the top voxel (2,1,0) has its -Z face at
+        // z=0 too, but its corners are at y=1..2, not y=0..1). The corner
+        // (3,1,0) is at the top edge of the bottom voxel's -Z face.
+        // However (3,1,0) is also the bottom edge of the top voxel's -Z
+        // face. To disambiguate, use the bottom corner (2,0,0) which is
+        // unique to the bottom voxel.
+        let enclosed_side: Vec<&VoxelVertex> = mesh
+            .vertices
+            .iter()
+            .filter(|v| v.normal == 5 && v.pos[0] == 2 && v.pos[1] == 0 && v.pos[2] == 0)
+            .collect();
+        assert!(!enclosed_side.is_empty(), "enclosed side face exists");
+        for v in &enclosed_side {
+            let sky = (v.ao >> 4) & 0xF;
+            assert_eq!(sky, 0, "enclosed side must have skylight 0, got {sky}");
+        }
     }
 
     #[test]
