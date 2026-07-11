@@ -676,6 +676,50 @@ impl VoxApp {
         tracing::info!(?id, ?origin_m, "spawned debris body");
     }
 
+    /// Spawn a rope: 5 segments of 2×2×5 rope voxels (20 voxels each),
+    /// connected by joints, hanging from a point above the player.
+    fn spawn_rope(&mut self) {
+        let rope_voxel = self.registry.id_by_name("rope").map(|m| Voxel(m.0));
+        let Some(rope_voxel) = rope_voxel else {
+            tracing::warn!("rope material not found, cannot spawn rope");
+            return;
+        };
+
+        let voxel_size = self.world.cfg.voxel_size_m;
+        let seg_dims = IVec3::new(2, 5, 2);
+        let seg_voxels = vec![rope_voxel; (2 * 5 * 2) as usize]; // 20 voxels
+        let seg_height_m = 5.0 * voxel_size; // 0.5m at 0.1m scale
+        let half_height = seg_height_m * 0.5; // 0.25m
+
+        // Spawn point: 3m above eye level, 2m forward along look direction.
+        let base_pos = self.player.eye(1.0) + Vec3::new(0.0, 3.0, 0.0) + self.player.look_dir() * 2.0;
+
+        let mut prev_id: Option<BodyId> = None;
+
+        for i in 0..5 {
+            // Stack segments vertically, top segment first.
+            let seg_center = base_pos + Vec3::new(0.0, -i as f32 * seg_height_m, 0.0);
+            let grid = VoxelGrid::new(seg_dims, seg_voxels.clone());
+            let Some(body) = Body::from_grid(grid, &self.registry, voxel_size, seg_center)
+            else {
+                continue;
+            };
+            let id = self.phys.spawn(body);
+            self.upload_debris_mesh(id);
+
+            if let Some(prev) = prev_id {
+                // Connect bottom of previous segment to top of this segment.
+                let anchor_prev = Vec3::new(0.0, -half_height, 0.0);
+                let anchor_this = Vec3::new(0.0, half_height, 0.0);
+                self.phys.add_joint(prev, id, anchor_prev, anchor_this, 0.0);
+            }
+
+            prev_id = Some(id);
+        }
+
+        tracing::info!(?prev_id, "spawned 5-segment rope");
+    }
+
     /// Mesh and upload an already-spawned body's GPU representation. Every
     /// path that calls `phys.spawn` must follow up with this — a body with
     /// no uploaded mesh is simulated (falls, collides, sleeps) but never
@@ -1476,6 +1520,9 @@ impl App for VoxApp {
         if input.key_pressed(KeyCode::KeyB) {
             let origin = self.player.eye(1.0) + self.player.look_dir() * 4.0;
             self.spawn_debris(origin, 4, self.player.look_dir() * 8.0);
+        }
+        if input.key_pressed(KeyCode::KeyT) {
+            self.spawn_rope();
         }
         if input.key_pressed(KeyCode::KeyX) {
             let removed = self.phys.clear_sleeping();
