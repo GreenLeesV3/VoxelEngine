@@ -19,6 +19,48 @@ const WHEEL_PIXELS_PER_LINE: f32 = 16.0;
 /// Fed by the platform loop via [`InputState::handle_window_event`] /
 /// [`InputState::handle_device_event`]; per-frame edges and deltas are
 /// cleared by [`InputState::end_frame`] after the app has run.
+/// Gamepad button identifiers matching common controller layouts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GamepadButton {
+    /// A / Cross (bottom face button)
+    South,
+    /// B / Circle (right face button)
+    East,
+    /// X / Square (left face button)
+    West,
+    /// Y / Triangle (top face button)
+    North,
+    /// Left shoulder / L1
+    LeftShoulder,
+    /// Right shoulder / R1
+    RightShoulder,
+    /// Left trigger / L2
+    LeftTrigger,
+    /// Right trigger / R2
+    RightTrigger,
+    /// Select / Back / Share
+    Select,
+    /// Start / Options
+    Start,
+    /// Left stick press / L3
+    LeftStick,
+    /// Right stick press / R3
+    RightStick,
+    /// D-pad up
+    DpadUp,
+    /// D-pad down
+    DpadDown,
+    /// D-pad left
+    DpadLeft,
+    /// D-pad right
+    DpadRight,
+}
+
+/// Snapshot of input state for the current frame.
+///
+/// Fed by the platform loop via [`InputState::handle_window_event`] /
+/// [`InputState::handle_device_event`]; per-frame edges and deltas are
+/// cleared by [`InputState::end_frame`] after the app has run.
 #[derive(Debug, Default)]
 pub struct InputState {
     keys_down: HashSet<KeyCode>,
@@ -31,6 +73,22 @@ pub struct InputState {
     /// Scroll wheel movement this frame, in lines (positive = scroll up /
     /// away from the user).
     pub wheel_delta: f32,
+    /// Left stick: (-1..=1 left/right, -1..=1 down/up). Zero when no
+    /// gamepad or stick centered.
+    pub left_stick: Vec2,
+    /// Right stick: (-1..=1 left/right, -1..=1 down/up). Used for camera
+    /// look in Mario mode.
+    pub right_stick: Vec2,
+    /// Left trigger (0..=1), 0 when not pressed.
+    pub left_trigger: f32,
+    /// Right trigger (0..=1), 0 when not pressed.
+    pub right_trigger: f32,
+    /// Gamepad buttons currently held.
+    gamepad_buttons_down: HashSet<GamepadButton>,
+    /// Gamepad buttons pressed this frame (edge).
+    gamepad_pressed_this_frame: HashSet<GamepadButton>,
+    /// True when a gamepad is connected and producing input.
+    pub gamepad_connected: bool,
 }
 
 impl InputState {
@@ -57,6 +115,107 @@ impl InputState {
     /// True only on the frame the mouse button transitioned to pressed.
     pub fn mouse_clicked(&self, button: MouseButton) -> bool {
         self.clicked_this_frame.contains(&button)
+    }
+
+    /// True while a gamepad button is held.
+    pub fn gamepad_down(&self, button: GamepadButton) -> bool {
+        self.gamepad_buttons_down.contains(&button)
+    }
+
+    /// True only on the frame a gamepad button was pressed.
+    pub fn gamepad_pressed(&self, button: GamepadButton) -> bool {
+        self.gamepad_pressed_this_frame.contains(&button)
+    }
+
+    /// Apply a deadzone to a stick value: returns 0.0 if the magnitude
+    /// is below the threshold, otherwise rescales to fill the 0..1 range.
+    fn apply_deadzone(v: Vec2, dz: f32) -> Vec2 {
+        let mag = v.length();
+        if mag < dz {
+            return Vec2::ZERO;
+        }
+        // Rescale so the edge of the deadzone maps to 0 and full
+        // deflection maps to 1, giving smooth control across the range.
+        let scale = (mag - dz) / (1.0 - dz) / mag;
+        v * scale
+    }
+
+    /// Poll gilrs for gamepad events and update gamepad state. Called
+    /// once per frame by the platform loop before `app.frame()`.
+    pub fn poll_gamepad(&mut self, gilrs: &mut gilrs::Gilrs) {
+        // Process events (connect/disconnect)
+        while let Some(gilrs::Event { event, .. }) = gilrs.next_event() {
+            if let gilrs::EventType::Connected = event {
+                tracing::info!("Gamepad connected");
+            }
+        }
+
+        // Find the first connected gamepad
+        let Some(gamepad) = gilrs
+            .gamepads()
+            .find(|(_, gp)| gp.is_connected())
+            .map(|(_, gp)| gp)
+        else {
+            self.gamepad_connected = false;
+            self.left_stick = Vec2::ZERO;
+            self.right_stick = Vec2::ZERO;
+            self.left_trigger = 0.0;
+            self.right_trigger = 0.0;
+            self.gamepad_buttons_down.clear();
+            self.gamepad_pressed_this_frame.clear();
+            return;
+        };
+
+        self.gamepad_connected = true;
+
+        // Sticks — gilrs uses -1..=1 with +Y up. We use +Y up too.
+        const STICK_DZ: f32 = 0.15;
+        let lx = gamepad.value(gilrs::Axis::LeftStickX);
+        let ly = gamepad.value(gilrs::Axis::LeftStickY);
+        let rx = gamepad.value(gilrs::Axis::RightStickX);
+        let ry = gamepad.value(gilrs::Axis::RightStickY);
+        self.left_stick = Self::apply_deadzone(Vec2::new(lx, ly), STICK_DZ);
+        self.right_stick = Self::apply_deadzone(Vec2::new(rx, ry), STICK_DZ);
+
+        // Triggers — 0..=1
+        self.left_trigger = gamepad.value(gilrs::Axis::LeftZ).max(0.0);
+        self.right_trigger = gamepad.value(gilrs::Axis::RightZ).max(0.0);
+
+        // Map gilrs buttons to our GamepadButton enum
+        let button_map = [
+            (gilrs::Button::South, GamepadButton::South),
+            (gilrs::Button::East, GamepadButton::East),
+            (gilrs::Button::West, GamepadButton::West),
+            (gilrs::Button::North, GamepadButton::North),
+            (gilrs::Button::LeftTrigger, GamepadButton::LeftShoulder),
+            (gilrs::Button::RightTrigger, GamepadButton::RightShoulder),
+            (gilrs::Button::LeftTrigger2, GamepadButton::LeftTrigger),
+            (gilrs::Button::RightTrigger2, GamepadButton::RightTrigger),
+            (gilrs::Button::Select, GamepadButton::Select),
+            (gilrs::Button::Start, GamepadButton::Start),
+            (gilrs::Button::LeftThumb, GamepadButton::LeftStick),
+            (gilrs::Button::RightThumb, GamepadButton::RightStick),
+            (gilrs::Button::DPadUp, GamepadButton::DpadUp),
+            (gilrs::Button::DPadDown, GamepadButton::DpadDown),
+            (gilrs::Button::DPadLeft, GamepadButton::DpadLeft),
+            (gilrs::Button::DPadRight, GamepadButton::DpadRight),
+        ];
+
+        let mut new_down = HashSet::new();
+        for (gb, our_btn) in &button_map {
+            if gamepad.is_pressed(*gb) {
+                new_down.insert(*our_btn);
+            }
+        }
+
+        // Detect newly pressed buttons (edge detection)
+        for btn in &new_down {
+            if !self.gamepad_buttons_down.contains(btn) {
+                self.gamepad_pressed_this_frame.insert(*btn);
+            }
+        }
+
+        self.gamepad_buttons_down = new_down;
     }
 
     /// Feed a winit window event (keyboard, mouse buttons, wheel, focus).
@@ -87,14 +246,12 @@ impl InputState {
             self.mouse_delta += Vec2::new(*dx as f32, *dy as f32);
         }
     }
-
-    /// Clear per-frame edges and deltas. The platform loop calls this after
-    /// the app's frame callback; held-key state persists.
     pub fn end_frame(&mut self) {
         self.pressed_this_frame.clear();
         self.clicked_this_frame.clear();
         self.mouse_delta = Vec2::ZERO;
         self.wheel_delta = 0.0;
+        self.gamepad_pressed_this_frame.clear();
     }
 
     fn on_key(&mut self, key: KeyCode, state: ElementState) {

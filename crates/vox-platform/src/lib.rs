@@ -14,7 +14,7 @@
 pub mod input;
 pub mod time;
 
-pub use input::InputState;
+pub use input::{GamepadButton, InputState};
 pub use time::{FrameClock, FrameTiming};
 
 use std::sync::Arc;
@@ -103,6 +103,10 @@ pub fn run_app(
 
     let mut app = build(Arc::clone(&window)).map_err(PlatformError::AppBuild)?;
     let mut input = InputState::new();
+    let mut gilrs = gilrs::Gilrs::new().ok();
+    if gilrs.is_none() {
+        tracing::warn!("Gamepad support unavailable (gilrs init failed) — keyboard/mouse only");
+    }
     let mut clock = FrameClock::new(fixed_dt);
 
     let smoke_frames = read_smoke_frames();
@@ -131,8 +135,11 @@ pub fn run_app(
                     if minimized {
                         return;
                     }
-                    let timing = clock.tick();
-                    let control = app.frame(&mut input, timing);
+                let timing = clock.tick();
+                if let Some(g) = &mut gilrs {
+                    input.poll_gamepad(g);
+                }
+                let control = app.frame(&mut input, timing);
                     input.end_frame();
                     if control == FrameControl::Exit {
                         elwt.exit();

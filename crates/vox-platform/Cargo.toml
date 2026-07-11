@@ -10,3 +10,4 @@ winit = { workspace = true }
 glam = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+gilrs = { workspace = true }

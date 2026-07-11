@@ -243,11 +243,22 @@ impl MarioMode {
             cam_look_z: self.cam_look_z(),
             stick_x: stick.x,
             stick_y: stick.y,
-            button_a: input.key_down(KeyCode::Space),
-            button_b: input.key_down(KeyCode::KeyJ) || input.key_down(KeyCode::KeyB),
-            button_z: input.key_down(KeyCode::ShiftLeft) || input.key_down(KeyCode::KeyK),
+            // A (jump): Space, or gamepad A (South) — matches sm64 decomp
+            button_a: input.key_down(KeyCode::Space)
+                || input.gamepad_down(vox_platform::GamepadButton::South),
+            // B (attack): J/B, or gamepad X (West) — matches sm64 decomp
+            // which maps B to SDL_CONTROLLER_BUTTON_X, not B/East.
+            button_b: input.key_down(KeyCode::KeyJ)
+                || input.key_down(KeyCode::KeyB)
+                || input.gamepad_down(vox_platform::GamepadButton::West),
+            // Z (crouch/ground pound): Shift/K, or gamepad Left Shoulder
+            // (LB) OR Left Trigger (LT) — matches sm64 decomp which maps
+            // Z to both LEFTSHOULDER and TRIGGERLEFT.
+            button_z: input.key_down(KeyCode::ShiftLeft)
+                || input.key_down(KeyCode::KeyK)
+                || input.gamepad_down(vox_platform::GamepadButton::LeftShoulder)
+                || input.gamepad_down(vox_platform::GamepadButton::LeftTrigger),
         };
-
         let mut ticks_this_frame = 0;
         while self.tick_accumulator >= tick_dt && ticks_this_frame < 3 {
             self.tick_accumulator -= tick_dt;
@@ -448,11 +459,15 @@ impl MarioMode {
         self.cam_yaw.cos()
     }
 
-    /// Map WASD to an analog stick vector (camera-relative).
-    /// Full stick deflection (1.0) — Mario runs at native SM64 speed.
-    /// At 1m voxel scale, Mario's ~5m height and ~5 m/s run speed
-    /// feel natural relative to the terrain.
     fn movement_stick(&self, input: &vox_platform::InputState) -> glam::Vec2 {
+        // Gamepad: use left stick directly (already deadzoned + scaled).
+        if input.gamepad_connected && input.left_stick.length_squared() > 0.0 {
+            // SM64 stick: x = left/right, y = up/down. gilrs: +Y = up.
+            // SM64 convention: negate X (like the keyboard mapping below).
+            return glam::Vec2::new(-input.left_stick.x, input.left_stick.y);
+        }
+
+        // Keyboard fallback: WASD → digital stick
         const STICK_SCALE: f32 = 1.0;
         let mut x: f32 = 0.0;
         let mut y: f32 = 0.0;

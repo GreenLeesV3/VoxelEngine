@@ -34,6 +34,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 pollster = "0.3"
+gilrs = "0.11"
 
 [profile.dev]
 opt-level = 1

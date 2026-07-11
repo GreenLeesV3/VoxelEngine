@@ -1208,7 +1208,9 @@ impl App for VoxApp {
         if input.key_pressed(KeyCode::F3) {
             self.debug_visible = !self.debug_visible;
         }
-        if input.key_pressed(KeyCode::KeyM) {
+        if input.key_pressed(KeyCode::KeyM)
+            || input.gamepad_pressed(vox_platform::GamepadButton::Start)
+        {
             self.toggle_mario_mode();
         }
         if input.key_pressed(KeyCode::KeyE) {
@@ -1248,6 +1250,11 @@ impl App for VoxApp {
             // Mario mode: mouse look controls the third-person camera
             if self.grabbed {
                 self.mario_mode.as_mut().unwrap().look(input.mouse_delta);
+            }
+            // Right stick camera look (gamepad) — applies regardless of
+            // mouse grab so a controller-only session works.
+            if input.gamepad_connected && input.right_stick.length_squared() > 0.0 {
+                self.mario_mode.as_mut().unwrap().look(input.right_stick * 20.0);
             }
             // Tick Mario's simulation
             mario_pos = self
