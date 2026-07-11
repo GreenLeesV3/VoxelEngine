@@ -1,5 +1,0 @@
-#version 330 compatibility
-
-#define END_SHADER
-
-#include "/program/composite3.fsh"
