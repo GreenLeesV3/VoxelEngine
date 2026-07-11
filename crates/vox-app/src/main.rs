@@ -1594,6 +1594,20 @@ impl App for VoxApp {
             impacts
         };
         self.apply_impact_fracture(impacts);
+        // Re-mesh debris bodies whose damage changed this frame (sub-threshold
+        // impacts set damage_dirty via apply_body_damage's in-place path).
+        let damage_dirty_ids: Vec<BodyId> = self
+            .phys
+            .iter()
+            .filter(|(_, b)| b.damage_dirty)
+            .map(|(id, _)| id)
+            .collect();
+        for id in damage_dirty_ids {
+            self.upload_debris_mesh(id);
+            if let Some(body) = self.phys.get_mut(id) {
+                body.damage_dirty = false;
+            }
+        }
         self.enforce_debris_budget();
         self.expire_clutter(timing.physics_steps as f32 * vox_core::consts::PHYSICS_DT);
         // Replay: record (throttled internally to 1/sec) or apply the next
