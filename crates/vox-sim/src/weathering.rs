@@ -768,18 +768,15 @@ mod tests {
     }
     #[test]
     fn a_fully_settled_polluted_lake_reaches_zero_tracked_cells() {
-        // The sleep guarantee, extended to the full pollution lifecycle:
-        // mud dissolves → muddy_water, pollution diffuses, muddy_water
-        // settles → water + sand, and eventually ALL weathering maps drain
-        // to empty and the fluid sleeps. Steady state costs nothing.
-        //
+        // The sleep guarantee, extended to the full pollution lifecycle.
         // Geometry: a single mud cell on a stone floor with a muddy_water
         // cell above it, contained by stone walls so nothing flows sideways.
-        // The muddy_water is "wet" so the mud dissolves; both muddy_water
-        // cells then settle to water. The upper cell clarifies first (it
-        // started settling earlier); the lower cell settles before the
-        // upper cell's polluting timer reaches its threshold, so polluting
-        // drains without completing — the cycle terminates.
+        // The muddy_water is "wet" so the mud starts dissolving. With the
+        // fluid-conservation fix, the mud erodes to AIR (consumed) — there's
+        // no clean water to pollute, only muddy_water, so the dissolve is a
+        // silent no-op for pollution (the sediment is already suspended in
+        // the adjacent muddy_water). The muddy_water settles → water + sand.
+        // All weathering maps drain to empty and the fluid sleeps.
         let mut world = world_with_floor(STONE);
         world.set_solid_table(vec![false, false, true, true, true, true, true, false]);
         let mud_cell = IVec3::new(8, 4, 8);
@@ -801,9 +798,8 @@ mod tests {
         for (min, max) in world.drain_dirty_regions() {
             sim.wake_region(&world, min, max);
         }
-        // Run until everything settles: mud dissolves → muddy_water,
-        // muddy_water settles → water + sand, polluting starts then drains,
-        // eventually steady state.
+        // Run until everything settles: mud erodes to air, muddy_water
+        // settles → water + sand, eventually steady state.
         for _ in 0..((MUD_DISSOLVE_TICKS + MUDDY_SETTLE_TICKS + POLLUTE_SPREAD_TICKS) * 3) {
             sim.tick(&mut world);
             let events = sim.drain_events();
