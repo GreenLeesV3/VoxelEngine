@@ -65,7 +65,7 @@ fn vs_main(in: VIn) -> VOut {
 fn fs_main(in: VOut) -> @location(0) vec4f {
     let normal = normalize(in.world_normal);
     let sun_dir = normalize(cam.sun_dir.xyz);
-    let ndotl = dot(normal, -sun_dir);
+    let ndotl = dot(normal, sun_dir);
 
     // Cel-shading: 4-band quantization matching voxel.wgsl (#71).
     let raw = clamp(ndotl * 0.5 + 0.5, 0.0, 1.0);

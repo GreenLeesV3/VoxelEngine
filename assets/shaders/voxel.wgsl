@@ -204,7 +204,7 @@ fn fs(in: VOut) -> @location(0) vec4f {
     if (water_pass == 1u && in.mat_id != 9u) { discard; }
 
     let n = normalize(in.world_normal);
-    let ndotl = dot(n, -cam.sun_dir.xyz);
+    let ndotl = dot(n, cam.sun_dir.xyz);
     // Half-Lambert wrap: softens the sun terminator into a gradient.
     // Cel-shading: quantize into 4 bands with smooth transitions for a
     // painterly, comic-book look (design doc §3).

@@ -103,15 +103,13 @@ fn fs(in: VOut) -> @location(0) vec4f {
     let sun_angle = acos(clamp(cos_angle, -1.0, 1.0));
     let sun_disc = exp(-sun_angle * sun_angle * 800.0); // sharp gaussian
     let sun_glow = sun_disc * 3.0;
-    // Sun disc always visible during day (not multiplied by sun_strength
-    // which would zero it out). Use max(strength, 0.3) so even near
-    // dusk the disc is visible.
-    let disc_visibility = max(sun_strength, 0.3);
-    sky += cam.sun_color.xyz * sun_glow * disc_visibility;
+    // Sun disc visible during day, fades at sunset, invisible at night.
+    // Tied directly to sun_strength so the disc disappears as the sun sets.
+    sky += cam.sun_color.xyz * sun_glow * sun_strength;
 
-    // Sun halo — softer glow around the disc.
+    // Sun halo — softer glow around the disc, fades with the sun.
     let halo = exp(-sun_angle * sun_angle * 80.0) * 0.4;
-    sky += cam.sun_color.xyz * halo * disc_visibility;
+    sky += cam.sun_color.xyz * halo * sun_strength;
 
     // Stars at night — snap direction to a grid to prevent shimmer.
     if (sun_strength < 0.15) {

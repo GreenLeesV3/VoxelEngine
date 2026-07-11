@@ -936,10 +936,10 @@ impl ShadowPipeline {
     /// covered; far plane is placed well beyond the box depth to avoid
     /// clipping.
     pub fn write_camera(&self, gpu: &Gpu, sun_dir: Vec3, focus: Vec3, voxel_size_m: f32) {
-        // `sun_dir` points TOWARD the sun (as day_night defines it; the
-        // voxel shader uses `-sun_dir` as the light-travel vector). The
-        // shadow camera must look along the light-travel direction, i.e.
-        // from the sun toward the scene, so `light_dir = -sun_dir`.
+        // `sun_dir` points TOWARD the sun. The voxel shader uses
+        // `dot(normal, sun_dir)` for lighting (surfaces facing the sun
+        // are lit). The shadow camera looks along the light-travel
+        // direction (from sun toward scene), so `light_dir = -sun_dir`.
         let dir = sun_dir.normalize_or_zero();
         let light_dir = if dir.length_squared() < 1e-4 {
             // Degenerate fallback: a steep downward angle.
