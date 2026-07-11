@@ -206,33 +206,51 @@ fn fs(in: VOut) -> @location(0) vec4f {
     let n = normalize(in.world_normal);
     let ndotl = dot(n, cam.sun_dir.xyz);
     // Half-Lambert wrap: softens the sun terminator into a gradient.
+    let raw = clamp(ndotl * 0.5 + 0.5, 0.0, 1.0);
     // Cel-shading: quantize into 4 bands with smooth transitions for a
     // painterly, comic-book look (design doc §3).
-    let raw = clamp(ndotl * 0.5 + 0.5, 0.0, 1.0);
     let bands = 4.0;
     let quantized = floor(raw * bands + 0.5) / bands;
     let smooth_q = mix(quantized, raw, smoothstep(0.45, 0.55, fract(raw * bands)));
-    var sun = pow(smooth_q, 1.5) * cam.sun_dir.w * cam.sun_color.xyz;
+
+    // Per-face shade (CazToon-style): each face direction gets a fixed
+    // brightness multiplier for a crisp, directional block look.
+    // bottom=0.5, top=1.0, north/south=0.8, east/west=0.6
+    let abs_n = abs(n);
+    var face_shade: f32 = 0.8; // default for Z faces
+    if (abs_n.y > abs_n.x && abs_n.y > abs_n.z) {
+        face_shade = select(0.5, 1.0, n.y > 0.0); // bottom=0.5, top=1.0
+    } else if (abs_n.x > abs_n.z) {
+        face_shade = 0.6; // east/west
+    } else {
+        face_shade = 0.8; // north/south
+    }
+
+    // Sky-tinted lighting (CazToon-style): tint both lit and shadow
+    // terms by the current sky color so terrain takes on the sky's
+    // color temperature — warm at sunset, cool blue at noon, dim at night.
+    let sky_tint = normalize(cam.sky_color.xyz + vec3f(0.001));
+    let lit_tint = normalize(mix(vec3f(1.0), sky_tint, 0.35));
+    let shadow_tint = normalize(mix(vec3f(0.5), sky_tint, 0.45));
+
+    var sun = pow(smooth_q, 1.5) * cam.sun_dir.w * cam.sun_color.xyz * lit_tint;
     let fill = max(-ndotl, 0.0) * cam.sky_color.w;
 
     // Shadow mapping (#14): sample the directional shadow map and attenuate
     // direct sunlight by ~50% on occluded fragments. At night (sun_strength
     // ~0) the sun term is already zero, so skip the texture fetch entirely.
-    // Water (mat 9) is excluded from receiving shadows -- a transparent
-    // surface darkening under shadow reads wrong.
     if (cam.sun_dir.w > 0.0 && in.mat_id != 9u) {
         let vis = shadow_visibility(in.world_pos);
-        // vis=1 fully lit (sun unchanged); vis=0 fully shadowed (sun halved).
-        // Ambient and fill light are untouched, so shadowed terrain dims
-        // toward ambient rather than going black.
         sun = sun * mix(0.5, 1.0, vis);
     }
 
     let hemi_t = clamp(0.5 + 0.5 * n.y, 0.0, 1.0);
-    let ambient = mix(cam.ambient_ground.xyz, cam.ambient_sky.xyz, hemi_t) * cam.fog.w;
+    // Ambient uses sky tint: shadow areas get sky-colored ambient (not flat gray)
+    let ambient = mix(cam.ambient_ground.xyz, cam.ambient_sky.xyz * shadow_tint, hemi_t) * cam.fog.w;
 
     let ao = 0.45 + 0.55 * in.ao;
-    var c = in.color * (ambient + sun + vec3f(fill)) * ao;
+    // Apply per-face shade: multiply final lit color by face brightness
+    var c = in.color * (ambient + sun + vec3f(fill)) * ao * mix(1.0, face_shade, cam.sun_dir.w);
 
     // Procedural crack decals (#43): dark branching lines on solid voxels,
     // driven by cam.ambient_sky.w. Intensity 0 => no cracks (clean multiply

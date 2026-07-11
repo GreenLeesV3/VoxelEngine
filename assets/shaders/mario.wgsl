@@ -72,10 +72,13 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
     let bands = 4.0;
     let quantized = floor(raw * bands + 0.5) / bands;
     let smooth_q = mix(quantized, raw, smoothstep(0.45, 0.55, fract(raw * bands)));
-    let sun = pow(smooth_q, 1.5) * cam.sun_dir.w * cam.sun_color.xyz;
+    let sky_tint = normalize(cam.sky_color.xyz + vec3f(0.001));
+    let lit_tint = normalize(mix(vec3f(1.0), sky_tint, 0.35));
+    let shadow_tint = normalize(mix(vec3f(0.5), sky_tint, 0.45));
+    let sun = pow(smooth_q, 1.5) * cam.sun_dir.w * cam.sun_color.xyz * lit_tint;
     let fill = max(-ndotl, 0.0) * cam.sky_color.w;
     let hemi_t = clamp(0.5 + 0.5 * normal.y, 0.0, 1.0);
-    let ambient = mix(cam.ambient_ground.xyz, cam.ambient_sky.xyz, hemi_t) * cam.fog.w;
+    let ambient = mix(cam.ambient_ground.xyz, cam.ambient_sky.xyz * shadow_tint, hemi_t) * cam.fog.w;
 
     // Alpha-masked overlay: vertex color is the base body color
     // (skin, hat, overalls), texture overrides only where alpha=1

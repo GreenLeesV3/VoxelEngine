@@ -1,0 +1,1982 @@
+# CazFPS Shader - English Language File
+
+# ============================================================================
+#   CREDITS & PRESETS
+# ============================================================================
+
+option.SHADER_CREDITS=§9§lBy Cazfps
+option.SHADER_CREDITS.comment=§6§lCartoony§r profile: use with Whimscape texture pack and the Whimscape Leaves add-on; 3D grass blades are downloadable from Caz-Toon's Discord. This keeps outlines, waving foliage, cell shading, and the full stylized look. §b§lNormal§r profile: best used with Vanilla, Bare Bones, or any other normal texture pack; it disables waving, outlines, and some of the cell-shaded styling for a more standard look.
+
+profile.DEFAULT=Cartoony
+profile.NORMAL=Normal
+profile.VANILLA=Vanilla
+profile.VIBRANT=Vibrant
+profile.POTATO=Potato
+profile.comment=Shader quality preset. Click to reset all settings to Cazfps recommended defaults.
+
+
+# ============================================================================
+#   1. LIGHTING
+# ============================================================================
+
+screen.LIGHTING=Lighting
+screen.LIGHTING.comment=Shadow, ambient, and emissive light settings.
+
+# --- Shadows ---
+
+screen.SHADOWS=Shadows
+screen.SHADOWS.comment=Directional sun/moon shadows, shadow map quality, and shadow color tinting.
+
+screen.ADDONS=Addons
+screen.ADDONS.comment=Settings for addon-driven features and extra integrations.
+option.SHADOWS_ENABLED=Enable Shadows
+option.SHADOWS_ENABLED.comment=Enable directional shadows cast by the sun and moon.
+
+option.shadowMapResolution=Shadow Resolution
+option.shadowMapResolution.comment=Shadow map texture size. Higher = sharper shadows but more GPU cost. Quartic distortion keeps detail high near the player.
+
+option.SHADOW_DISTANCE_CHUNKS=Shadow Distance
+option.SHADOW_DISTANCE_CHUNKS.comment=How far shadows render from the player (in chunks). Very long distances need low distortion.
+
+option.SHADOW_DISTORTION=Shadow Distortion
+option.SHADOW_DISTORTION.comment=Warps the shadow map to concentrate detail near the player. Lower = more uniform coverage (better for long distance), higher = sharper close-up shadows.
+
+option.SHARP_SHADOWS=Sharp Shadows
+option.SHARP_SHADOWS.comment=When enabled, uses sharp shadow sampling. Disable to use soft PCF-blurred shadows.
+
+option.SHADOW_DEBUG_TINT=Shadow Debug Tint
+option.SHADOW_DEBUG_TINT.comment=Turns direct shadowed areas bright red for debugging. If dark cave areas do not turn red, they are not coming from the shadow term.
+option.CAVE_LIGHT_DEBUG=Cave Light Debug
+option.CAVE_LIGHT_DEBUG.comment=Visualizes non-shadow cave lighting. Blue = low skylight, red = minimum brightness floor. If caves glow blue/red here, the darkness is from ambient/skylight logic, not shadows.
+option.SHADOW_PCF_RADIUS=PCF Blur Radius
+option.SHADOW_PCF_RADIUS.comment=Soft shadow blur size when Sharp Shadows is OFF. Higher values make shadow edges softer.
+
+option.SHADOW_NORMAL_BIAS=Normal Bias
+option.SHADOW_NORMAL_BIAS.comment=Offsets shadow samples along surface normals to reduce shadow acne (striping artifacts).
+
+option.SHADOW_OPACITY=Shadow Opacity
+option.SHADOW_OPACITY.comment=How dark shadows are. 0 = invisible, 1 = pure black shadows.
+
+option.SHADOW_HUE=Shadow Hue
+option.SHADOW_HUE.comment=Color tint angle for shadows. 0 = neutral, positive = cool/blue, negative = warm/orange.
+
+option.SHADOW_SATURATION=Shadow Saturation
+option.SHADOW_SATURATION.comment=Color saturation of shadow tint. 0 = gray shadows, higher = more vivid colored shadows.
+option.BLOCKLIGHT_SHADOW_OVERRIDE=Blocklight Shadow Override
+option.BLOCKLIGHT_SHADOW_OVERRIDE.comment=Lets local blocklight reduce or cancel directional sun/moon shadows around light sources.
+option.LIGHTMAP_SATURATION=Lightmap Shadow Saturation
+option.LIGHTMAP_SATURATION.comment=Color saturation for lightmap-based shadows (beyond shadow distance). 0 = gray, higher = more colored.
+
+option.SKYLIGHT_DARKNESS_LEVELS=Skylight Darkness Levels
+option.SKYLIGHT_DARKNESS_LEVELS.comment=Overall skylight darkening amount. At max, skylight level 1 reaches full darkening while level 15 stays unchanged.
+option.SKYLIGHT_DARKNESS_Z=Skylight Darkness Curve (Z)
+option.SKYLIGHT_DARKNESS_Z.comment=Controls increment progression between levels: 0.0 = x1/x1.1/x1.2..., 1.0 = x1/x2/x3...
+
+option.DH_SHADOW_OPACITY=DH Shadow Opacity
+option.DH_SHADOW_OPACITY.comment=Controls how dark shadows from the shadow map are on Distant Horizons terrain. 0.0 = no shadow darkening, 1.0 = maximum darkness.
+
+option.DH_SATURATION=DH Color Saturation
+option.DH_SATURATION.comment=Color saturation for Distant Horizons terrain. 0.0 = grayscale, 1.0 = unchanged, higher = oversaturated.
+
+option.DH_AO_INTENSITY=DH Ambient Occlusion
+option.DH_AO_INTENSITY.comment=Ambient occlusion intensity for Distant Horizons terrain. Darkens areas under trees, overhangs, etc. 0%% = off, 100%% = full.
+suffix.DH_AO_INTENSITY=%%
+
+# --- Ambient ---
+
+screen.AMBIENT=Ambient
+screen.AMBIENT.comment=Overall brightness, night darkness, cave lighting, blocklight, and skylight color tinting.
+
+option.TERRAIN_BRIGHTNESS=Terrain Brightness
+option.TERRAIN_BRIGHTNESS.comment=Overall brightness multiplier for all terrain surfaces.
+
+option.NIGHT_DARKNESS=Night Darkness
+option.NIGHT_DARKNESS.comment=Extra nighttime darkening for non-emissive, non-blocklit lighting. 0 = no extra darkening, higher = darker nights.
+
+option.CAVE_DARKNESS=Cave Darkness
+option.CAVE_DARKNESS.comment=Controls how dark the cave tint gets at the lowest skylight. Higher values deepen caves while the fade follows the cave-tint ramp.
+
+option.BLOCKLIGHT_BRIGHTNESS=Blocklight Brightness
+option.BLOCKLIGHT_BRIGHTNESS.comment=Brightness of torches, lanterns, and other block light sources.
+option.BLOCKLIGHT_SKYLIGHT_REDUCTION=Blocklight Skylight Reduction
+option.BLOCKLIGHT_SKYLIGHT_REDUCTION.comment=Reduces blocklight where skylight is present. Keeps blocklight stronger in caves and enclosed areas.
+
+option.ENTITY_BRIGHTNESS_BOOST=Entity Brightness Boost
+option.ENTITY_BRIGHTNESS_BOOST.comment=Blends toward flatter/brighter entity lighting. 0 = vanilla shaded, 1 = fully flat (can look very bright in sunlight).
+
+option.AMBIENT_TINT=Ambient Tint
+option.AMBIENT_TINT.comment=Shifts ambient light color. Negative = warm/orange, 0 = neutral, positive = cool/blue.
+
+option.SKYLIGHT_COLOR_TINT=Skylight Tint Strength
+option.SKYLIGHT_COLOR_TINT.comment=Overall strength of skylight color tinting on blocks (time-of-day sky + biome skyColor). Set to 0 for neutral/white skylight.
+
+option.SKYLIGHT_TINT_SATURATION=Skylight Tint Saturation
+option.SKYLIGHT_TINT_SATURATION.comment=Saturation multiplier for the sky-tinted lighting on blocks. 1 = unchanged.
+
+option.SKYLIGHT_TINT_LIGHT_SATURATION=Bright Area Saturation
+option.SKYLIGHT_TINT_LIGHT_SATURATION.comment=Extra saturation applied mainly in bright/lit areas. 0 = more neutral sunlight, 1 = full saturation.
+
+option.SUNSET_TERRAIN_TINT=Sunset Sky Tint
+option.SUNSET_TERRAIN_TINT.comment=Extra warm tint applied to terrain at sunrise and sunset. Boosts the golden-hour glow on blocks beyond the base Skylight Color Tint. 0 = no extra warmth, higher = stronger orange/gold bloom on surfaces.
+
+# --- Emissive ---
+
+screen.EMISSIVE=Emissive
+screen.EMISSIVE.comment=Emissive block brightness and dynamic held-item light around the player.
+
+option.EMISSIVE_MASKING=Per-Pixel Emission
+option.EMISSIVE_MASKING.comment=Only the glowing parts of emissive blocks emit light. Torch flames glow but the stick does not. Lantern frames stay dark. Disable for classic full-block glow.
+
+option.EMISSIVE_BRIGHTNESS=Emissive Brightness
+option.EMISSIVE_BRIGHTNESS.comment=Brightness multiplier for emissive blocks and surfaces.
+option.ENTITY_EMISSIVE_BRIGHTNESS=Entity Emission
+option.ENTITY_EMISSIVE_BRIGHTNESS.comment=Visible brightness multiplier for emissive entity parts like eyes and glow layers.
+option.ENTITY_EMISSIVE_BLOOM=Entity Bloom
+option.ENTITY_EMISSIVE_BLOOM.comment=Bloom source strength for emissive entity parts like eyes and glow layers.
+
+option.HANDHELD_LIGHT_ENABLED=Dynamic Handheld Light
+option.HANDHELD_LIGHT_ENABLED.comment=Lights nearby terrain around the player when holding light-emitting items.
+
+option.HANDHELD_LIGHT_STRENGTH=Handheld Light Strength
+option.HANDHELD_LIGHT_STRENGTH.comment=Brightness of the handheld light contribution.
+
+option.HANDHELD_LIGHT_RADIUS=Handheld Light Radius
+option.HANDHELD_LIGHT_RADIUS.comment=Range in blocks before handheld light fades to dark.
+
+# --- LPV (Colored Block Lighting) ---
+
+screen.LPV=Colored Block Light (LPV)
+screen.LPV.comment=Replaces vanilla warm blocklight with per-block colored lighting using 3D voxel flood-fill propagation. Torches glow warm orange, soul lanterns icy blue, glowstone golden, etc. Moderate GPU cost.
+
+option.LPV_ENABLED=Enable LPV
+option.LPV_ENABLED.comment=Turn on Light Propagation Volumes. Each light-emitting block casts its own colored light into the voxel grid around the player. Requires Iris with CUSTOM_IMAGES and COMPUTE_SHADERS support.
+value.LPV_ENABLED.true=ON
+value.LPV_ENABLED.false=OFF
+
+option.LPV_VOLUME_SIZE=Volume Size
+option.LPV_VOLUME_SIZE.comment=Side length of the cubic light volume in voxels. 128 = 64 block radius, 256 = 128 block radius around player.
+
+option.LPV_STRENGTH=LPV Strength
+option.LPV_STRENGTH.comment=How bright the LPV colored light appears on surfaces. Does not change how far light reaches.
+
+option.LPV_NIGHT_STRENGTH=Night Strength
+option.LPV_NIGHT_STRENGTH.comment=LPV strength multiplier at full night. 1.0 = same as day, lower = dimmer at night so torches don't overpower a dark sky. Smooth transition through dusk.
+
+option.LPV_RADIUS=LPV Radius
+option.LPV_RADIUS.comment=How far light reaches from each source. Higher = longer reach. Internally controls per-step energy conservation in the flood-fill; clamped so it cannot produce runaway amplification.
+
+option.LPV_RENDER_DISTANCE=LPV Render Distance
+option.LPV_RENDER_DISTANCE.comment=How far from the player LPV contribution is visible. Smoothly fades LPV output to zero past this distance. Does not change the underlying propagation range (use LPV Radius for that). Safe to change at runtime — no flicker.
+
+option.LPV_FADE_OUT_DISTANCE=Fade-Out Distance
+option.LPV_FADE_OUT_DISTANCE.comment=Width of the smooth fade band at the edge of render distance, in voxels (1 voxel = 1 block). Higher = softer gradient, lower = sharper cutoff.
+
+option.LPV_VIBRANCY=LPV Vibrancy
+option.LPV_VIBRANCY.comment=Saturation of LPV colored hues. 1.0 = natural, higher = more vivid/colorful, lower = closer to neutral white light.
+
+
+# ============================================================================
+#   2. SKY & CLOUDS
+# ============================================================================
+
+screen.SKY_AND_CLOUDS=Sky & Clouds
+screen.SKY_AND_CLOUDS.comment=Sky gradient, sun/moon, stars, planets, clouds, and time-of-day sky colors.
+
+# --- Sky General ---
+
+screen.SKY_GENERAL=Sky General
+screen.SKY_GENERAL.comment=Base sky gradient shape, saturation, and biome color blending.
+
+option.SKY_GRADIENT_CURVE=Gradient Curve
+option.SKY_GRADIENT_CURVE.comment=Controls how quickly the sky transitions from horizon to zenith color. Higher = faster transition, more concentrated horizon band.
+
+option.SKY_SATURATION=Sky Saturation
+option.SKY_SATURATION.comment=Color saturation of the sky. 1 = normal, higher = more vivid sky colors.
+
+option.SKY_BIOME_BLEND=Biome Blend
+option.SKY_BIOME_BLEND.comment=How much biome sky color influences the overall sky. 0 = ignore biomes, 1 = full biome color.
+option.SKY_RAIN_DARKNESS=Rain Sky Darkness
+option.SKY_RAIN_DARKNESS.comment=How much the sky darkens during rain. Only affects the sky gradient, not terrain or LODs.
+
+option.OVERWORLD_BIOME_SKY_ENABLED=Hard-Coded Biome Skies
+option.OVERWORLD_BIOME_SKY_ENABLED.comment=Master switch for the custom overworld biome sky colors (snowy/swamp/jungle/savanna/desert/pale garden). Disable to keep the default blue sky everywhere in the overworld; also clears biome tint from the water sky reflection. Nether and End skies are unaffected.
+suffix.SKY_RAIN_DARKNESS=%
+
+# --- Sun & Moon ---
+
+screen.SUN_MOON=Sun & Moon
+screen.SUN_MOON.comment=Sun path angle, sun/moon size, and glow bloom settings.
+
+option.sunPathRotation=Sun Path Rotation
+option.sunPathRotation.comment=Rotates the sun/moon arc across the sky (in degrees). Changes shadow angles and lighting direction.
+
+option.SUN_MOON_SIZE_ENABLED=Custom Sun/Moon Size
+option.SUN_MOON_SIZE_ENABLED.comment=Enable custom sun and moon sizing. Disable for vanilla size.
+
+option.SUN_MOON_SCALE=Sun/Moon Scale
+option.SUN_MOON_SCALE.comment=Size multiplier for the sun and moon disc. Smaller values = smaller sun/moon.
+
+option.SUN_MOON_BLOOM=Sun/Moon Bloom
+option.SUN_MOON_BLOOM.comment=Glow intensity around the sun and moon. 0 = no glow, higher = brighter halo.
+
+option.SUN_GLOW_RADIUS=Sun Glow Radius
+option.SUN_GLOW_RADIUS.comment=Size of the soft radial halo around the sun. Independent of the bloom blur radius.
+
+option.SUN_GLOW_INTENSITY=Sun Glow Strength
+option.SUN_GLOW_INTENSITY.comment=Brightness of the sun's radial halo. 0 = off, higher = brighter glow.
+
+option.SUN_BRIGHTNESS_BOOST=Sun Look Brightness
+option.SUN_BRIGHTNESS_BOOST.comment=Subtly brightens the screen when looking toward the sun. Strongest when the sun is at the center of your view.
+
+# --- Stars ---
+
+screen.STARS=Stars
+screen.STARS.comment=Nighttime star field density, brightness, twinkle, and shooting stars.
+
+option.STARS_ENABLED=Enable Stars
+option.STARS_ENABLED.comment=Show stars in the night sky.
+
+option.STAR_SCALE=Star Scale
+option.STAR_SCALE.comment=Overall grid scale for star placement. Higher = smaller star patterns.
+
+option.STAR_SIZE=Star Size
+option.STAR_SIZE.comment=Size of individual stars. Higher = larger star points.
+
+option.STAR_DENSITY=Star Density
+option.STAR_DENSITY.comment=How many stars appear. Higher = denser star field.
+
+option.STAR_BRIGHTNESS=Star Brightness
+option.STAR_BRIGHTNESS.comment=Brightness of individual stars.
+
+option.STAR_TWINKLE=Star Twinkle
+option.STAR_TWINKLE.comment=How much stars flicker. 0 = steady, 1 = maximum twinkle.
+
+option.STAR_SHOOTING_ENABLED=Shooting Stars
+option.STAR_SHOOTING_ENABLED.comment=Occasional shooting stars streak across the night sky.
+
+option.STAR_SHOOTING_BRIGHTNESS=Shooting Star Brightness
+option.STAR_SHOOTING_BRIGHTNESS.comment=Brightness of shooting star trails.
+
+# --- Night Nebula ---
+
+screen.NIGHT_NEBULA=Night Nebula
+screen.NIGHT_NEBULA.comment=Colored cloud patches visible in the night sky ? purples, blues, and teals drifting slowly overhead.
+
+option.NIGHT_NEBULA_ENABLED=Enable Night Nebula
+option.NIGHT_NEBULA_ENABLED.comment=Adds soft colored nebula clouds to the overworld night sky.
+
+option.NIGHT_NEBULA_INTENSITY=Nebula Intensity
+option.NIGHT_NEBULA_INTENSITY.comment=How bright/visible the nebula patches are.
+
+option.NIGHT_NEBULA_SCALE=Nebula Scale
+option.NIGHT_NEBULA_SCALE.comment=Size of nebula patches. Lower = bigger sweeping clouds, higher = smaller patches.
+
+option.NIGHT_NEBULA_SPEED=Nebula Drift Speed
+option.NIGHT_NEBULA_SPEED.comment=How fast the nebula patches drift across the sky.
+
+option.NIGHT_NEBULA_R1=Nebula Color 1 Red
+option.NIGHT_NEBULA_G1=Nebula Color 1 Green
+option.NIGHT_NEBULA_B1=Nebula Color 1 Blue
+
+option.NIGHT_NEBULA_R2=Nebula Color 2 Red
+option.NIGHT_NEBULA_G2=Nebula Color 2 Green
+option.NIGHT_NEBULA_B2=Nebula Color 2 Blue
+
+# --- Fantasy Meteors ---
+
+screen.METEORS=Fantasy Meteors
+screen.METEORS.comment=Colorful fantasy meteors streaking across the night sky with sparkle heads and rainbow trails.
+
+option.METEORS_ENABLED=Enable Meteors
+option.METEORS_ENABLED.comment=Shows fantasy meteors/comets in the night sky.
+
+option.METEOR_BRIGHTNESS=Brightness
+option.METEOR_BRIGHTNESS.comment=Overall brightness of meteor effects.
+
+option.METEOR_SPEED=Speed
+option.METEOR_SPEED.comment=How fast meteors travel across the sky.
+
+option.METEOR_SIZE=Size
+option.METEOR_SIZE.comment=Scale of meteor head and trail width.
+
+option.METEOR_TRAIL_LENGTH=Trail Length
+option.METEOR_TRAIL_LENGTH.comment=How long the colorful trail extends behind the head.
+
+option.METEOR_GLOW_R=Glow Color Red
+option.METEOR_GLOW_G=Glow Color Green
+option.METEOR_GLOW_B=Glow Color Blue
+
+# --- Ringed Planet ---
+
+screen.RINGED_PLANET=Ringed Planet
+screen.RINGED_PLANET.comment=Saturn-like planet visible in the night sky. Customizable position, size, and colors.
+
+option.RINGED_PLANET_ENABLED=Enable Ringed Planet
+option.RINGED_PLANET_ENABLED.comment=Shows a distant ringed planet in the night sky.
+
+option.PLANET_BRIGHTNESS=Planet Brightness
+option.PLANET_BRIGHTNESS.comment=Overall brightness of the planet and its ring.
+
+option.PLANET_SIZE=Planet Size
+option.PLANET_SIZE.comment=Size of the planet in the sky. Higher = larger.
+
+option.PLANET_AZIMUTH=Azimuth
+option.PLANET_AZIMUTH.comment=Horizontal position of the planet in the sky (compass direction in degrees).
+
+option.PLANET_ELEVATION=Elevation
+option.PLANET_ELEVATION.comment=Vertical position of the planet in the sky (degrees above horizon).
+
+screen.PLANET_COLORS=Planet Color
+screen.PLANET_COLORS.comment=Color of the planet body.
+
+option.PLANET_COLOR_R=Red
+option.PLANET_COLOR_G=Green
+option.PLANET_COLOR_B=Blue
+
+screen.RING_SETTINGS=Ring Settings
+screen.RING_SETTINGS.comment=Ring tilt angle and color.
+
+option.RING_TILT=Ring Tilt
+option.RING_TILT.comment=Tilt angle of the ring in degrees. 0 = edge-on, 45 = angled.
+
+option.RING_COLOR_R=Ring Red
+option.RING_COLOR_G=Ring Green
+option.RING_COLOR_B=Ring Blue
+
+# --- Clouds ---
+
+screen.CLOUDS=Clouds
+screen.CLOUDS.comment=Cloud settings. Choose between 3D volumetric or 2D flat clouds.
+
+screen.CLOUDS_3D_SETTINGS=3D Volumetric Clouds
+screen.CLOUDS_3D_SETTINGS.comment=Raymarched 3D clouds with depth, lighting, and multiple height layers. Stylized cartoonish look.
+
+screen.CLOUDS_2D_SETTINGS=2D Flat Clouds
+screen.CLOUDS_2D_SETTINGS.comment=Simple flat 2D clouds. Lightweight alternative to 3D clouds.
+
+screen.CLOUD_3D_COLOR=Cloud Color
+screen.CLOUD_3D_COLOR.comment=Customize the base color of 3D clouds.
+
+option.CLOUDS_3D_ENABLED=Enable 3D Clouds
+option.CLOUDS_3D_ENABLED.comment=Raymarched volumetric 3D clouds with depth and lighting. Stylized, cartoonish, white puffy clouds at varying heights.
+
+option.CLOUDS_2D_ENABLED=Enable 2D Clouds
+option.CLOUDS_2D_ENABLED.comment=Simple flat 2D clouds rendered on a plane. Lightweight alternative.
+
+option.CLOUD_SHADOWS_ENABLED=Cloud Shadows
+option.CLOUD_SHADOWS_ENABLED.comment=Toggle terrain cloud shadows.
+
+option.CLOUD_3D_STEPS=Quality (Steps)
+option.CLOUD_3D_STEPS.comment=Raymarch steps for 3D cloud rendering. Higher = better quality but slower. 16 = fast, 24 = balanced, 48 = high quality.
+
+option.CLOUD_3D_COVERAGE=Coverage
+option.CLOUD_3D_COVERAGE.comment=How much of the sky is filled with clouds. Lower = more open sky, higher = overcast.
+
+option.CLOUD_3D_DENSITY=Density
+option.CLOUD_3D_DENSITY.comment=Optical density of the clouds. Higher = more opaque and solid-looking.
+
+option.CLOUD_3D_HEIGHT=Height
+option.CLOUD_3D_HEIGHT.comment=Height of the main cloud layer in blocks above sea level.
+
+option.CLOUD_3D_THICKNESS=Thickness
+option.CLOUD_3D_THICKNESS.comment=Vertical thickness of the cloud layer in blocks.
+
+option.CLOUD_3D_SCALE=Scale
+option.CLOUD_3D_SCALE.comment=Size of cloud formations. Lower = bigger sweeping clouds, higher = smaller more detailed.
+
+option.CLOUD_3D_CELL_SIZE=Cell Size
+option.CLOUD_3D_CELL_SIZE.comment=Size of each cloud grid cell in blocks. Controls how large each rectangular cloud "pixel" is. Smaller = more detailed blocky pattern, larger = bigger blocky chunks.
+
+option.CLOUD_3D_DETAIL=Detail
+option.CLOUD_3D_DETAIL.comment=Erosion detail strength. Adds puffy cauliflower bumps to cloud edges. 0 = smooth blobs, higher = more textured.
+
+option.CLOUD_3D_SPEED=Speed
+option.CLOUD_3D_SPEED.comment=How fast the clouds drift across the sky. 0 = frozen.
+
+option.CLOUD_3D_DISTANCE=Render Distance
+option.CLOUD_3D_DISTANCE.comment=How far 3D clouds render from the player (in blocks). Clouds fade out smoothly near the edge. Lower = better performance.
+
+option.CLOUD_3D_BRIGHTNESS=Brightness
+option.CLOUD_3D_BRIGHTNESS.comment=Overall brightness of the 3D clouds.
+
+option.CLOUD_3D_EDGE_GLOW=Edge Glow
+option.CLOUD_3D_EDGE_GLOW.comment=Brightness boost at thin cloud edges, creating a silver-lining effect.
+
+option.CLOUD_3D_R=Red
+option.CLOUD_3D_G=Green
+option.CLOUD_3D_B=Blue
+
+# --- Vanilla Cloud Options ---
+
+screen.CLOUDS_VANILLA_SETTINGS=Vanilla Clouds
+screen.CLOUDS_VANILLA_SETTINGS.comment=Classic Minecraft-style blocky clouds. Pixelated grid-snapped shapes with 3D depth, just like the original game.
+
+screen.VANILLA_CLOUD_COLOR=Cloud Color
+screen.VANILLA_CLOUD_COLOR.comment=Customize the base color of vanilla clouds.
+
+option.CLOUDS_VANILLA_ENABLED=Enable Vanilla Clouds
+option.CLOUDS_VANILLA_ENABLED.comment=Classic blocky Minecraft-style clouds. Grid-snapped pixelated shapes with 3D shading on top, sides, and bottom.
+
+option.VANILLA_CLOUD_HEIGHT=Height
+option.VANILLA_CLOUD_HEIGHT.comment=Altitude of the cloud layer in blocks above sea level. Vanilla default is 192.
+
+option.VANILLA_CLOUD_THICKNESS=Thickness
+option.VANILLA_CLOUD_THICKNESS.comment=Vertical thickness of each cloud block in blocks. Vanilla default is 4.
+
+option.VANILLA_CLOUD_CELL_SIZE=Pixel Size
+option.VANILLA_CLOUD_CELL_SIZE.comment=Size of each cloud pixel in blocks. Vanilla default is 12. Smaller = more detailed, larger = chunkier.
+
+option.VANILLA_CLOUD_COVERAGE=Coverage
+option.VANILLA_CLOUD_COVERAGE.comment=How much of the sky is filled with clouds. Lower = clearer sky.
+
+option.VANILLA_CLOUD_SPEED=Speed
+option.VANILLA_CLOUD_SPEED.comment=How fast the clouds drift across the sky. 0 = frozen.
+
+option.VANILLA_CLOUD_BRIGHTNESS=Brightness
+option.VANILLA_CLOUD_BRIGHTNESS.comment=Overall brightness of the vanilla clouds.
+
+option.VANILLA_CLOUD_DISTANCE=Render Distance
+option.VANILLA_CLOUD_DISTANCE.comment=How far vanilla clouds render from the player (in blocks).
+option.VANILLA_CLOUD_NIGHT_OPACITY_REDUCTION=Night Opacity Reduction
+option.VANILLA_CLOUD_NIGHT_OPACITY_REDUCTION.comment=How much vanilla cloud opacity is reduced at full night. Higher values reveal more stars and sky.
+suffix.VANILLA_CLOUD_NIGHT_OPACITY_REDUCTION=%
+option.CLOUD_RAIN_OPACITY_REDUCTION=Rain Opacity Reduction
+option.CLOUD_RAIN_OPACITY_REDUCTION.comment=How much cloud opacity is reduced at full rain. Clouds fade smoothly instead of vanishing. Applies to all cloud types.
+suffix.CLOUD_RAIN_OPACITY_REDUCTION=%
+option.VANILLA_CLOUD_SIDE_DARKNESS=Side Darkness
+option.VANILLA_CLOUD_SIDE_DARKNESS.comment=Extra darkness applied to cloud side-face shading globally across all vanilla cloud layers.
+suffix.VANILLA_CLOUD_SIDE_DARKNESS=%
+option.VANILLA_CLOUD_BOTTOM_DARKNESS=Bottom Darkness
+option.VANILLA_CLOUD_BOTTOM_DARKNESS.comment=Extra darkness applied to cloud bottom-surface shading globally across all vanilla cloud layers.
+suffix.VANILLA_CLOUD_BOTTOM_DARKNESS=%
+
+option.VANILLA_CLOUD_R=Red
+option.VANILLA_CLOUD_G=Green
+option.VANILLA_CLOUD_B=Blue
+
+option.VANILLA_CLOUD_STEPS=Quality (Samples)
+option.VANILLA_CLOUD_STEPS.comment=Number of raymarch samples per ray. Higher = sharper clouds but more expensive. 64 is a good balance.
+
+option.VANILLA_CLOUD_LAYER_SPACING=Layer Spacing
+option.VANILLA_CLOUD_LAYER_SPACING.comment=Vertical distance between cloud layers in blocks. Higher values spread layers further apart for more visible height variation.
+
+option.VANILLA_CLOUD_L1_COVERAGE=Bottom Coverage
+option.VANILLA_CLOUD_L1_COVERAGE.comment=Cloud coverage for the bottom layer. Higher = more clouds.
+option.VANILLA_CLOUD_L1_PIXEL_SIZE=Bottom Pixel Size
+option.VANILLA_CLOUD_L1_PIXEL_SIZE.comment=Grid cell size for the bottom layer. Smaller = finer detail, larger = bigger cloud chunks.
+option.VANILLA_CLOUD_L1_OPACITY=Bottom Opacity
+option.VANILLA_CLOUD_L1_OPACITY.comment=Opacity of the bottom cloud layer. 0 = fully transparent, 100 = fully opaque.
+suffix.VANILLA_CLOUD_L1_OPACITY=%
+
+option.VANILLA_CLOUD_L2_COVERAGE=Middle Coverage
+option.VANILLA_CLOUD_L2_COVERAGE.comment=Cloud coverage for the middle (main) layer. Higher = more clouds.
+option.VANILLA_CLOUD_L2_PIXEL_SIZE=Middle Pixel Size
+option.VANILLA_CLOUD_L2_PIXEL_SIZE.comment=Grid cell size for the middle layer. Smaller = finer detail, larger = bigger cloud chunks.
+option.VANILLA_CLOUD_L2_OPACITY=Middle Opacity
+option.VANILLA_CLOUD_L2_OPACITY.comment=Opacity of the middle cloud layer. 0 = fully transparent, 100 = fully opaque.
+suffix.VANILLA_CLOUD_L2_OPACITY=%
+
+option.VANILLA_CLOUD_L3_COVERAGE=Top Coverage
+option.VANILLA_CLOUD_L3_COVERAGE.comment=Cloud coverage for the top layer. Higher = more clouds.
+option.VANILLA_CLOUD_L3_PIXEL_SIZE=Top Pixel Size
+option.VANILLA_CLOUD_L3_PIXEL_SIZE.comment=Grid cell size for the top layer. Smaller = finer detail, larger = bigger cloud chunks.
+option.VANILLA_CLOUD_L3_OPACITY=Top Opacity
+option.VANILLA_CLOUD_L3_OPACITY.comment=Opacity of the top cloud layer. 0 = fully transparent, 100 = fully opaque.
+suffix.VANILLA_CLOUD_L3_OPACITY=%
+
+screen.VANILLA_CLOUD_LAYERS=Layer Settings
+screen.VANILLA_CLOUD_LAYERS.comment=Per-layer coverage, cell size, and opacity controls for the 3 cloud layers.
+
+# --- 2D Cloud Options ---
+
+option.CLOUD_HEIGHT=Cloud Height
+option.CLOUD_HEIGHT.comment=Altitude of the 2D cloud layer in blocks above sea level.
+
+option.CLOUD_COVERAGE=Cloud Coverage
+option.CLOUD_COVERAGE.comment=How much of the sky is filled with 2D clouds. Higher = more overcast.
+
+option.CLOUD_SCALE=Cloud Scale
+option.CLOUD_SCALE.comment=Size of 2D cloud noise patterns. Lower = larger cloud shapes.
+
+option.CLOUD_SPEED=Cloud Speed
+option.CLOUD_SPEED.comment=How fast the 2D clouds move. 0 = frozen.
+
+option.CLOUD_SHADOW_STRENGTH=Cloud Shadow Strength
+option.CLOUD_SHADOW_STRENGTH.comment=Darkening effect of 2D clouds on terrain below. 0 = no shadow.
+
+option.CLOUD_BRIGHTNESS=Cloud Brightness
+option.CLOUD_BRIGHTNESS.comment=Brightness multiplier for 2D clouds.
+
+option.CLOUD_THICKNESS=Cloud Thickness
+option.CLOUD_THICKNESS.comment=Vertical thickness of 2D clouds. Affects edge softness and how solid they look.
+
+option.CLOUD_TOON_EDGES=Toon Edges
+option.CLOUD_TOON_EDGES.comment=Adds sharp cartoon-style edges to 2D clouds for a stylized look.
+
+value.CLOUD_TOON_EDGES.0=Off
+value.CLOUD_TOON_EDGES.1=On
+
+# --- Sky Day Colors ---
+
+screen.SKY_DAY=Day Sky
+screen.SKY_DAY.comment=Daytime sky gradient colors. Customize horizon, mid, and zenith layers.
+
+option.DAY_BRIGHTNESS=Day Brightness
+option.DAY_BRIGHTNESS.comment=Overall brightness of the daytime sky.
+
+screen.DAY_HORIZON_COLOR=Horizon Color
+screen.DAY_HORIZON_COLOR.comment=Color at the horizon edge of the daytime sky.
+option.DAY_HORIZON_R=Horizon Red
+option.DAY_HORIZON_G=Horizon Green
+option.DAY_HORIZON_B=Horizon Blue
+
+screen.DAY_MID_COLOR=Mid Color
+screen.DAY_MID_COLOR.comment=Color in the middle band of the daytime sky.
+option.DAY_MID_R=Mid Red
+option.DAY_MID_G=Mid Green
+option.DAY_MID_B=Mid Blue
+
+screen.DAY_ZENITH_COLOR=Zenith Color
+screen.DAY_ZENITH_COLOR.comment=Color directly overhead in the daytime sky.
+option.DAY_ZENITH_R=Zenith Red
+option.DAY_ZENITH_G=Zenith Green
+option.DAY_ZENITH_B=Zenith Blue
+
+option.DAY_MID_HEIGHT=Mid Height
+option.DAY_MID_HEIGHT.comment=View angle where the sky transitions from horizon to mid color. Lower = mid color closer to horizon.
+
+option.DAY_ZENITH_HEIGHT=Zenith Height
+option.DAY_ZENITH_HEIGHT.comment=View angle where the sky transitions from horizon to zenith color. Lower = zenith color starts sooner.
+
+# --- Sky Sunset Colors ---
+
+screen.SKY_SUNSET=Sunset Sky
+screen.SKY_SUNSET.comment=Sunset/sunrise sky gradient colors.
+
+option.SUNSET_BRIGHTNESS=Sunset Brightness
+option.SUNSET_BRIGHTNESS.comment=Overall brightness of the sunset sky.
+
+screen.SUNSET_HORIZON_COLOR=Horizon Color
+screen.SUNSET_HORIZON_COLOR.comment=Color at the horizon during sunset.
+option.SUNSET_HORIZON_R=Horizon Red
+option.SUNSET_HORIZON_G=Horizon Green
+option.SUNSET_HORIZON_B=Horizon Blue
+
+screen.SUNSET_MID_COLOR=Mid Color
+screen.SUNSET_MID_COLOR.comment=Color in the middle band during sunset.
+option.SUNSET_MID_R=Mid Red
+option.SUNSET_MID_G=Mid Green
+option.SUNSET_MID_B=Mid Blue
+
+screen.SUNSET_ZENITH_COLOR=Zenith Color
+screen.SUNSET_ZENITH_COLOR.comment=Color directly overhead during sunset.
+option.SUNSET_ZENITH_R=Zenith Red
+option.SUNSET_ZENITH_G=Zenith Green
+option.SUNSET_ZENITH_B=Zenith Blue
+
+option.SUNSET_MID_HEIGHT=Mid Height
+option.SUNSET_MID_HEIGHT.comment=View angle where the sunset sky transitions from horizon to mid color.
+
+option.SUNSET_ZENITH_HEIGHT=Zenith Height
+option.SUNSET_ZENITH_HEIGHT.comment=View angle where the sunset sky transitions from horizon to zenith color.
+
+# --- Sky Blue Hour Colors ---
+
+screen.SKY_BLUEHOUR=Blue Hour Sky
+screen.SKY_BLUEHOUR.comment=Blue hour sky gradient colors (twilight period just before night/after dawn).
+
+option.BLUEHOUR_BRIGHTNESS=Blue Hour Brightness
+option.BLUEHOUR_BRIGHTNESS.comment=Overall brightness of the blue hour sky.
+
+screen.BLUEHOUR_HORIZON_COLOR=Horizon Color
+screen.BLUEHOUR_HORIZON_COLOR.comment=Color at the horizon during blue hour.
+option.BLUEHOUR_HORIZON_R=Horizon Red
+option.BLUEHOUR_HORIZON_G=Horizon Green
+option.BLUEHOUR_HORIZON_B=Horizon Blue
+
+screen.BLUEHOUR_MID_COLOR=Mid Color
+screen.BLUEHOUR_MID_COLOR.comment=Color in the middle band during blue hour.
+option.BLUEHOUR_MID_R=Mid Red
+option.BLUEHOUR_MID_G=Mid Green
+option.BLUEHOUR_MID_B=Mid Blue
+
+screen.BLUEHOUR_ZENITH_COLOR=Zenith Color
+screen.BLUEHOUR_ZENITH_COLOR.comment=Color directly overhead during blue hour.
+option.BLUEHOUR_ZENITH_R=Zenith Red
+option.BLUEHOUR_ZENITH_G=Zenith Green
+option.BLUEHOUR_ZENITH_B=Zenith Blue
+
+option.BLUEHOUR_MID_HEIGHT=Mid Height
+option.BLUEHOUR_MID_HEIGHT.comment=View angle where the blue hour sky transitions from horizon to mid color.
+
+option.BLUEHOUR_ZENITH_HEIGHT=Zenith Height
+option.BLUEHOUR_ZENITH_HEIGHT.comment=View angle where the blue hour sky transitions from horizon to zenith color.
+
+# --- Sky Night Colors ---
+
+screen.SKY_NIGHT=Night Sky
+screen.SKY_NIGHT.comment=Nighttime sky gradient colors.
+
+option.NIGHT_BRIGHTNESS=Night Brightness
+option.NIGHT_BRIGHTNESS.comment=Overall brightness of the night sky.
+
+option.NIGHT_BIOME_STRENGTH=Biome Color Strength
+option.NIGHT_BIOME_STRENGTH.comment=How much biome colors influence the night sky. 0 = ignore, 1 = full biome tinting.
+
+screen.NIGHT_HORIZON_COLOR=Horizon Color
+screen.NIGHT_HORIZON_COLOR.comment=Color at the horizon in the night sky.
+option.NIGHT_HORIZON_R=Horizon Red
+option.NIGHT_HORIZON_G=Horizon Green
+option.NIGHT_HORIZON_B=Horizon Blue
+
+screen.NIGHT_MID_COLOR=Mid Color
+screen.NIGHT_MID_COLOR.comment=Color in the middle band of the night sky.
+option.NIGHT_MID_R=Mid Red
+option.NIGHT_MID_G=Mid Green
+option.NIGHT_MID_B=Mid Blue
+
+screen.NIGHT_ZENITH_COLOR=Zenith Color
+screen.NIGHT_ZENITH_COLOR.comment=Color directly overhead in the night sky.
+option.NIGHT_ZENITH_R=Zenith Red
+option.NIGHT_ZENITH_G=Zenith Green
+option.NIGHT_ZENITH_B=Zenith Blue
+
+option.NIGHT_MID_HEIGHT=Mid Height
+option.NIGHT_MID_HEIGHT.comment=View angle where the night sky transitions from horizon to mid color.
+
+option.NIGHT_ZENITH_HEIGHT=Zenith Height
+option.NIGHT_ZENITH_HEIGHT.comment=View angle where the night sky transitions from horizon to zenith color.
+
+# ============================================================================
+#   3. ATMOSPHERE
+# ============================================================================
+
+screen.ATMOSPHERE=Atmosphere
+screen.ATMOSPHERE.comment=Sun shafts and dimension fog.
+
+
+# --- God Rays ---
+
+
+# --- Y-Fade ---
+
+screen.Y_FADE=Y-Fade
+screen.Y_FADE.comment=Global vertical color tint. Colors surfaces based on world Y height. Lower areas get more color, higher areas get less.
+
+option.Y_FADE_ENABLED=Enable Y-Fade
+option.Y_FADE_ENABLED.comment=Applies a smooth color tint based on world height. Lower areas get more color, higher areas get less.
+
+option.YFADE_BOTTOM_Y=Bottom Y
+option.YFADE_BOTTOM_Y.comment=World Y level where the tint is at full strength. Everything below this is fully tinted.
+
+option.YFADE_TOP_Y=Top Y
+option.YFADE_TOP_Y.comment=World Y level where the tint fades to zero. Everything above this has no tint.
+
+option.YFADE_COLOR_R=Color Red
+option.YFADE_COLOR_G=Color Green
+option.YFADE_COLOR_B=Color Blue
+
+option.YFADE_OPACITY=Opacity
+option.YFADE_OPACITY.comment=How strong the color tint is. 0 = no effect, 1 = full color replacement.
+
+# --- Weather ---
+
+screen.WEATHER=Weather
+screen.WEATHER.comment=Rain appearance, puddles, and wall runoff effects during rain.
+
+option.RAIN_OPACITY=Rain Opacity
+option.RAIN_OPACITY.comment=Controls how transparent rain is. 0 = invisible rain, 1 = vanilla opacity.
+
+option.RAIN_WIND_STRENGTH=Rain Wind Strength
+option.RAIN_WIND_STRENGTH.comment=Slants and sways rain in the wind. 0 = straight down.
+
+option.PUDDLES_ENABLED=Rain Puddles
+option.PUDDLES_ENABLED.comment=Adds puddles on mostly-flat surfaces during rain (uses the water reflection system).
+
+option.PUDDLES_STRENGTH=Puddle Strength
+option.PUDDLES_STRENGTH.comment=How much puddles appear on surfaces during rain.
+
+option.PUDDLES_REFLECTION_STRENGTH=Puddle Reflection Strength
+option.PUDDLES_REFLECTION_STRENGTH.comment=How reflective puddles are.
+
+option.WALL_RUNOFF_ENABLED=Wall Runoff
+option.WALL_RUNOFF_ENABLED.comment=Adds water runoff streaks flowing down vertical surfaces during rain.
+
+option.WALL_RUNOFF_STRENGTH=Wall Runoff Strength
+option.WALL_RUNOFF_STRENGTH.comment=How visible the runoff streaks are.
+
+option.WALL_RUNOFF_SPEED=Wall Runoff Speed
+option.WALL_RUNOFF_SPEED.comment=How fast the runoff flows downward.
+
+# --- Nether Fog ---
+
+screen.OVERWORLD_FOG=Overworld Fog
+screen.OVERWORLD_FOG.comment=Atmospheric distance haze in the Overworld. Distant terrain fades toward the horizon.
+
+option.OVERWORLD_FOG_ENABLED=Overworld Fog
+option.OVERWORLD_FOG_ENABLED.comment=Atmospheric distance haze in the Overworld. Distant terrain fades toward the horizon color. Works with DH/Voxy.
+
+option.OVERWORLD_FOG_DISTANCE=Fog Distance
+option.OVERWORLD_FOG_DISTANCE.comment=Distance where fog reaches full thickness (blocks). Increase for DH/Voxy long-range views.
+
+option.OVERWORLD_FOG_START=Fog Start
+option.OVERWORLD_FOG_START.comment=Distance from camera where fog begins. No fog closer than this.
+
+option.OVERWORLD_FOG_DENSITY=Fog Density
+option.OVERWORLD_FOG_DENSITY.comment=How thick the atmospheric haze is. Higher = denser.
+
+option.OVERWORLD_FOG_RAIN_BOOST=Rain Fog Boost
+option.OVERWORLD_FOG_RAIN_BOOST.comment=Extra fog density during rain. Added on top of base density.
+
+# --- Cave Fog ---
+screen.CAVE_FOG=Cave Fog
+screen.CAVE_FOG.comment=3D volumetric fog in underground areas. Animated noise creates drifting fog pockets in low-skylight caves and mines.
+
+option.CAVE_FOG_ENABLED=Cave Fog
+option.CAVE_FOG_ENABLED.comment=Enable volumetric cave fog. Ray-marched exponential fog in cave air. Only renders when camera skylight is 0 (underground). Color varies by biome and world height.
+
+option.CAVE_FOG_STEPS=Quality
+option.CAVE_FOG_STEPS.comment=Ray march step count. Higher = smoother with less banding but slightly more GPU cost.
+
+option.CAVE_FOG_DENSITY=Density
+option.CAVE_FOG_DENSITY.comment=Fog density per block. Higher values reach full opacity faster. At 0.08 the fog is roughly 91%% opaque at 30 blocks.
+
+option.CAVE_FOG_MAX_DIST=Max Ray Distance
+option.CAVE_FOG_MAX_DIST.comment=Maximum ray march distance in blocks. Beyond this the fog is assumed fully opaque so the march stops early to save cost.
+
+option.CAVE_FOG_USE_BIOME_SKY_COLOR=Use Biome Sky Color
+option.CAVE_FOG_USE_BIOME_SKY_COLOR.comment=Off by default. When enabled, cave fog ignores the hard-coded cave biome colors and uses the biome sky color instead.
+
+# --- Weather Fog ---
+
+screen.WEATHER_FOG=Weather Fog
+screen.WEATHER_FOG.comment=Volumetric fog during rain and thunder. Uses sky zenith color, height-limited above sea level.
+
+option.WEATHER_FOG_ENABLED=Weather Fog
+option.WEATHER_FOG_ENABLED.comment=Enable volumetric fog that appears during rain and gets denser during thunder. Ray marched with TAA smoothing.
+
+option.WEATHER_FOG_STEPS=Ray March Steps
+option.WEATHER_FOG_STEPS.comment=Number of ray march steps. More = smoother, higher GPU cost.
+
+option.WEATHER_FOG_DENSITY=Fog Density
+option.WEATHER_FOG_DENSITY.comment=Overall density of the weather fog. Higher = thicker.
+
+option.WEATHER_FOG_BRIGHTNESS=Brightness
+option.WEATHER_FOG_BRIGHTNESS.comment=Brightness multiplier for the weather fog color.
+
+option.WEATHER_FOG_NEAR_DIST=Near Distance
+option.WEATHER_FOG_NEAR_DIST.comment=Distance from camera where fog starts (blocks). Keeps area near the player clear.
+
+option.WEATHER_FOG_FAR_DIST=Far Distance
+option.WEATHER_FOG_FAR_DIST.comment=Distance where fog reaches maximum density (blocks).
+
+option.WEATHER_FOG_HEIGHT=Fog Height
+option.WEATHER_FOG_HEIGHT.comment=Height of the fog slab above sea level (blocks).
+
+option.WEATHER_FOG_CEILING_DENSITY=Ceiling Density
+option.WEATHER_FOG_CEILING_DENSITY.comment=Density of the animated ceiling fog layer at the top of the slab. 0 = no ceiling.
+
+option.WEATHER_FOG_CEILING_THICKNESS=Ceiling Thickness
+option.WEATHER_FOG_CEILING_THICKNESS.comment=Thickness of the ceiling fog layer (blocks from top of slab downward).
+
+option.WEATHER_FOG_INSIDE_OPACITY=Inside Opacity
+option.WEATHER_FOG_INSIDE_OPACITY.comment=Fog strength when the player is inside the fog slab.
+
+option.WEATHER_FOG_ABOVE_OPACITY=Above Opacity
+option.WEATHER_FOG_ABOVE_OPACITY.comment=Fog strength when the player is above the fog slab.
+
+option.WEATHER_FOG_THUNDER_BOOST=Thunder Boost
+option.WEATHER_FOG_THUNDER_BOOST.comment=Extra density multiplier during thunderstorms.
+
+option.WEATHER_FOG_NOISE_SCALE=Noise Scale
+option.WEATHER_FOG_NOISE_SCALE.comment=Scale of the 3D noise used for the ceiling animation. Smaller = larger patterns.
+
+option.WEATHER_FOG_TAA_BLEND=TAA Blend
+option.WEATHER_FOG_TAA_BLEND.comment=Temporal smoothing half-life (seconds). Higher = smoother but more ghosting.
+
+screen.LIGHTNING=Lightning
+screen.LIGHTNING.comment=Localized glow patches inside weather fog during thunderstorms. Brief bright pulses appear at random positions in the fog volume.
+
+option.LIGHTNING_ENABLED=Enabled
+option.LIGHTNING_ENABLED.comment=Enable lightning glow in weather fog during thunderstorms.
+
+option.LIGHTNING_BRIGHTNESS=Brightness
+option.LIGHTNING_BRIGHTNESS.comment=How bright the lightning glow patches are.
+
+option.LIGHTNING_INTERVAL=Interval
+option.LIGHTNING_INTERVAL.comment=Average seconds between lightning strikes per cell. Lower = more frequent flashes.
+
+option.LIGHTNING_R=Glow Red
+option.LIGHTNING_R.comment=Red component of the lightning glow color.
+
+option.LIGHTNING_G=Glow Green
+option.LIGHTNING_G.comment=Green component of the lightning glow color.
+
+option.LIGHTNING_B=Glow Blue
+option.LIGHTNING_B.comment=Blue component of the lightning glow color.
+
+screen.NETHER_FOG=Nether
+screen.NETHER_FOG.comment=Brightness and full-volume depth fog in Nether biomes.
+
+option.NETHER_BRIGHTNESS=Nether Brightness
+option.NETHER_BRIGHTNESS.comment=Master ambient brightness multiplier for the Nether. 1.0 = normal, higher = brighter, lower = darker.
+
+option.NETHER_FOG_ENABLED=Nether Fog
+option.NETHER_FOG_ENABLED.comment=Applies full-volume depth fog in Nether biomes using biome fog color. Ignores height limits.
+
+option.NETHER_DISTANCE_FOG_START=Fog Start Depth
+option.NETHER_DISTANCE_FOG_START.comment=Distance from camera where Nether fog begins. No fog closer than this.
+
+option.NETHER_FOG_DISTANCE=Fog End Depth
+option.NETHER_FOG_DISTANCE.comment=Distance from camera where Nether fog reaches full thickness. Shorter = thicker fog wall.
+
+option.NETHER_DISTANCE_FOG_OPACITY=Fog Density
+option.NETHER_DISTANCE_FOG_OPACITY.comment=How thick the Nether fog is. Higher values = denser, more opaque fog.
+
+option.NETHER_FOG_R=Fog Red
+option.NETHER_FOG_G=Fog Green
+option.NETHER_FOG_B=Fog Blue
+
+option.LAVA_CRUST_ENABLED=Lava Crust
+option.LAVA_CRUST_ENABLED.comment=Animated dark noise pattern on lava surfaces (top face: cooled crust; side faces: flowing wave bands). Soul Sand Valley uses a spiral pattern.
+
+option.LAVA_NOISE_INTENSITY=Crust Intensity
+option.LAVA_NOISE_INTENSITY.comment=How strong the cooled-crust pattern reads on lava. 0 = none, 1 = full Euphoria-style crust.
+
+option.LAVA_NOISE_AMOUNT=Crust Bias
+option.LAVA_NOISE_AMOUNT.comment=Shifts the noise threshold so more or less of the surface reads as solid crust vs molten gaps.
+
+option.LAVA_TEMPERATURE=Crust Glow
+option.LAVA_TEMPERATURE.comment=Adds warm emission glow back over the crust pattern. Negative = cooler/darker, positive = hotter/brighter.
+
+# ============================================================================
+#   4. WATER
+# ============================================================================
+
+screen.WATER=Water
+screen.WATER.comment=Water waves, surface color, and reflections.
+
+
+# --- Water Surface ---
+
+screen.WATER_SURFACE=Water Surface
+screen.WATER_SURFACE.comment=Water surface color, opacity, and specular settings.
+
+option.WATER_DEBUG_COLORS_ENABLED=Water Debug Colors
+option.WATER_DEBUG_COLORS_ENABLED.comment=Enable visual debug colors for the different faces of water for development.
+
+option.WATER_COLOR_R=Water Red
+option.WATER_COLOR_G=Water Green
+option.WATER_COLOR_B=Water Blue
+
+option.WATER_SATURATION=Color Saturation
+option.WATER_SATURATION.comment=Controls the vibrancy of chunk water. Lower = more washed out, higher = more vivid.
+
+option.WATER_DH_SATURATION=DH/Voxy Saturation
+option.WATER_DH_SATURATION.comment=Controls the vibrancy of DH/Voxy LOD water. Adjust separately to match chunk water.
+
+option.WATER_NIGHT_SATURATION=Night Saturation
+option.WATER_NIGHT_SATURATION.comment=Multiplier applied to water saturation at night. Below 1.0 desaturates water at night (more moody), above 1.0 boosts color. Applies to both chunk and DH/Voxy water.
+
+option.WATER_BRIGHTNESS=Water Brightness
+option.WATER_BRIGHTNESS.comment=Brightness multiplier for chunk water (vanilla render distance).
+
+option.WATER_DH_BRIGHTNESS=DH/Voxy Water Brightness
+option.WATER_DH_BRIGHTNESS.comment=Brightness multiplier for DH/Voxy LOD water. Adjust separately to match chunk water.
+
+option.WATER_SPECULAR_INTENSITY=Specular Intensity
+option.WATER_SPECULAR_INTENSITY.comment=Brightness of the specular highlight on water from the sun/moon. 0 = no highlight.
+
+option.WATER_OPACITY=Water Opacity
+option.WATER_OPACITY.comment=How opaque the water is. Lower = more see-through, 1 = fully opaque.
+
+option.WATER_BLUR_START=Blur Start
+option.WATER_BLUR_START.comment=Distance (blocks) where chunk water starts blurring into LOD water.
+
+option.WATER_BLUR_END=Blur End
+option.WATER_BLUR_END.comment=Distance (blocks) where chunk water blur reaches full strength.
+
+# --- Water Reflections ---
+
+screen.WATER_REFLECTIONS=Water Reflections
+screen.WATER_REFLECTIONS.comment=Screen-space reflections and sky reflections on water surfaces.
+
+option.WATER_REFLECTIONS_ENABLED=Enable Water Reflections
+option.WATER_REFLECTIONS_ENABLED.comment=Adds screen-space reflections to water surfaces. Reflects terrain, sky, and entities.
+option.WATER_CLOUD_REFLECTIONS_ENABLED=Cloud Reflections
+option.WATER_CLOUD_REFLECTIONS_ENABLED.comment=Reflect clouds on water surface. Can be expensive with vanilla clouds. Disable for better performance.
+
+option.WATER_SKY_REFLECTION=Sky Reflection
+option.WATER_SKY_REFLECTION.comment=How much sky color shows in water reflections. 0 = no sky reflection.
+
+option.WATER_SKY_BRIGHTNESS_DAY=Sky Day Brightness
+option.WATER_SKY_BRIGHTNESS_DAY.comment=Brightness of sky reflections during the day.
+
+option.WATER_SKY_BRIGHTNESS_NIGHT=Sky Night Brightness
+option.WATER_SKY_BRIGHTNESS_NIGHT.comment=Brightness of sky reflections at night.
+
+option.WATER_REFLECTION_BRIGHTNESS_DAY=SSR Day Brightness
+option.WATER_REFLECTION_BRIGHTNESS_DAY.comment=Brightness of terrain SSR reflections during the day.
+
+option.WATER_REFLECTION_BRIGHTNESS_NIGHT=SSR Night Brightness
+option.WATER_REFLECTION_BRIGHTNESS_NIGHT.comment=Brightness of terrain SSR reflections at night.
+
+option.WATER_REFLECTION_BLUR=Reflection Blur
+option.WATER_REFLECTION_BLUR.comment=Blur radius for water SSR reflections (pixels). Higher = softer reflections. 0 = sharp. Only affects water, not material reflections.
+
+option.SSR_RENDER_DISTANCE=SSR Distance
+option.SSR_RENDER_DISTANCE.comment=Max distance (blocks) for screen-space reflections. Beyond this, water only reflects the sky. Lower = better performance.
+
+option.REFLECTION_ITERATIONS=SSR Quality
+option.REFLECTION_ITERATIONS.comment=Ray march steps for screen-space reflections. Higher = reflects more distant objects but costs more GPU. If terrain only reflects near screen edges, increase this.
+
+option.WATER_WAVES_ENABLED=Water Waves
+option.WATER_WAVES_ENABLED.comment=Big ocean-like swells that distort reflections on the water surface.
+
+option.WATER_WAVE_STRENGTH=Wave Strength
+option.WATER_WAVE_STRENGTH.comment=How much the waves deform reflections. Higher = more distortion.
+
+option.WATER_WAVE_SCALE=Wave Scale
+option.WATER_WAVE_SCALE.comment=Size of the waves. Lower = larger, broader swells. Higher = tighter waves.
+
+option.WATER_WAVE_SPEED=Wave Speed
+option.WATER_WAVE_SPEED.comment=How fast the waves move across the surface.
+
+screen.WATER_FOAM=Shore Waves
+
+option.WATER_FOAM_ENABLED=Shore Waves
+option.WATER_FOAM_ENABLED.comment=Animated foam waves at shorelines in beach and ocean biomes.
+
+option.WATER_FOAM_WIDTH=Foam Width
+option.WATER_FOAM_WIDTH.comment=How far from shore the foam extends (in blocks of water depth).
+option.WATER_FOAM_WIDTH.suffix= blocks
+
+option.WATER_FOAM_INTENSITY=Foam Intensity
+option.WATER_FOAM_INTENSITY.comment=Brightness of the shore foam.
+
+option.WATER_FOAM_COLOR_R=Foam Red
+option.WATER_FOAM_COLOR_R.comment=Red channel of foam color.
+option.WATER_FOAM_COLOR_G=Foam Green
+option.WATER_FOAM_COLOR_G.comment=Green channel of foam color.
+option.WATER_FOAM_COLOR_B=Foam Blue
+option.WATER_FOAM_COLOR_B.comment=Blue channel of foam color.
+
+option.WATER_PLAYER_FOAM_ENABLED=Player Foam
+option.WATER_PLAYER_FOAM_ENABLED.comment=Interactive foam ring and expanding ripples around the player when standing in or near water.
+
+option.WATER_PLAYER_FOAM_RADIUS=Foam Radius
+option.WATER_PLAYER_FOAM_RADIUS.comment=How far the foam extends around the player (in blocks).
+option.WATER_PLAYER_FOAM_RADIUS.suffix= blocks
+
+option.WATER_PLAYER_FOAM_INTENSITY=Foam Intensity
+option.WATER_PLAYER_FOAM_INTENSITY.comment=Brightness of the player foam effect.
+
+
+# ============================================================================
+#   5. MATERIALS
+# ============================================================================
+
+screen.MATERIALS=Materials
+screen.MATERIALS.comment=Surface material effects: metalness, reflections, leaf sheen, glass filter, and fake terrain.
+
+# --- PBR Materials ---
+
+screen.PBR_SETTINGS=PBR Materials
+screen.PBR_SETTINGS.comment=PBR resource pack support and default material specular highlights.
+
+option.PBR_ENABLED=Enable PBR
+option.PBR_ENABLED.comment=Enables PBR material rendering. Supports LabPBR and oldPBR resource packs. Also adds specular highlights to wood and stone.
+
+option.PBR_SPECULAR_STRENGTH=Specular Strength
+option.PBR_SPECULAR_STRENGTH.comment=Intensity of PBR specular highlights on surfaces.
+
+option.PBR_NORMAL_STRENGTH=Normal Map Strength
+option.PBR_NORMAL_STRENGTH.comment=How strongly normal maps from PBR resource packs affect the surface. 0 = flat, 1 = full strength.
+
+option.DEFAULT_WOOD_ROUGHNESS=Wood Roughness
+option.DEFAULT_WOOD_ROUGHNESS.comment=Surface roughness for wood blocks when no PBR resource pack is installed. Lower = shinier.
+
+option.DEFAULT_STONE_ROUGHNESS=Stone Roughness
+option.DEFAULT_STONE_ROUGHNESS.comment=Surface roughness for stone blocks when no PBR resource pack is installed. Lower = shinier.
+
+# --- Metalness ---
+
+screen.METALNESS=Metalness
+screen.METALNESS.comment=Fake PBR metallic shading for metal and gem blocks.
+
+option.METALNESS_ENABLED=Enable Metalness
+option.METALNESS_ENABLED.comment=Adds metallic reflections and specular highlights to metal blocks (iron, gold, copper) and gems (diamond, emerald).
+
+option.METALNESS_INTENSITY=Intensity
+option.METALNESS_INTENSITY.comment=Reflection strength of metallic surfaces. Higher = more mirror-like.
+
+option.METALNESS_FRESNEL=Fresnel
+option.METALNESS_FRESNEL.comment=Edge reflection boost. Real metals reflect more at glancing angles.
+
+option.METALNESS_ROUGHNESS=Roughness
+option.METALNESS_ROUGHNESS.comment=Specular highlight sharpness. Lower = sharper/tighter highlight, higher = broader/softer.
+
+option.GEM_SPARKLE=Gem Sparkle
+option.GEM_SPARKLE.comment=Extra sparkle intensity for diamond, emerald, and other gem blocks. 0 = no sparkle.
+
+# --- Material Reflections ---
+
+screen.MATERIAL_REFLECTIONS=Material Reflections
+screen.MATERIAL_REFLECTIONS.comment=Screen-space reflections on polished, smooth, and glazed block surfaces. Separate from water reflections.
+
+option.MATERIAL_REFLECTIONS_ENABLED=Enable Material Reflections
+option.MATERIAL_REFLECTIONS_ENABLED.comment=Adds SSR reflections to polished stone, smooth stone, glazed terracotta, prismarine bricks, and other polished surfaces.
+
+option.MATERIAL_REFLECTION_AMOUNT=Reflection Strength
+option.MATERIAL_REFLECTION_AMOUNT.comment=How reflective the material surfaces are. Higher = stronger mirror-like reflections.
+
+option.MATERIAL_REFLECTION_FRESNEL=Fresnel Strength
+option.MATERIAL_REFLECTION_FRESNEL.comment=Boosts reflections at glancing angles (looking across the surface). Real materials reflect more at shallow angles.
+
+# --- Leaf Sheen ---
+
+screen.LEAF_SHEEN=Leaf Sheen
+screen.LEAF_SHEEN.comment=Subsurface scattering and fresnel rim effects on leaf blocks for natural-looking foliage.
+
+option.LEAF_SHEEN_ENABLED=Enable Leaf Sheen
+option.LEAF_SHEEN_ENABLED.comment=Adds subsurface glow and fresnel rim highlights to leaf blocks for a lush, natural look.
+
+option.LEAF_SSS_STRENGTH=SSS Strength
+option.LEAF_SSS_STRENGTH.comment=Subsurface scattering: warm glow through back-lit leaves (sun shining through canopy).
+
+option.LEAF_FRESNEL_STRENGTH=Fresnel Strength
+option.LEAF_FRESNEL_STRENGTH.comment=Bright rim at grazing viewing angles, like a waxy sheen on leaf edges.
+
+option.LEAF_SHADOW_TRANSMITTANCE=Shadow Transmittance
+option.LEAF_SHADOW_TRANSMITTANCE.comment=Subtle light leak onto back faces of leaves in shadow. 0 = no leak.
+
+option.LEAF_SHADOW_SOFTNESS=Shadow Softness
+option.LEAF_SHADOW_SOFTNESS.comment=How much to blur shadows on leaf blocks. Higher values soften shadow edges, hiding the blocky leaf geometry for a more natural look.
+
+# --- Glass Filter ---
+
+screen.GLASS_FILTER=Glass Filter
+screen.GLASS_FILTER.comment=Stained-glass color filtering that tints everything seen through colored glass.
+
+option.GLASS_FILTER_ENABLED=Glass Color Enforcement
+option.GLASS_FILTER_ENABLED.comment=Tints everything seen through glass using the glass color (stained-glass style). Not just an overlay.
+
+option.GLASS_FILTER_STRENGTH=Filter Strength
+option.GLASS_FILTER_STRENGTH.comment=Overall strength of the glass color enforcement.
+
+option.GLASS_FILTER_ENFORCEMENT=Filter Enforcement
+option.GLASS_FILTER_ENFORCEMENT.comment=0 = subtle multiply, 1 = strong luminance-based color enforcement.
+
+option.GLASS_FILTER_SATURATION=Filter Saturation
+option.GLASS_FILTER_SATURATION.comment=Boosts saturation of the glass tint color used for filtering.
+
+# --- Fake Terrain ---
+
+screen.FAKE_TERRAIN=Fake Terrain
+screen.FAKE_TERRAIN.comment=Fills the void beyond loaded chunks with a flat ground plane for a less empty horizon.
+
+option.FAKE_TERRAIN_ENABLED=Enable Fake Terrain
+option.FAKE_TERRAIN_ENABLED.comment=Renders a flat ground plane beyond loaded chunks to fill the void at the horizon.
+
+option.FAKE_TERRAIN_Y=Ground Level (Y)
+option.FAKE_TERRAIN_Y.comment=Y level of the fake ground plane. Match this to your world's terrain height (63 = sea level).
+
+option.FAKE_TERRAIN_START=Start Distance
+option.FAKE_TERRAIN_START.comment=Distance (blocks) from the player where fake terrain begins rendering.
+
+option.FAKE_TERRAIN_DISTANCE=Max Distance
+option.FAKE_TERRAIN_DISTANCE.comment=How far the fake terrain extends from the player.
+
+# ============================================================================
+#   6. POST PROCESSING
+# ============================================================================
+
+screen.POST_PROCESSING=Post Processing
+screen.POST_PROCESSING.comment=Bloom, outlines, TAA, FXAA, color correction, and color grading effects.
+
+# --- TAA ---
+
+screen.TAA_SETTINGS=Temporal Anti-Aliasing
+screen.TAA_SETTINGS.comment=Blends frames over time for smoother volumetric clouds and reduced aliasing. Greatly improves cloud quality at no extra cost.
+
+option.TAA_ENABLED=Enable TAA
+option.TAA_ENABLED.comment=Temporal Anti-Aliasing. Blends current and previous frames together for much smoother volumetric clouds and reduced visual noise. May cause slight ghosting during fast camera movement.
+
+option.TAA_BLEND=History Blend
+option.TAA_BLEND.comment=How much of the previous frame to keep. Higher values = smoother result but more ghosting on fast movement. 0.90 is a good balance.
+
+# --- FXAA ---
+
+screen.FXAA_SETTINGS=FXAA Anti-Aliasing
+screen.FXAA_SETTINGS.comment=Fast Approximate Anti-Aliasing. Smooths jagged block edges at distance without affecting toon outlines.
+
+option.FXAA_ENABLED=Enable FXAA
+option.FXAA_ENABLED.comment=Smooths jagged staircase edges on distant block geometry. Does not blur toon outlines (they are drawn after FXAA).
+
+option.FXAA_QUALITY=Smoothing Quality
+option.FXAA_QUALITY.comment=Sub-pixel smoothing strength. Higher = smoother edges but slightly softer image. 1.0 is a good balance.
+
+# --- Bloom ---
+
+screen.BLOOM=Bloom
+screen.BLOOM.comment=Soft glow around bright areas and particles.
+
+option.BLOOM_ENABLED=Enable Bloom
+option.BLOOM_ENABLED.comment=Adds a soft glow effect around bright areas of the screen.
+
+option.BLOOM_INTENSITY=Bloom Master Strength
+option.BLOOM_INTENSITY.comment=Overall bloom brightness for both near and far lights.
+
+option.BLOOM_RADIUS=Bloom Master Radius
+option.BLOOM_RADIUS.comment=Overall bloom spread multiplier for both near and far lights.
+
+option.BLOOM_CLOSE_STRENGTH=Close Strength
+option.BLOOM_CLOSE_STRENGTH.comment=Bloom brightness multiplier for nearby lights.
+
+option.BLOOM_CLOSE_RADIUS=Close Radius
+option.BLOOM_CLOSE_RADIUS.comment=Bloom spread multiplier for nearby lights.
+
+option.BLOOM_FAR_STRENGTH=Far Strength
+option.BLOOM_FAR_STRENGTH.comment=Bloom brightness multiplier for distant lights.
+
+option.BLOOM_FAR_RADIUS=Far Radius
+option.BLOOM_FAR_RADIUS.comment=Bloom spread multiplier for distant lights.
+option.ENTITY_BLOOM_STRENGTH=Entity Strength
+option.ENTITY_BLOOM_STRENGTH.comment=Extra bloom brightness applied only to emissive entities like spider and enderman eyes.
+option.ENTITY_BLOOM_RADIUS=Entity Radius
+option.ENTITY_BLOOM_RADIUS.comment=Extra bloom spread applied only to emissive entities like spider and enderman eyes.
+
+option.BLOOM_SATURATION=Bloom Saturation
+option.BLOOM_SATURATION.comment=Color vividness of bloom glow. 1.0 = natural, higher = more vivid colors, 0 = grayscale bloom.
+
+option.BLOOM_DAY_STRENGTH=Day Strength
+option.BLOOM_DAY_STRENGTH.comment=Bloom intensity during daytime on the surface. Reduces bloom in bright sunlight to prevent washout. Underground areas are unaffected.
+
+option.BLOOM_DISTANCE_COMPENSATION=Distance Boost
+option.BLOOM_DISTANCE_COMPENSATION.comment=Boosts bloom on distant emissive blocks to compensate for them covering fewer pixels. 0 = off, higher = stronger boost at distance.
+
+option.PARTICLE_BLOOM_INTENSITY=Particle Bloom
+option.PARTICLE_BLOOM_INTENSITY.comment=Extra bloom intensity for particles (fire, enchant, redstone, etc.).
+
+option.PARTICLE_BLOOM_THRESHOLD=Particle Threshold
+option.PARTICLE_BLOOM_THRESHOLD.comment=Brightness threshold for particle bloom. Lower = more particles glow.
+
+option.PARTICLE_BLOOM_WARMTH=Particle Warmth
+option.PARTICLE_BLOOM_WARMTH.comment=Warm color bias for particle bloom glow.
+
+# --- Outlines ---
+
+screen.OUTLINES=Outlines
+screen.OUTLINES.comment=Cartoon/anime-style edge outlines on geometry.
+
+option.OUTLINES=Outline Mode
+option.OUTLINES.comment=Edge outline style. Off disables outlines. Standard draws clean edges. Dungeons style adds thicker, stylized edges.
+
+value.OUTLINES.0=Off
+value.OUTLINES.1=Standard
+value.OUTLINES.2=Dungeons Style
+
+option.OUTLINE_BRIGHTNESS=Outline Brightness
+option.OUTLINE_BRIGHTNESS.comment=Brightness of the outlines. Negative = darker outlines (black lines), positive = brighter outlines (white lines).
+option.OUTLINE_SATURATION=Outline Saturation
+option.OUTLINE_SATURATION.comment=How vivid the outline color is. 1 = current scene color, higher = more saturated outlines, 0 = grayscale.
+
+option.OUTLINE_PIXEL_SIZE=Outline Thickness
+option.OUTLINE_PIXEL_SIZE.comment=Thickness of outlines in pixels. Higher = thicker, more visible lines.
+
+# --- Color Correction ---
+
+screen.COLOR_CORRECTION=Color Correction
+screen.COLOR_CORRECTION.comment=Sharpening, saturation, contrast, and brightness adjustments.
+
+option.POST_SHARPEN=Enable Sharpening
+option.POST_SHARPEN.comment=Applies a sharpening filter to the final image. Adds edge definition.
+
+option.POST_SHARPEN_STRENGTH=Sharpen Strength
+option.POST_SHARPEN_STRENGTH.comment=How aggressively edges are sharpened. Higher = more noticeable but may add artifacts.
+
+option.POST_SATURATION=Saturation
+option.POST_SATURATION.comment=Color saturation of the final image. 1 = unchanged, lower = washed out, higher = more vivid.
+
+option.POST_CONTRAST=Contrast
+option.POST_CONTRAST.comment=Contrast of the final image. 1 = unchanged, lower = flatter, higher = punchier darks and lights.
+
+option.POST_BRIGHTNESS=Brightness
+option.POST_BRIGHTNESS.comment=Brightness offset applied to the final image. 0 = unchanged.
+
+# --- Color Grading ---
+
+screen.COLOR_GRADING=Color Grading
+screen.COLOR_GRADING.comment=Professional color grading tools: style presets, temperature, split toning, lift/gamma/gain, and creative effects.
+
+option.COLOR_GRADING_ENABLED=Enable Color Grading
+option.COLOR_GRADING_ENABLED.comment=Master toggle for all color grading effects below.
+
+screen.CG_STYLE_PRESETS=Style Presets
+screen.CG_STYLE_PRESETS.comment=Quick-apply cinematic color looks. Each preset adjusts temperature, tint, and saturation for a specific mood.
+
+option.CG_STYLE_PRESET=Style Preset
+option.CG_STYLE_PRESET.comment=Pre-made color grading look. Overrides manual settings when active.
+
+value.CG_STYLE_PRESET.0=None
+value.CG_STYLE_PRESET.1=Cinematic
+value.CG_STYLE_PRESET.2=Vintage
+value.CG_STYLE_PRESET.3=Cyberpunk
+value.CG_STYLE_PRESET.4=Horror
+value.CG_STYLE_PRESET.5=Fantasy
+value.CG_STYLE_PRESET.6=Nordic
+value.CG_STYLE_PRESET.7=Tropical
+value.CG_STYLE_PRESET.8=Noir
+
+option.CG_STYLE_INTENSITY=Preset Intensity
+option.CG_STYLE_INTENSITY.comment=Blends between no preset (0) and full preset effect (1). Use to subtly mix in a preset look.
+
+screen.CG_TEMPERATURE_TINT=Temperature & Tint
+screen.CG_TEMPERATURE_TINT.comment=White balance adjustment. Temperature shifts warm/cool, tint shifts green/magenta.
+
+option.CG_TEMPERATURE=Temperature
+option.CG_TEMPERATURE.comment=Color temperature shift. Negative = cool/blue, positive = warm/orange.
+
+option.CG_TINT=Tint
+option.CG_TINT.comment=Color tint shift. Negative = green, positive = magenta.
+
+screen.CG_SPLIT_TONING=Split Toning
+screen.CG_SPLIT_TONING.comment=Tint shadows and highlights with different colors for cinematic looks.
+
+option.CG_SPLIT_TONING_ENABLED=Enable Split Toning
+option.CG_SPLIT_TONING_ENABLED.comment=Adds separate color tinting to dark areas (shadows) and bright areas (highlights).
+
+option.CG_SPLIT_TONING_INTENSITY=Intensity
+option.CG_SPLIT_TONING_INTENSITY.comment=Overall strength of the split toning effect. 0 = off, 1 = full color.
+
+option.CG_SPLIT_TONING_BALANCE=Balance
+option.CG_SPLIT_TONING_BALANCE.comment=Shifts the toning toward shadows or highlights. -1 = shadow heavy, 0 = balanced, 1 = highlight heavy.
+
+screen.CG_SHADOW_COLOR=Shadow Tint Color
+screen.CG_SHADOW_COLOR.comment=Color applied to dark areas of the image.
+
+option.CG_SHADOW_TINT_R=Shadow Red
+option.CG_SHADOW_TINT_G=Shadow Green
+option.CG_SHADOW_TINT_B=Shadow Blue
+
+screen.CG_HIGHLIGHT_COLOR=Highlight Tint Color
+screen.CG_HIGHLIGHT_COLOR.comment=Color applied to bright areas of the image.
+
+option.CG_HIGHLIGHT_TINT_R=Highlight Red
+option.CG_HIGHLIGHT_TINT_G=Highlight Green
+option.CG_HIGHLIGHT_TINT_B=Highlight Blue
+
+screen.CG_LIFT_GAMMA_GAIN=Lift / Gamma / Gain
+screen.CG_LIFT_GAMMA_GAIN.comment=Professional three-way color correction. Lift = shadows, Gamma = midtones, Gain = highlights. Each has per-channel RGB control.
+
+screen.CG_LIFT=Lift (Shadows)
+screen.CG_LIFT.comment=Per-channel shadow color adjustment. Values below 1 darken, above 1 brighten shadow tones.
+
+option.CG_LIFT_R=Red
+option.CG_LIFT_G=Green
+option.CG_LIFT_B=Blue
+
+screen.CG_GAMMA=Gamma (Midtones)
+screen.CG_GAMMA.comment=Per-channel midtone color adjustment. Values below 1 brighten, above 1 darken midtones.
+
+option.CG_GAMMA_R=Red
+option.CG_GAMMA_G=Green
+option.CG_GAMMA_B=Blue
+
+screen.CG_GAIN=Gain (Highlights)
+screen.CG_GAIN.comment=Per-channel highlight color adjustment. Values below 1 dim, above 1 boost bright areas.
+
+option.CG_GAIN_R=Red
+option.CG_GAIN_G=Green
+option.CG_GAIN_B=Blue
+
+option.CG_HUE_SHIFT=Hue Shift
+option.CG_HUE_SHIFT.comment=Rotates all colors around the color wheel (in degrees). 0 = no change, 180 = inverted hues.
+
+option.CG_VIBRANCE=Vibrance
+option.CG_VIBRANCE.comment=Intelligent saturation that boosts less-saturated colors more than already-vivid ones. Negative = desaturate.
+
+screen.CG_EFFECTS=Effects
+screen.CG_EFFECTS.comment=Posterization, texture palette, vignette, and film grain.
+
+screen.CG_POSTERIZE=Posterize
+screen.CG_POSTERIZE.comment=Reduces color levels for a retro/comic book look. Applies to the entire final image.
+
+option.CG_POSTERIZE_ENABLED=Enable Posterize
+option.CG_POSTERIZE_ENABLED.comment=Limits color levels for a stylized flat-color appearance.
+
+option.CG_POSTERIZE_LEVELS=Color Levels
+option.CG_POSTERIZE_LEVELS.comment=Number of color levels per channel. Lower = more stylized (3 = comic book, 16+ = subtle).
+
+option.CG_POSTERIZE_DITHER=Dithering
+option.CG_POSTERIZE_DITHER.comment=Adds noise to reduce visible color banding between posterized levels.
+
+screen.CG_TEXTURE_PALETTE=Texture Palette
+screen.CG_TEXTURE_PALETTE.comment=Limits color levels on block textures for a stylized/retro look.
+
+option.TEXTURE_PALETTE_ENABLED=Enable Texture Palette
+option.TEXTURE_PALETTE_ENABLED.comment=Reduces color depth on block textures. Creates a retro/stylized appearance.
+
+option.TEXTURE_PALETTE_LEVELS=Color Levels
+option.TEXTURE_PALETTE_LEVELS.comment=Number of color levels per channel. Lower = more stylized, higher = smoother gradients.
+
+screen.CG_VIGNETTE=Vignette
+screen.CG_VIGNETTE.comment=Darkened edges for a cinematic/focused look.
+
+option.CG_VIGNETTE_ENABLED=Enable Vignette
+option.CG_VIGNETTE_ENABLED.comment=Darkens the edges of the screen for a cinematic effect.
+
+option.CG_VIGNETTE_INTENSITY=Intensity
+option.CG_VIGNETTE_INTENSITY.comment=How dark the vignette edges get. 0 = none, 1 = heavy darkening.
+
+option.CG_VIGNETTE_RADIUS=Radius
+option.CG_VIGNETTE_RADIUS.comment=How far from the center the darkening starts. Lower = larger dark area.
+
+option.CG_VIGNETTE_SOFTNESS=Softness
+option.CG_VIGNETTE_SOFTNESS.comment=How smoothly the vignette transitions from clear to dark.
+
+option.CG_VIGNETTE_ROUNDNESS=Roundness
+option.CG_VIGNETTE_ROUNDNESS.comment=Shape of the vignette. 1 = circular, lower = more elliptical (following screen shape).
+
+screen.CG_FILM_GRAIN=Film Grain
+screen.CG_FILM_GRAIN.comment=Cinematic noise overlay for a filmic look.
+
+option.CG_FILM_GRAIN_ENABLED=Enable Film Grain
+option.CG_FILM_GRAIN_ENABLED.comment=Adds animated noise over the image for a cinematic film look.
+
+option.CG_FILM_GRAIN_LUMINANCE=Monochrome Grain
+option.CG_FILM_GRAIN_LUMINANCE.comment=When enabled, grain is grayscale only. Disable for colored grain.
+
+option.CG_FILM_GRAIN_INTENSITY=Intensity
+option.CG_FILM_GRAIN_INTENSITY.comment=How visible the grain noise is.
+
+option.CG_FILM_GRAIN_SIZE=Grain Size
+option.CG_FILM_GRAIN_SIZE.comment=Size of the grain particles. Higher = larger, more coarse grain.
+
+# ============================================================================
+#   7. ANIMATION
+# ============================================================================
+
+screen.ANIMATION=Animation
+screen.ANIMATION.comment=Plant waving, leaf movement, lantern sway, and player interaction with vegetation.
+
+option.MAGICAL_TOUCH=Magical Touch
+option.MAGICAL_TOUCH.comment=Master toggle for the shader's stylized lively look. When ON, it enables flatter entity shading plus the extra foliage sheen/transmittance and soft foliage shadow tricks. When OFF, those stylized lighting tricks are reduced, but waving and outlines can still be controlled separately.
+
+option.WAVING_PLANTS=Waving Plants
+option.WAVING_PLANTS.comment=Enable waving animation on plants, flowers, and grass.
+
+option.WAVING_LEAVES=Waving Leaves
+option.WAVING_LEAVES.comment=Enable waving animation on tree leaves.
+
+option.WAVING_STYLE=Waving Style
+option.WAVING_STYLE.comment=Visual style of plant waving animation.
+
+value.WAVING_STYLE.0=Style A
+value.WAVING_STYLE.1=Style B
+
+screen.WAVING_GENERAL=General Waving
+screen.WAVING_GENERAL.comment=Speed and intensity for general plant waving (non-grass vegetation).
+
+option.WAVING_SPEED=Waving Speed
+option.WAVING_SPEED.comment=How fast plants sway. Higher = faster waving.
+
+option.WAVING_INTENSITY=Waving Intensity
+option.WAVING_INTENSITY.comment=How far plants move when waving. Higher = bigger swings.
+
+screen.WAVING_GRASS=Grass Waving
+screen.WAVING_GRASS.comment=Separate speed and intensity for grass waving.
+
+option.GRASS_WAVING_SPEED=Grass Speed
+option.GRASS_WAVING_SPEED.comment=How fast grass sways. Separate from other plant waving speed.
+
+option.GRASS_WAVING_INTENSITY=Grass Intensity
+option.GRASS_WAVING_INTENSITY.comment=How far grass moves when waving. Higher = bigger swings.
+
+screen.WAVING_LANTERNS=Lantern Sway
+screen.WAVING_LANTERNS.comment=Gentle swinging motion on hanging lanterns.
+
+option.SWAYING_LANTERNS=Enable Lantern Sway
+option.SWAYING_LANTERNS.comment=Hanging lanterns gently swing back and forth.
+
+option.LANTERN_SWAY_SPEED=Sway Speed
+option.LANTERN_SWAY_SPEED.comment=How fast lanterns swing.
+
+option.LANTERN_SWAY_INTENSITY=Sway Intensity
+option.LANTERN_SWAY_INTENSITY.comment=How far lanterns swing from center.
+
+screen.WAVING_DISTANCE=Distance Boost
+screen.WAVING_DISTANCE.comment=Increases waving intensity at a distance so distant plants are still visibly animated.
+
+option.WAVING_DISTANCE_BOOST_MAX=Max Boost
+option.WAVING_DISTANCE_BOOST_MAX.comment=Maximum waving intensity multiplier at far distance.
+
+option.WAVING_DISTANCE_BOOST_START=Boost Start
+option.WAVING_DISTANCE_BOOST_START.comment=Distance (blocks) where the waving boost begins.
+
+option.WAVING_DISTANCE_BOOST_END=Boost End
+option.WAVING_DISTANCE_BOOST_END.comment=Distance (blocks) where the waving boost reaches maximum.
+
+screen.WAVING_INTERACTION=Player Interaction
+screen.WAVING_INTERACTION.comment=Plants and grass react to the player walking through them.
+
+option.PLAYER_PLANT_INTERACTION=Enable Interaction
+option.PLAYER_PLANT_INTERACTION.comment=Plants bend away from the player when walking through them.
+
+option.PLAYER_INTERACTION_INTENSITY=Plant Push Intensity
+option.PLAYER_INTERACTION_INTENSITY.comment=How much plants bend away from the player.
+
+option.GRASS_INTERACTION_INTENSITY=Grass Push Intensity
+option.GRASS_INTERACTION_INTENSITY.comment=How much grass bends away from the player.
+
+option.GRASS_INTERACTION_RADIUS=Push Radius
+option.GRASS_INTERACTION_RADIUS.comment=Radius (blocks) around the player where grass is pushed aside.
+
+# ============================================================================
+#   8. END DIMENSION
+# ============================================================================
+
+screen.END_DIMENSION=End Dimension
+screen.END_DIMENSION.comment=Otherworldly void visuals for the End dimension: custom sky, stars, nebula, aurora, particles, and fog.
+
+screen.ADDONS=Addons
+screen.ADDONS.comment=Utility and extra experimental effects.
+screen.AMBIENCE=Ambience
+screen.AMBIENCE.comment=Ambient world-space particle effects and atmosphere extras.
+
+option.TORNADO_LEAVES_ENABLED=Flying Leaf Particles
+option.TORNADO_LEAVES_ENABLED.comment=Enables the shader's flying leaf particles. When OFF, the whole flying-leaf system is compiled out and does no background work.
+
+option.FLYING_LEAF_DENSITY=Leaf Density
+option.FLYING_LEAF_DENSITY.comment=Overall density of ambient flying leaves. Higher = more active leaf cells and more visible leaves.
+
+option.FLYING_LEAF_TRAIL_MAX=Leaves Per Trail
+option.FLYING_LEAF_TRAIL_MAX.comment=Maximum number of leaves in each grouped trail. Lower = shorter trails and less work.
+
+option.FLYING_LEAF_RENDER_RADIUS=Render Radius
+option.FLYING_LEAF_RENDER_RADIUS.comment=Radius in blocks around the player where flying leaves can render. Default is 50 blocks.
+
+# --- End Sky ---
+
+option.END_SKY_ENABLED=Enable End Sky
+option.END_SKY_ENABLED.comment=Master toggle for all End dimension visuals (sky, stars, nebula, aurora, particles). Disable to use default sky.
+
+screen.END_SKY_COLORS=End Sky Colors
+screen.END_SKY_COLORS.comment=Base sky gradient colors for the End void ? horizon, mid, and zenith layers.
+
+option.END_SKY_BRIGHTNESS=Sky Brightness
+option.END_SKY_BRIGHTNESS.comment=Overall brightness multiplier for the End sky.
+
+screen.END_HORIZON_COLOR=Horizon Color
+screen.END_HORIZON_COLOR.comment=Color at the horizon edge of the End sky.
+
+option.END_SKY_HORIZON_R=Horizon Red
+option.END_SKY_HORIZON_G=Horizon Green
+option.END_SKY_HORIZON_B=Horizon Blue
+
+screen.END_MID_COLOR=Mid Color
+screen.END_MID_COLOR.comment=Color in the middle band of the End sky.
+
+option.END_SKY_MID_R=Mid Red
+option.END_SKY_MID_G=Mid Green
+option.END_SKY_MID_B=Mid Blue
+
+screen.END_ZENITH_COLOR=Zenith Color
+screen.END_ZENITH_COLOR.comment=Color directly overhead in the End sky.
+
+option.END_SKY_ZENITH_R=Zenith Red
+option.END_SKY_ZENITH_G=Zenith Green
+option.END_SKY_ZENITH_B=Zenith Blue
+
+# --- End Stars ---
+
+screen.END_STARS_SETTINGS=End Stars
+screen.END_STARS_SETTINGS.comment=Dense, always-visible star field with purple/teal color variation.
+
+option.END_STARS_ENABLED=Enable End Stars
+option.END_STARS_ENABLED.comment=Dense star field that is always visible in the End sky.
+
+option.END_STAR_DENSITY=Star Density
+option.END_STAR_DENSITY.comment=How many stars fill the End sky. Higher = denser star field.
+
+option.END_STAR_BRIGHTNESS=Star Brightness
+option.END_STAR_BRIGHTNESS.comment=Brightness of individual End stars.
+
+option.END_STAR_COLOR_SHIFT=Color Variation
+option.END_STAR_COLOR_SHIFT.comment=How much stars shift between purple, blue, teal, and warm white. 0 = all white.
+
+# --- End Nebula ---
+
+screen.END_NEBULA_SETTINGS=End Nebula
+screen.END_NEBULA_SETTINGS.comment=Wispy cosmic clouds drifting across the End sky, blending two tone colors.
+
+screen.END_NEBULA_COLOR1=Nebula Color 1
+screen.END_NEBULA_COLOR1.comment=Primary nebula cloud color (default: purple).
+
+screen.END_NEBULA_COLOR2=Nebula Color 2
+screen.END_NEBULA_COLOR2.comment=Secondary nebula cloud color (default: teal/cyan).
+
+option.END_NEBULA_ENABLED=Enable Nebula
+option.END_NEBULA_ENABLED.comment=Wispy cosmic cloud formations drifting across the End sky.
+
+option.END_NEBULA_INTENSITY=Nebula Intensity
+option.END_NEBULA_INTENSITY.comment=Brightness of the nebula clouds. Higher = more vivid.
+
+option.END_NEBULA_SCALE=Nebula Scale
+option.END_NEBULA_SCALE.comment=Size of nebula cloud patterns. Lower = larger sweeping clouds.
+
+option.END_NEBULA_SPEED=Nebula Speed
+option.END_NEBULA_SPEED.comment=How fast the nebula drifts across the sky. 0 = frozen.
+
+option.END_NEBULA_R1=Color 1 Red
+option.END_NEBULA_G1=Color 1 Green
+option.END_NEBULA_B1=Color 1 Blue
+
+option.END_NEBULA_R2=Color 2 Red
+option.END_NEBULA_G2=Color 2 Green
+option.END_NEBULA_B2=Color 2 Blue
+
+# --- End Aurora ---
+
+screen.END_AURORA_SETTINGS=End Aurora
+screen.END_AURORA_SETTINGS.comment=Shimmering aurora curtains across the End sky.
+
+screen.END_AURORA_COLOR1=Aurora Color 1
+screen.END_AURORA_COLOR1.comment=Primary aurora curtain color (default: purple-magenta).
+
+screen.END_AURORA_COLOR2=Aurora Color 2
+screen.END_AURORA_COLOR2.comment=Secondary aurora curtain color (default: teal-green).
+
+option.END_AURORA_ENABLED=Enable Aurora
+option.END_AURORA_ENABLED.comment=Shimmering vertical energy curtains across the End sky.
+
+option.END_AURORA_INTENSITY=Aurora Intensity
+option.END_AURORA_INTENSITY.comment=Brightness of the aurora curtains.
+
+option.END_AURORA_SPEED=Aurora Speed
+option.END_AURORA_SPEED.comment=How fast the aurora shimmers and shifts.
+
+option.END_AURORA_HEIGHT=Aurora Height
+option.END_AURORA_HEIGHT.comment=Vertical position of the aurora band in the sky. Lower = closer to horizon.
+
+option.END_AURORA_R1=Color 1 Red
+option.END_AURORA_G1=Color 1 Green
+option.END_AURORA_B1=Color 1 Blue
+
+option.END_AURORA_R2=Color 2 Red
+option.END_AURORA_G2=Color 2 Green
+option.END_AURORA_B2=Color 2 Blue
+
+# --- End Vortex ---
+
+screen.END_VORTEX_SETTINGS=Void Vortex
+screen.END_VORTEX_SETTINGS.comment=Gravitational lensing effect below the island ? warps and stretches stars and nebula like a black hole.
+
+screen.END_VORTEX_GLOW_COLOR=Core Glow Color
+screen.END_VORTEX_GLOW_COLOR.comment=Color of the subtle glow at the vortex center.
+
+option.END_VORTEX_ENABLED=Enable Void Vortex
+option.END_VORTEX_ENABLED.comment=Warps the sky below the island like gravitational lensing ? stars and nebula get stretched and pulled inward toward a central point.
+
+option.END_VORTEX_INTENSITY=Intensity
+option.END_VORTEX_INTENSITY.comment=Brightness of the vortex light streaks. Higher = more visible.
+
+option.END_VORTEX_SPEED=Rotation Speed
+option.END_VORTEX_SPEED.comment=How fast the spiral rotates.
+
+option.END_VORTEX_ARMS=Spiral Arms
+option.END_VORTEX_ARMS.comment=Number of spiral arms. More arms = denser pattern.
+
+option.END_VORTEX_TIGHTNESS=Spiral Tightness
+option.END_VORTEX_TIGHTNESS.comment=How tightly the light spirals inward. Higher = more coiled.
+
+option.END_VORTEX_CORE_SIZE=Core Glow Size
+option.END_VORTEX_CORE_SIZE.comment=Size of the subtle glow at the very center of the vortex.
+
+option.END_VORTEX_R2=Glow Red
+option.END_VORTEX_G2=Glow Green
+option.END_VORTEX_B2=Glow Blue
+
+# --- End Rings ---
+
+screen.END_RINGS_SETTINGS=Planetary Rings
+screen.END_RINGS_SETTINGS.comment=Saturn-like rings centered on the End island. Fixed in world space with proper perspective.
+
+screen.END_RINGS_COLOR=Ring Color
+screen.END_RINGS_COLOR.comment=Base color for the planetary rings.
+
+option.END_RINGS_ENABLED=Enable Planetary Rings
+option.END_RINGS_ENABLED.comment=Adds glowing planetary rings around the End center island, like Saturn's rings. Fixed in world space at (0, 64, 0).
+
+option.END_RINGS_COUNT=Number of Rings
+option.END_RINGS_COUNT.comment=How many ring bands to render. Each band is at a different distance and tilt.
+
+option.END_RINGS_BRIGHTNESS=Brightness
+option.END_RINGS_BRIGHTNESS.comment=Overall brightness of the rings.
+
+option.END_RINGS_SPEED=Precession Speed
+option.END_RINGS_SPEED.comment=How fast the ring tilts rotate (precession). Set to 0 for static rings.
+
+option.END_RINGS_INNER=Inner Radius
+option.END_RINGS_INNER.comment=Distance (in blocks) from the island center to the inner edge of the first ring.
+
+option.END_RINGS_WIDTH=Band Width
+option.END_RINGS_WIDTH.comment=Width of each ring band in blocks. The total ring system extends from Inner Radius to Inner Radius + Width + (Count x 30).
+
+option.END_RINGS_DEPTH=Ring Thickness
+option.END_RINGS_DEPTH.comment=Vertical thickness of the ring slab in blocks. Gives the ring 3D depth ? thicker rings glow brighter at glancing angles.
+
+option.END_RINGS_R=Ring Red
+option.END_RINGS_G=Ring Green
+option.END_RINGS_B=Ring Blue
+
+# --- End Void Clouds ---
+
+screen.END_VOID_CLOUDS_SETTINGS=Void Clouds
+screen.END_VOID_CLOUDS_SETTINGS.comment=Volumetric swirling clouds that wrap around the End island, creating a cosmic storm tunnel effect.
+
+screen.END_VOID_CLOUD_COLOR1=Cloud Color 1
+screen.END_VOID_CLOUD_COLOR1.comment=Primary cloud color (default: deep purple).
+
+screen.END_VOID_CLOUD_COLOR2=Cloud Color 2
+screen.END_VOID_CLOUD_COLOR2.comment=Secondary cloud color for variation (default: dark indigo).
+
+option.END_VOID_CLOUDS_ENABLED=Enable Void Clouds
+option.END_VOID_CLOUDS_ENABLED.comment=Volumetric-style swirling clouds that create a dramatic tunnel wrapping around the End island. Uses raymarching for convincing depth and thickness.
+
+option.END_VOID_CLOUD_INTENSITY=Cloud Brightness
+option.END_VOID_CLOUD_INTENSITY.comment=Overall brightness of the void clouds.
+
+option.END_VOID_CLOUD_STEPS=Quality (Steps)
+option.END_VOID_CLOUD_STEPS.comment=Raymarch steps for cloud rendering. Higher = better quality but more expensive. 8 = fast, 16 = balanced, 32 = high quality.
+
+option.END_VOID_CLOUD_COVERAGE=Cloud Coverage
+option.END_VOID_CLOUD_COVERAGE.comment=How much of the sky is filled with clouds. Lower = more clouds, higher = more gaps and open sky.
+
+option.END_VOID_CLOUD_DENSITY=Cloud Thickness
+option.END_VOID_CLOUD_DENSITY.comment=Optical density of the clouds. Higher = more opaque and solid-looking.
+
+option.END_VOID_CLOUD_SCALE=Cloud Scale
+option.END_VOID_CLOUD_SCALE.comment=Size of the cloud formations. Lower = bigger sweeping formations, higher = smaller more detailed.
+
+option.END_VOID_CLOUD_SPEED=Drift Speed
+option.END_VOID_CLOUD_SPEED.comment=How fast the clouds drift through space. 0 = frozen.
+
+option.END_VOID_CLOUD_SWIRL=Swirl Tightness
+option.END_VOID_CLOUD_SWIRL.comment=How tightly the clouds spiral. 0 = no swirl (straight clouds), 10 = tight vortex. Creates the tunnel/storm effect.
+
+option.END_VOID_CLOUD_SWIRL_SPEED=Swirl Rotation
+option.END_VOID_CLOUD_SWIRL_SPEED.comment=How fast the spiral pattern rotates.
+
+option.END_VOID_CLOUD_CLEARING=Island Clearing
+option.END_VOID_CLOUD_CLEARING.comment=Width of the clear zone around the horizon where the island sits. Higher = wider opening in the clouds.
+
+option.END_VOID_CLOUD_EDGE_GLOW=Edge Glow
+option.END_VOID_CLOUD_EDGE_GLOW.comment=Brightness boost at cloud edges, creating a silver-lining or internal-glow effect.
+
+option.END_VOID_CLOUD_R1=Color 1 Red
+option.END_VOID_CLOUD_G1=Color 1 Green
+option.END_VOID_CLOUD_B1=Color 1 Blue
+
+option.END_VOID_CLOUD_R2=Color 2 Red
+option.END_VOID_CLOUD_G2=Color 2 Green
+option.END_VOID_CLOUD_B2=Color 2 Blue
+
+# --- End Ender Particles ---
+
+screen.END_ENDER_PARTICLES_SETTINGS=Ender Particles
+screen.END_ENDER_PARTICLES_SETTINGS.comment=Floating glowing motes drifting in the air around the player in the End dimension.
+
+option.END_ENDER_PARTICLES_ENABLED=Enable Ender Particles
+option.END_ENDER_PARTICLES_ENABLED.comment=Floating glowing motes drifting in the air around the player. Purple, magenta, and cyan particles that add atmosphere to the End.
+
+option.END_ENDER_PARTICLE_DENSITY=Particle Density
+option.END_ENDER_PARTICLE_DENSITY.comment=How many particles appear. Higher = more particles in the air.
+
+option.END_ENDER_PARTICLE_BRIGHTNESS=Brightness
+option.END_ENDER_PARTICLE_BRIGHTNESS.comment=How bright the floating particles glow.
+
+option.END_ENDER_PARTICLE_SIZE=Particle Size
+option.END_ENDER_PARTICLE_SIZE.comment=Size of each individual particle mote.
+
+option.END_ENDER_PARTICLE_SPACING=Spacing
+option.END_ENDER_PARTICLE_SPACING.comment=Distance between particle grid cells. Smaller = denser field, larger = more spread out.
+
+option.END_ENDER_PARTICLE_RANGE=View Range
+option.END_ENDER_PARTICLE_RANGE.comment=How far away particles are visible. Higher = particles visible at greater distance.
+
+# --- End Void Particles ---
+
+screen.END_VOID_PARTICLES_SETTINGS=End Void Particles
+screen.END_VOID_PARTICLES_SETTINGS.comment=Small pulsing specks drifting through the End void.
+
+option.END_VOID_PARTICLES_ENABLED=Enable Void Particles
+option.END_VOID_PARTICLES_ENABLED.comment=Small glowing specks that pulse and drift through the End void.
+
+option.END_VOID_PARTICLE_DENSITY=Particle Density
+option.END_VOID_PARTICLE_DENSITY.comment=How many void particles appear in the sky.
+
+option.END_VOID_PARTICLE_BRIGHTNESS=Particle Brightness
+option.END_VOID_PARTICLE_BRIGHTNESS.comment=Brightness of individual void particles.
+
+# --- End Warp Streaks ---
+
+screen.END_ASTEROIDS_SETTINGS=Warp Streaks
+screen.END_ASTEROIDS_SETTINGS.comment=Rare, fast-flying streaks that zip across the End sky ? like asteroids or debris flashing past at high speed.
+
+option.END_ASTEROIDS_ENABLED=Enable Warp Streaks
+option.END_ASTEROIDS_ENABLED.comment=Rare, fast streaks that flash across the End sky like debris flying past at high speed.
+
+option.END_ASTEROID_DENSITY=Frequency
+option.END_ASTEROID_DENSITY.comment=How often warp streaks appear. Lower = rarer and more dramatic.
+
+option.END_ASTEROID_SPEED=Speed
+option.END_ASTEROID_SPEED.comment=How fast the streaks zip across the sky.
+
+option.END_ASTEROID_BRIGHTNESS=Brightness
+option.END_ASTEROID_BRIGHTNESS.comment=Brightness of the warp streaks.
+
+option.END_ASTEROID_LENGTH=Streak Length
+option.END_ASTEROID_LENGTH.comment=How long each streak trail is.
+
+option.END_ASTEROID_THICKNESS=Streak Thickness
+option.END_ASTEROID_THICKNESS.comment=How thick each streak is.
+
+# --- End Lighting ---
+
+screen.END_LIGHTING_SETTINGS=End Lighting
+screen.END_LIGHTING_SETTINGS.comment=Blocklight, emissive brightness, and bloom settings for the End dimension. Makes lit areas and glowing blocks stand out.
+
+option.END_BLOCKLIGHT_BRIGHTNESS=Blocklight Brightness
+option.END_BLOCKLIGHT_BRIGHTNESS.comment=How bright block light sources appear in the End. Higher values make lit areas stand out more from the dark ambient.
+
+option.END_EMISSIVE_BOOST=Emissive Boost
+option.END_EMISSIVE_BOOST.comment=Brightness multiplier for glowing blocks (end rods, glowstone, etc.) in the End. Makes emissive blocks pop against dark terrain.
+
+option.END_BLOOM_BOOST=Bloom Boost
+option.END_BLOOM_BOOST.comment=Bloom intensity multiplier for the End dimension. Higher values create stronger glow halos around emissive blocks.
+
+option.END_BLOCKLIGHT_R=Light Tint Red
+option.END_BLOCKLIGHT_G=Light Tint Green
+option.END_BLOCKLIGHT_B=Light Tint Blue
+
+# --- End Terrain Patches ---
+
+screen.END_TERRAIN_PATCHES_SETTINGS=Terrain Patches
+screen.END_TERRAIN_PATCHES_SETTINGS.comment=Adds patches of slight darkness to End ground for visual variety on flat end stone.
+
+option.END_TERRAIN_PATCHES_ENABLED=Enable Terrain Patches
+option.END_TERRAIN_PATCHES_ENABLED.comment=Adds random patches of slight darkness to End ground surfaces, giving the flat yellow end stone more visual variety and texture.
+
+option.END_TERRAIN_PATCH_STRENGTH=Patch Darkness
+option.END_TERRAIN_PATCH_STRENGTH.comment=How much darker the patches are. 0.25 = subtle shading, 0.50 = very noticeable.
+
+option.END_TERRAIN_PATCH_SCALE=Patch Scale
+option.END_TERRAIN_PATCH_SCALE.comment=Controls the size of the patches. Lower = larger patches (up to ~10 blocks), higher = smaller more detailed patches.
+
+# --- End Fog ---
+
+screen.END_FOG_SETTINGS=End Fog
+screen.END_FOG_SETTINGS.comment=Dark depth fog that fades distant blocks into the void.
+
+option.END_FOG_ENABLED=Enable End Fog
+option.END_FOG_ENABLED.comment=Dark depth fog that fades distant blocks into the void. Works with both volumetric and distance fog modes.
+
+option.END_FOG_DISTANCE=Fog Distance
+option.END_FOG_DISTANCE.comment=Distance where End fog reaches full thickness. Shorter = denser void.
+
+option.END_FOG_START=Fog Start
+option.END_FOG_START.comment=Distance from camera where End fog begins. No fog closer than this.
+
+option.END_FOG_DENSITY=Fog Density
+option.END_FOG_DENSITY.comment=How thick the End fog is. Higher = denser, more opaque void mist.
+
+option.END_FOG_R=Fog Red
+option.END_FOG_G=Fog Green
+option.END_FOG_B=Fog Blue
+
+# --- End Void Event ---
+
+screen.END_VOID_EVENT_SETTINGS=Void Event
+screen.END_VOID_EVENT_SETTINGS.comment=Cinematic sky event cycle. The vortex periodically implodes into darkness, then explodes back with a cosmic eye opening at its center.
+
+option.END_EVENT_ENABLED=Enable Void Event
+option.END_EVENT_ENABLED.comment=Cinematic End sky event. Every few minutes the vortex accelerates, implodes into total darkness, then explodes back like a Big Bang with shockwave rings and a cosmic eye.
+
+option.END_EVENT_CYCLE=Cycle Duration
+option.END_EVENT_CYCLE.comment=Total cycle time in seconds. The event plays during the last ~48-58s of each cycle; the rest is bright time. You can type any value directly into shaders/settings.glsl for longer durations.
+
+value.END_EVENT_CYCLE.60.0=1 min
+value.END_EVENT_CYCLE.120.0=2 min
+value.END_EVENT_CYCLE.180.0=3 min
+value.END_EVENT_CYCLE.240.0=4 min
+value.END_EVENT_CYCLE.300.0=5 min
+value.END_EVENT_CYCLE.420.0=7 min
+value.END_EVENT_CYCLE.600.0=10 min
+value.END_EVENT_CYCLE.900.0=15 min
+value.END_EVENT_CYCLE.1200.0=20 min
+
+option.END_EVENT_BLACKOUT=Blackout Duration
+option.END_EVENT_BLACKOUT.comment=How long the total darkness lasts (in seconds) before the Big Bang explosion. You can type any value directly into shaders/settings.glsl for longer durations.
+
+value.END_EVENT_BLACKOUT.3.0=3s
+value.END_EVENT_BLACKOUT.5.0=5s
+value.END_EVENT_BLACKOUT.7.0=7s
+value.END_EVENT_BLACKOUT.10.0=10s
+value.END_EVENT_BLACKOUT.15.0=15s
+value.END_EVENT_BLACKOUT.20.0=20s
+value.END_EVENT_BLACKOUT.30.0=30s
+value.END_EVENT_BLACKOUT.45.0=45s
+value.END_EVENT_BLACKOUT.60.0=1 min
+value.END_EVENT_BLACKOUT.90.0=1.5 min
+value.END_EVENT_BLACKOUT.120.0=2 min
+value.END_EVENT_BLACKOUT.180.0=3 min
+value.END_EVENT_BLACKOUT.300.0=5 min
+value.END_EVENT_BLACKOUT.600.0=10 min
+
+option.END_EVENT_EYE_ENABLED=Enable Vortex Eye
+option.END_EVENT_EYE_ENABLED.comment=After the Big Bang explosion, a cosmic eye opens at the vortex center, stares at you, blinks, then closes.
+
+screen.END_EVENT_EYE_COLOR=Eye Iris Color
+screen.END_EVENT_EYE_COLOR.comment=Color of the cosmic eye's iris that appears after the Big Bang.
+
+option.END_EVENT_EYE_IRIS_R=Iris Red
+option.END_EVENT_EYE_IRIS_G=Iris Green
+option.END_EVENT_EYE_IRIS_B=Iris Blue
+
+option.END_EVENT_SPOTLIGHT_ENABLED=Eye Spotlight
+option.END_EVENT_SPOTLIGHT_ENABLED.comment=Theatre-style spotlight shines down from the cosmic eye onto the player when it opens. Follows the player, blinks with the eye, fades when it closes.
+
+option.END_EVENT_SPOTLIGHT_RADIUS=Spotlight Radius
+option.END_EVENT_SPOTLIGHT_RADIUS.comment=Half-width of the spotlight beam in blocks. Default 3.5 = a 7x7 block area. Controls both ground illumination and the volumetric light beam width.
+
+option.END_EVENT_SPOTLIGHT_INTENSITY=Spotlight Intensity
+option.END_EVENT_SPOTLIGHT_INTENSITY.comment=How bright the spotlight is. Higher values make the illuminated area more visible against the dark End terrain.
+
+# ============================================================================
+#   9. COMPATIBILITY
+# ============================================================================
+
+screen.COMPATIBILITY=Compatibility
+screen.COMPATIBILITY.comment=World offset adjustments and LOD mod compatibility settings.
+
+option.SEA_LEVEL_OFFSET=Sea Level Offset
+option.SEA_LEVEL_OFFSET.comment=Offsets fog/cloud heights without moving terrain. Useful for custom world heights.
+
+screen.DISTANT_HORIZONS=Distant Horizons
+screen.DISTANT_HORIZONS.comment=Settings for the Distant Horizons mod (LOD chunks beyond normal render distance).
+
+screen.VOXY=Voxy
+screen.VOXY.comment=Settings for the Voxy LOD renderer.
+
+option.DH_BRIGHTNESS=DH Brightness
+option.DH_BRIGHTNESS.comment=Brightness multiplier for Distant Horizons terrain. Adjust to match vanilla chunk brightness.
+
+option.DH_GRASS_BRIGHTNESS=DH Grass Brightness
+option.DH_GRASS_BRIGHTNESS.comment=Brightness multiplier for grass blocks on DH LODs only. DH grass uses biome-baked colors that tend to read darker than chunk grass — tune this to match nearby chunk terrain.
+
+option.DH_LEAF_BRIGHTNESS=DH Leaf Brightness
+option.DH_LEAF_BRIGHTNESS.comment=Brightness multiplier for leaf blocks on DH LODs only. Tune to match nearby chunk foliage.
+
+option.VOXY_LOD_BRIGHTNESS=Voxy LOD Brightness
+option.VOXY_LOD_BRIGHTNESS.comment=Brightness multiplier for Voxy LOD terrain only. Fine 0.01-step control to match nearby chunk brightness precisely.
+
+option.VOXY_SKY_TINT_BOOST=Sky Tint Boost
+option.VOXY_SKY_TINT_BOOST.comment=Scales the warm/cool sky-color tint applied to LOD terrain. 1.0 = same tint strength as chunks, higher = more tinted. Raise if LODs look less sky-tinted than nearby chunks.
+
+option.VOXY_SHADOW_OPACITY=Face Shading
+option.VOXY_SHADOW_OPACITY.comment=Controls the contrast between lit and shaded faces on Voxy LOD blocks. 0 = flat/uniform brightness, 1 = default shading, higher = exaggerated contrast.
+
+option.VOXY_SSS_ENABLED=Screen Space Shadows
+option.VOXY_SSS_ENABLED.comment=Projects sun shadows from chunk geometry onto Voxy LOD terrain via a screen-space depth raymarch. Disable to skip the SSS pass on LOD pixels (small perf win).
+
+option.VOXY_LEAF_BRIGHTNESS=Leaf Brightness
+option.VOXY_LEAF_BRIGHTNESS.comment=Brightness multiplier for leaf blocks on Voxy LODs. Reduce to darken bright leaves.
+
+screen.OAK_LEAF_FACES=Oak Leaf Faces
+screen.OAK_LEAF_FACES.comment=Per-face brightness tuning for oak leaves on Voxy LODs. Adjust each face independently to get uniform appearance. Disable if using a resource pack that changes leaf textures.
+
+option.VOXY_OAK_LEAF_FACES=Enable Face Tweaks
+option.VOXY_OAK_LEAF_FACES.comment=Enables per-face brightness adjustment for oak leaves on Voxy LODs. Turn off if a resource pack changes oak leaf textures and the tweaks no longer match.
+
+option.VOXY_OAK_LEAF_TOP=Top
+option.VOXY_OAK_LEAF_TOP.comment=Brightness multiplier for the top face (UP) of oak leaf blocks. Stacks with Leaf Brightness.
+
+option.VOXY_OAK_LEAF_BOTTOM=Bottom
+option.VOXY_OAK_LEAF_BOTTOM.comment=Brightness multiplier for the bottom face (DOWN) of oak leaf blocks. Stacks with Leaf Brightness.
+
+option.VOXY_OAK_LEAF_NORTH=North
+option.VOXY_OAK_LEAF_NORTH.comment=Brightness multiplier for the north face of oak leaf blocks. Stacks with Leaf Brightness.
+
+option.VOXY_OAK_LEAF_SOUTH=South
+option.VOXY_OAK_LEAF_SOUTH.comment=Brightness multiplier for the south face of oak leaf blocks. Stacks with Leaf Brightness.
+
+option.VOXY_OAK_LEAF_WEST=West
+option.VOXY_OAK_LEAF_WEST.comment=Brightness multiplier for the west face of oak leaf blocks. Stacks with Leaf Brightness.
+
+option.VOXY_OAK_LEAF_EAST=East
+option.VOXY_OAK_LEAF_EAST.comment=Brightness multiplier for the east face of oak leaf blocks. Stacks with Leaf Brightness.
+
+option.VOXY_GRASS_BRIGHTNESS=Grass Brightness
+option.VOXY_GRASS_BRIGHTNESS.comment=Brightness multiplier for grass blocks on Voxy LODs. Fine 0.02-step increments for precise matching with nearby chunks.
+
+option.VOXY_NIGHT_BRIGHTNESS=Night Brightness
+option.VOXY_NIGHT_BRIGHTNESS.comment=Controls how bright Voxy LODs are at night. Higher = brighter nighttime terrain. 0 = no night ambient.
+
+option.VOXY_HIGHLIGHT_COMPRESS=Highlight Compress
+option.VOXY_HIGHLIGHT_COMPRESS.comment=Compresses bright colors to prevent snow, stone, and other light blocks from blowing out. 0 = off, higher = stronger. Use with higher LOD Brightness to lift darks without clipping brights.
+
+option.VOXY_LOD_OUTLINES=LOD Outlines
+option.VOXY_LOD_OUTLINES.comment=Enables cel-shading outlines on Voxy LOD terrain. Off by default since outlines on distant LODs can look noisy.
+
+option.VOXY_TILE_BLUR_ENABLED=Face Flatten
+option.VOXY_TILE_BLUR_ENABLED.comment=Flattens distant Voxy block faces to a single solid color. Reduces texture noise on far LODs. Ramps with distance.
+
+option.VOXY_TILE_BLUR_START=Flatten Start
+option.VOXY_TILE_BLUR_START.comment=Depth where face flattening begins. 0 = at camera, 0.85 = only distant LODs. Higher = more of the world keeps texture detail.
+
+option.VOXY_CONTRAST=Contrast
+option.VOXY_CONTRAST.comment=Contrast for Voxy LOD terrain. 1.0 = unchanged, higher = punchier darks and lights, lower = flatter.
+
+option.VOXY_SATURATION=Saturation
+option.VOXY_SATURATION.comment=Color saturation for Voxy LOD terrain. 0.0 = grayscale, 1.0 = unchanged, higher = oversaturated.
+
+option.VOXY_EMISSIVE_INTENSITY=Emissive Intensity
+option.VOXY_EMISSIVE_INTENSITY.comment=Emissive glow strength on Voxy LOD blocks. 0 = disabled, 1 = same as regular blocks.
+
+option.VOXY_EMISSIVE_COLOR_STRENGTH=Emissive Color
+option.VOXY_EMISSIVE_COLOR_STRENGTH.comment=How much emissive Voxy blocks keep their original color. 0 = white glow, 1 = full color.
+
+option.VOXY_EMISSIVE_BRIGHTNESS_CAP=Emissive Cap
+option.VOXY_EMISSIVE_BRIGHTNESS_CAP.comment=Maximum brightness for emissive Voxy blocks. Lower = less white blowout.
+
+screen.CHUNK_FADE_OUT_SETTINGS=Chunk Fade Out Settings
+screen.CHUNK_FADE_OUT_SETTINGS.comment=Settings for distance-based chunk fade around the player.
+option.CHUNK_FADE_OUT_ENABLED=Chunk Fade Out
+option.CHUNK_FADE_OUT_ENABLED.comment=Fades distant chunks out based on player radius.
+option.CHUNK_FADE_OUT_RADIUS=Fade Radius
+option.CHUNK_FADE_OUT_RADIUS.comment=Radius in blocks around the player where chunk fade begins.
+
+option.DH_CONTRAST=DH Contrast
+option.DH_CONTRAST.comment=Contrast for Distant Horizons LOD terrain. 1 = unchanged, higher = punchier darks and lights, lower = flatter.
+
+option.DH_EMISSIVE_INTENSITY=DH Emissive Intensity
+option.DH_EMISSIVE_INTENSITY.comment=Emissive glow strength on DH chunks. Makes lit areas visible at extreme distance.
+
+option.DH_EMISSIVE_COLOR_STRENGTH=DH Emissive Color
+option.DH_EMISSIVE_COLOR_STRENGTH.comment=How much emissive areas keep their original block color. 0 = white glow, 1 = full block color.
+
+option.DH_EMISSIVE_BRIGHTNESS_CAP=DH Emissive Cap
+option.DH_EMISSIVE_BRIGHTNESS_CAP.comment=Maximum brightness for emissive DH blocks. Prevents overly bright distant glowing areas.
+
+option.DH_EMISSIVE_THRESHOLD=DH Emissive Threshold
+option.DH_EMISSIVE_THRESHOLD.comment=Brightness level above which DH blocks are treated as emissive. Lower = more blocks glow.
+
+option.DH_EMISSIVE_DEBUG=DH Emissive Debug
+option.DH_EMISSIVE_DEBUG.comment=Highlights which DH blocks are detected as emissive. Use to fine-tune threshold.
+
+option.DH_OVERDRAW_DISTANCE=Overdraw Distance
+option.DH_OVERDRAW_DISTANCE.comment=Distance (blocks) where vanilla and DH chunks overlap. Prevents visible seam between vanilla and DH terrain.
+
+option.DH_OVERDRAW_FADE_LENGTH=Overdraw Fade
+option.DH_OVERDRAW_FADE_LENGTH.comment=Length of the crossfade zone between vanilla and DH terrain. Longer = smoother transition.
