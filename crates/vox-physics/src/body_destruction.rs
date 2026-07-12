@@ -12,7 +12,7 @@
 
 
 use glam::{IVec3, Quat, Vec3};
-use vox_core::MaterialRegistry;
+use vox_core::{FxHashMap, FxHashSet, MaterialRegistry};
 use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
 use vox_world::{AIR, Voxel};
 
@@ -441,19 +441,56 @@ pub fn carve_body_sphere_at_impact(
     phys.despawn(id);
     let mut ids = finish_carve(phys, registry, grid, voxel_size_m, parent);
 
-    // Debris from the actual carved voxels: convert local grid positions
-    // to world space and spawn small flying bodies from them.
+    // Debris from actual carved voxels: cluster adjacent same-material
+    // voxels into small chunks (not single pebbles). Sample ~20% of
+    // removed voxels as debris seeds, then grow small clusters.
     let world_center = center_world_m;
+    let mut used: FxHashSet<IVec3> = FxHashSet::default();
+    let removed_map: FxHashMap<IVec3, Voxel> = removed.iter().cloned().collect();
+
     for (local_pos, mat) in &removed {
-        if *mat == AIR { continue; }
-        // Sample ~30% of removed voxels as single-voxel debris.
+        if *mat == AIR || used.contains(local_pos) { continue; }
+        // Sample ~20% as cluster seeds.
         let h = crate::destruction::small_hash(_seed, local_pos.x as u32);
-        if h % 3 != 0 { continue; }
+        if h % 5 != 0 { continue; }
 
-        let local_m = (local_pos.as_vec3() + 0.5) * voxel_size_m + parent.grid_offset;
-        let world_pos = parent.pos + parent.rot * local_m;
+        // Grow a small cluster (up to 4 voxels) of same-material neighbors.
+        let mut cluster: Vec<IVec3> = vec![*local_pos];
+        used.insert(*local_pos);
+        let mut frontier: Vec<IVec3> = vec![*local_pos];
+        while cluster.len() < 4 && !frontier.is_empty() {
+            let v = frontier.pop().unwrap();
+            for d in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                let n = v + d;
+                if !used.contains(&n) {
+                    if let Some(&nm) = removed_map.get(&n) {
+                        if nm == *mat {
+                            used.insert(n);
+                            cluster.push(n);
+                            frontier.push(n);
+                            if cluster.len() >= 4 { break; }
+                        }
+                    }
+                }
+            }
+        }
 
-        let grid = VoxelGrid::new(IVec3::ONE, vec![*mat]);
+        // Build a VoxelGrid from the cluster.
+        let mut min = IVec3::splat(i32::MAX);
+        let mut max = IVec3::splat(i32::MIN);
+        for &v in &cluster { min = min.min(v); max = max.max(v); }
+        let dims = max - min + IVec3::ONE;
+        let mut voxels = vec![AIR; (dims.x * dims.y * dims.z) as usize];
+        for &v in &cluster {
+            let l = v - min;
+            voxels[(l.x + l.z * dims.x + l.y * dims.x * dims.z) as usize] = *mat;
+        }
+
+        // Place at cluster center in world space.
+        let center_local = (min.as_vec3() + dims.as_vec3() * 0.5) * voxel_size_m + parent.grid_offset;
+        let world_pos = parent.pos + parent.rot * center_local;
+
+        let grid = VoxelGrid::new(dims, voxels);
         let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, world_pos) else { continue; };
 
         // Launch along impact direction with inherited velocity.
@@ -463,7 +500,7 @@ pub fn carve_body_sphere_at_impact(
         let speed = (_impact_speed * 0.4).min(4.0);
         body.vel = parent.vel + dir * speed + Vec3::Y * speed * 0.3;
 
-        let h2 = crate::destruction::small_hash(_seed ^ 0xdead, local_pos.y as u32);
+        let h2 = crate::destruction::small_hash(_seed ^ 0xdead, cluster[0].y as u32);
         body.omega = parent.omega + Vec3::new(
             ((h2 & 0xFF) as f32 / 255.0 - 0.5) * 0.4,
             (((h2 >> 8) & 0xFF) as f32 / 255.0 - 0.5) * 0.4,
