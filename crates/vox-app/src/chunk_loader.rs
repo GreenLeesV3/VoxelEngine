@@ -237,11 +237,8 @@ impl ChunkLoader {
                 for dz in -CANOPY_REACH_CHUNKS..=CANOPY_REACH_CHUNKS {
                     for dx in -CANOPY_REACH_CHUNKS..=CANOPY_REACH_CHUNKS {
                         let neighbor = IVec3::new(key.x + dx, key.y + dy, key.z + dz);
-                        let ndx = neighbor.x - center_chunk.x;
-                        let ndz = neighbor.z - center_chunk.z;
-                        if ndx.abs() > detail_ring || ndz.abs() > detail_ring {
-                            continue;
-                        }
+                        // Trees are structural terrain, not LOD detail —
+                        // always root regardless of distance tier.
                         let trees = trees_for_chunk(&world.cfg, &self.terrain, neighbor);
                         for tree in &trees {
                             stamp_tree(world, tree, self.tree_mats);

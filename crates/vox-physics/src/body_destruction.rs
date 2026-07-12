@@ -562,16 +562,8 @@ pub fn carve_body_sphere_at_impact(
     };
     phys.despawn(id);
     let mut ids = finish_carve(phys, registry, grid, voxel_size_m, parent);
-    ids.extend(spawn_impact_chips(
-        phys,
-        registry,
-        &removed,
-        voxel_size_m,
-        &parent,
-        impact_dir,
-        impact_speed,
-        seed,
-    ));
+    // Debris comes from finish_carve (actual fractured voxels).
+    // No template chip spawning — natural breakage only.
     ids
 }
 

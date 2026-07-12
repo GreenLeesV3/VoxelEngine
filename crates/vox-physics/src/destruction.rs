@@ -50,7 +50,7 @@ use std::collections::BinaryHeap;
 
 use glam::{IVec3, Vec3, Vec3Swizzles};
 use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
-use vox_core::{FxHashSet, MaterialRegistry, voxel_at, voxel_center_m};
+use vox_core::{FxHashMap, FxHashSet, MaterialRegistry, voxel_at, voxel_center_m};
 use vox_world::{AIR, SolidLookup, Voxel, World};
 
 use crate::BodyId;
@@ -620,13 +620,10 @@ const DEBRIS_CHIP_MAX_SPEED_M_S: f32 = 6.0;
 /// contribution, not the total a chip might end up spinning at.
 const DEBRIS_CHIP_SPIN_MAX: f32 = 0.3;
 
-/// Turn a deterministic sample of `removed` into small (single-voxel)
-/// flying debris chips with outward-radial velocity from `center_m`, scaled
-/// by `power` — a bomb should leave visible rubble scattered around the
-/// crater it just carved, not a clean void with nothing to show for it.
-/// The voxels themselves are assumed already cleared to air by the
-/// caller's carve; this only adds new bodies representing some of what was
-/// there. Deterministic from `seed` (same seed, same chips, same throw).
+/// Turn a deterministic sample of `removed` into small flying debris bodies
+/// made from the ACTUAL removed voxels — not template shapes. Each debris
+/// body is a small cluster of adjacent removed voxels with the same material,
+/// preserving the real fracture pattern of the broken terrain.
 fn spawn_debris_chips(
     phys: &mut PhysicsWorld,
     registry: &MaterialRegistry,
@@ -639,16 +636,12 @@ fn spawn_debris_chips(
     if removed.is_empty() {
         return Vec::new();
     }
+
     let target =
         ((removed.len() as f32 * DEBRIS_CHIP_FRACTION) as usize).clamp(1, MAX_DEBRIS_CHIPS);
 
     // Deterministic sample: rank every removed voxel by a seeded hash and
-    // take the lowest `target`. A full sort here would cost O(n log n) over
-    // *every* removed voxel just to keep a couple dozen -- for a large
-    // terrain blast (tens of thousands of removed voxels) that dwarfs
-    // everything else `blast` does. A partial selection only needs to
-    // partition the smallest `target` to the front, without fully
-    // ordering the rest: O(n) average instead.
+    // take the lowest `target` as seed voxels for debris clusters.
     let mut ranked: Vec<(u32, usize)> = removed
         .iter()
         .enumerate()
@@ -659,41 +652,60 @@ fn spawn_debris_chips(
         ranked.truncate(target);
     }
 
+    // Build a map of all removed positions for quick neighbor lookup.
+    let removed_map: FxHashMap<IVec3, Voxel> = removed.iter().cloned().collect();
+    let mut used: FxHashSet<IVec3> = FxHashSet::default();
     let mut ids = Vec::with_capacity(target);
-    for &(h, i) in ranked.iter().take(target) {
-        let (v, mat) = removed[i];
-        let chip_center_m = voxel_center_m(v, voxel_size_m);
-        // Chip shape: pick from 3 templates by hash for visual variety.
-        // All avoid the single-voxel and straight-bar degenerate cases
-        // (no torque-free axis of rotation — see the L-shape comment below).
-        // Template 0 (33%): 3-voxel L-triomino (2x2x1 minus one corner).
-        // Template 1 (33%): 5-voxel plus-sign (3x3x1 cross).
-        // Template 2 (33%): 7-voxel block (2x2x2 minus one corner).
-        // Larger chips (5, 7 voxels) are above CLUTTER_MAX_VOXELS (4) so
-        // they persist — smaller center rubble clears in 35-60s, larger
-        // edge chunks stay as permanent debris.
-        let template = h % 3;
-        let (dims, voxels) = if template == 0 {
-            // 3-voxel L-triomino: 2x2x1 minus one corner.
-            let mut vs = vec![mat; 4];
-            vs[(h as usize) % 4] = AIR;
-            (IVec3::new(2, 2, 1), vs)
-        } else if template == 1 {
-            // 5-voxel plus-sign: 3x3x1 cross, 4 arms + center.
-            let mut vs = vec![AIR; 9];
-            vs[1] = mat; // top
-            vs[3] = mat; // left
-            vs[4] = mat; // center
-            vs[5] = mat; // right
-            vs[7] = mat; // bottom
-            (IVec3::new(3, 3, 1), vs)
-        } else {
-            // 7-voxel block: 2x2x2 minus one corner.
-            let mut vs = vec![mat; 8];
-            vs[(h as usize) % 8] = AIR;
-            (IVec3::new(2, 2, 2), vs)
-        };
+
+    for &(_, i) in ranked.iter() {
+        let (start, mat) = removed[i];
+        if used.contains(&start) || mat == AIR {
+            continue;
+        }
+
+        // Grow a small cluster from this seed: flood-fill up to
+        // MAX_CHIP_VOXELS neighbors with the same material.
+        const MAX_CHIP_VOXELS: usize = 6;
+        let mut cluster: Vec<IVec3> = vec![start];
+        used.insert(start);
+        let mut frontier: Vec<IVec3> = vec![start];
+
+        while cluster.len() < MAX_CHIP_VOXELS && !frontier.is_empty() {
+            let v = frontier.pop().unwrap();
+            for d in DIRS {
+                let n = v + d;
+                if !used.contains(&n) {
+                    if let Some(&nm) = removed_map.get(&n) {
+                        if nm == mat {
+                            used.insert(n);
+                            cluster.push(n);
+                            frontier.push(n);
+                            if cluster.len() >= MAX_CHIP_VOXELS {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build a VoxelGrid from the actual cluster voxels.
+        let mut min = IVec3::splat(i32::MAX);
+        let mut max = IVec3::splat(i32::MIN);
+        for &v in &cluster {
+            min = min.min(v);
+            max = max.max(v);
+        }
+        let dims = max - min + IVec3::ONE;
+        let mut voxels = vec![AIR; (dims.x * dims.y * dims.z) as usize];
+        for &v in &cluster {
+            let l = v - min;
+            let idx = (l.x + l.z * dims.x + l.y * dims.x * dims.z) as usize;
+            voxels[idx] = mat;
+        }
+
         let grid = VoxelGrid::new(dims, voxels);
+        let chip_center_m = voxel_center_m(start, voxel_size_m);
         let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, chip_center_m) else {
             continue;
         };
@@ -701,11 +713,11 @@ fn spawn_debris_chips(
         let offset = chip_center_m - center_m;
         let dist = offset.length();
         let dir = if dist > 1e-6 { offset / dist } else { Vec3::Y };
-        let speed = (power * DEBRIS_CHIP_SPEED_SCALE / dist.max(BLAST_MIN_DIST_M))
-            .min(DEBRIS_CHIP_MAX_SPEED_M_S);
-        body.vel = dir * speed;
+        let falloff = 1.0 / (1.0 + dist * 0.15);
+        let speed = (power * DEBRIS_CHIP_SPEED_SCALE * falloff).min(DEBRIS_CHIP_MAX_SPEED_M_S);
+        body.vel = dir * speed + Vec3::Y * speed * 0.3;
 
-        let h2 = small_hash(h, i as u32);
+        let h2 = small_hash(seed, cluster[0].x as u32);
         body.omega = Vec3::new(
             ((h2 & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
             (((h2 >> 8) & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
@@ -714,6 +726,7 @@ fn spawn_debris_chips(
 
         ids.push(phys.spawn(body));
     }
+
     ids
 }
 
@@ -743,15 +756,8 @@ pub fn blast(
     apply_blast_impulse(phys, &ids, center_m, power, seed, direction);
 
     let s = world.cfg.voxel_size_m;
-    ids.extend(spawn_debris_chips(
-        phys,
-        registry,
-        &carve.removed,
-        s,
-        center_m,
-        power,
-        seed,
-    ));
+    // Debris comes from detach_unsupported (actual disconnected voxels).
+    // No template chip spawning — natural breakage only.
 
     phys.wake_region(carve.region.0.as_vec3() * s, carve.region.1.as_vec3() * s);
     carve.spawned = ids;
