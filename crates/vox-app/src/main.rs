@@ -10,7 +10,6 @@ mod day_night;
 mod remesh;
 mod tools;
 mod replay;
-mod grass;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -265,10 +264,6 @@ struct VoxApp {
     postprocess: vox_render::PostProcessPipeline,
     /// Procedural sky dome pipeline (#66).
     sky_pipeline: SkyPipeline,
-    /// Grass blade render pipeline.
-    grass_pipeline: vox_render::GrassPipeline,
-    /// Cached grass blade vertices (throttled regeneration).
-    grass_cache: grass::GrassCache,
     /// In-engine editor mode: when active, LMB paints a sphere of the
     /// selected material at the crosshair target and RMB erases a sphere of
     /// AIR, instead of the normal hotbar tools. Toggled with E. The player
@@ -348,6 +343,7 @@ impl VoxApp {
         let pipeline = VoxelPipeline::new(
             &gpu,
             &shader,
+            &grass_shader,
             &registry,
             world.cfg.voxel_size_m,
             Some(shadow_pipeline.sample_bind_group_layout()),
@@ -359,7 +355,6 @@ impl VoxApp {
         // Bind the scene depth texture for soft-particle surface fade (#70).
         particle_pipeline.set_depth_view(gpu.device(), postprocess.depth_view());
         let sky_pipeline = SkyPipeline::new(&gpu, &sky_shader);
-        let grass_pipeline = vox_render::GrassPipeline::new(&gpu, &grass_shader);
         let debug_overlay = DebugOverlay::new(
             gpu.device(),
             gpu.surface_format(),
@@ -430,8 +425,6 @@ impl VoxApp {
             particle_pipeline,
             postprocess,
             sky_pipeline,
-            grass_pipeline,
-            grass_cache: grass::GrassCache::new(),
         };
         app.initial_mesh();
 
@@ -1698,7 +1691,7 @@ impl App for VoxApp {
                     cam_pos: [self.camera.pos.x, self.camera.pos.y, self.camera.pos.z, (70.0f32.to_radians() * 0.5).tan()],
                     sun_dir: [dn.sun_dir.x, dn.sun_dir.y, dn.sun_dir.z, dn.sun_strength],
                     sky_color: [dn.sky_color.x, dn.sky_color.y, dn.sky_color.z, aspect],
-                    zenith_color: [dn.zenith_color.x, dn.zenith_color.y, dn.zenith_color.z, 0.0],
+                    zenith_color: [dn.zenith_color.x, dn.zenith_color.y, dn.zenith_color.z, if std::env::var("NO_CLOUDS").is_err() { 1.0 } else { 0.0 }],
                     sun_color: [dn.sun_color.x, dn.sun_color.y, dn.sun_color.z, self.game_time],
                     cam_forward: [fwd.x, fwd.y, fwd.z, 0.0],
                     cam_right: [right.x, right.y, right.z, 0.0],
@@ -1800,30 +1793,12 @@ impl App for VoxApp {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            // Baked grass: rendered from per-chunk grass buffers, no per-frame
+            // CPU generation. CazToon-style wind sway in the vertex shader.
             pass.set_bind_group(1, self.shadow_pipeline.sample_bind_group(), &[]);
-            let grass_verts = self.grass_cache.get_or_regen(
-                &self.world,
-                self.camera.pos,
-                self.world.cfg.voxel_size_m,
-                self.game_time,
-            );
-            self.grass_pipeline.write_camera(
-                self.gpu.queue(),
-                view_proj.to_cols_array_2d(),
-                self.camera.pos,
-                dn.sun_dir,
-                dn.sun_strength,
-                dn.sky_color,
-                dn.fill_strength,
-                dn.ambient_strength,
-                dn.sun_color,
-                dn.ambient_sky,
-                dn.ambient_ground,
-                self.game_time,
-                self.world.cfg.voxel_size_m,
-                FOG_END_M,
-            );
-            self.grass_pipeline.draw(self.gpu.queue(), &mut pass, grass_verts);
+            if std::env::var("NO_GRASS").is_err() {
+                self.pipeline.draw_grass(&mut pass, &frustum, self.camera.pos, 60.0);
+            }
             // Water last — alpha-blends over terrain, particles, and grass.
             self.pipeline.draw_water(&mut pass, &frustum);
         }

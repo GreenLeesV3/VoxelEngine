@@ -6,5 +6,5 @@
 pub mod greedy;
 pub mod slab;
 
-pub use greedy::{MeshData, VoxelVertex, mesh_slab};
+pub use greedy::{GrassVertex, MeshData, VoxelVertex, mesh_slab};
 pub use slab::{MAX_SLAB_DIM, VoxelSlab};

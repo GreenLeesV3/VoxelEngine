@@ -7,7 +7,7 @@
 
 use glam::IVec3;
 use vox_core::consts::CHUNK_SIZE;
-use vox_world::Voxel;
+use vox_world::{AIR, Voxel};
 
 use crate::slab::VoxelSlab;
 
@@ -39,23 +39,36 @@ pub struct VoxelVertex {
     /// Material id of the face.
     pub material: u16,
 }
+/// One grass blade vertex: sub-voxel position + height factor for wind sway.
+/// 16 bytes. Positions are in voxel units relative to the slab's inner min,
+/// but can be fractional (e.g. blade tip at 0.7 voxels above the base).
+#[repr(C)]
+#[derive(Copy, Clone, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GrassVertex {
+    /// World-relative position in voxel units (fractional).
+    pub pos: [f32; 3],
+    /// Height factor: 0 = base (no sway), 1 = tip (full sway).
+    pub height_factor: f32,
+}
 
-/// Mesh geometry for one region: quads as an indexed triangle list.
+/// Mesh geometry for one region: quads as an indexed triangle list,
+/// plus optional grass blade quads (separate vertex format).
 #[derive(Default)]
 pub struct MeshData {
     pub vertices: Vec<VoxelVertex>,
     pub indices: Vec<u32>,
+    pub grass_vertices: Vec<GrassVertex>,
+    pub grass_indices: Vec<u32>,
 }
 
 impl MeshData {
-    /// Number of quads (each quad is 4 vertices / 6 indices).
     pub fn quads(&self) -> usize {
         self.vertices.len() / 4
     }
 
-    /// True when the mesh has no geometry.
+    /// True when the mesh has no geometry (neither voxel faces nor grass).
     pub fn is_empty(&self) -> bool {
-        self.vertices.is_empty()
+        self.vertices.is_empty() && self.grass_vertices.is_empty()
     }
 }
 
@@ -421,7 +434,110 @@ pub fn mesh_slab(
             }
         }
     }
+    generate_grass_blades(slab, &mut mesh, jitter_seed);
     mesh
+}
+
+const GRASS_VOXEL: Voxel = Voxel(3);
+const BAKED_BLADES_PER_VOXEL: usize = 4;
+
+fn hash01(x: i32, y: i32, z: i32) -> f32 {
+    let n = (x.wrapping_mul(374761393) ^ y.wrapping_mul(668265263) ^ z.wrapping_mul(2147483647)) as u32;
+    (n >> 8) as f32 / 16777216.0
+}
+
+// Smoothstep for bilinear noise interpolation.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn mix(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t }
+
+/// Generate grass blade quads for grass-top voxels in the slab.
+/// Positions are relative to the slab's inner min, in voxel units (fractional).
+fn generate_grass_blades(slab: &VoxelSlab, mesh: &mut MeshData, jitter_seed: IVec3) {
+    let dims = slab.inner_dims;
+    let min = slab.inner_min;
+
+    for y in 0..dims.y {
+        for z in 0..dims.z {
+            for x in 0..dims.x {
+                let rel = IVec3::new(x, y, z);
+                let voxel = slab.get(rel);
+                if voxel != GRASS_VOXEL { continue; }
+                // Check if voxel above (in world space) is air.
+                let above_rel = rel + IVec3::Y;
+                let above = slab.get(above_rel);
+                if above != AIR { continue; }
+
+                // World position for deterministic hash.
+                let wp = min + rel;
+
+                // Smooth value noise for natural patches (not speckle).
+                // Sample at low frequency (~10 voxel period) with bilinear interp.
+                let freq = 0.1f32;
+                let fx = wp.x as f32 * freq;
+                let fz = wp.z as f32 * freq;
+                let ix = fx.floor() as i32;
+                let iz = fz.floor() as i32;
+                let tx = smoothstep(0.0, 1.0, fx - fx.floor());
+                let tz = smoothstep(0.0, 1.0, fz - fz.floor());
+                let n00 = hash01(ix, 0, iz);
+                let n10 = hash01(ix + 1, 0, iz);
+                let n01 = hash01(ix, 0, iz + 1);
+                let n11 = hash01(ix + 1, 0, iz + 1);
+                let patch_noise = mix(mix(n00, n10, tx), mix(n01, n11, tx), tz);
+                if patch_noise < 0.35 { continue; }  // bare patches
+
+                // Density noise: varies blade count per voxel (1-4).
+                let density = hash01(wp.x * 89, wp.y * 43, wp.z * 71);
+                let blade_count = 1 + (density * 3.0) as usize;
+
+                for b in 0..blade_count {
+                    let bi = b as i32;
+                    let h = hash01(wp.x * 17 + bi, wp.y * 31 + bi, wp.z * 13 + bi);
+                    let h2 = hash01(wp.x * 7 + bi * 3, wp.y * 11 + bi * 5, wp.z * 19 + bi * 7);
+                    let h3 = hash01(wp.x * 23 + bi * 11, wp.y * 5 + bi * 17, wp.z * 29 + bi * 2);
+
+                    // Sub-voxel offsets (in voxel units, 0..1 range within the voxel).
+                    let offset_x = (h - 0.5) * 0.7;
+                    let offset_z = (h2 - 0.5) * 0.7;
+                    // Blade sits on top of the grass voxel (y+1 is the top face).
+                    let base_x = x as f32 + 0.5 + offset_x;
+                    let base_y = (y + 1) as f32;
+                    let base_z = z as f32 + 0.5 + offset_z;
+                    let height = 0.3 + h3 * 0.5; // 0.3-0.8 voxel
+                    let width = 0.15 + h * 0.15;  // 0.15-0.3 voxel
+                    let facing = h2 * std::f32::consts::TAU;
+                    let (fx, fz) = (facing.cos(), facing.sin());
+                    let half_w = width * 0.5;
+                    let tip_y = base_y + height;
+
+                    let base = mesh.grass_vertices.len() as u32;
+                    // 4 vertices: base-left, base-right, tip-left, tip-right
+                    mesh.grass_vertices.push(GrassVertex {
+                        pos: [base_x - fx * half_w, base_y, base_z - fz * half_w],
+                        height_factor: 0.0,
+                    });
+                    mesh.grass_vertices.push(GrassVertex {
+                        pos: [base_x + fx * half_w, base_y, base_z + fz * half_w],
+                        height_factor: 0.0,
+                    });
+                    mesh.grass_vertices.push(GrassVertex {
+                        pos: [base_x - fx * half_w, tip_y, base_z - fz * half_w],
+                        height_factor: 1.0,
+                    });
+                    mesh.grass_vertices.push(GrassVertex {
+                        pos: [base_x + fx * half_w, tip_y, base_z + fz * half_w],
+                        height_factor: 1.0,
+                    });
+                    // Single winding — pipeline uses cull_mode=None for double-sided.
+                    mesh.grass_indices.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
+                }
+            }
+        }
+    }
 }
 
 /// Append one merged quad as 4 vertices and 6 indices.

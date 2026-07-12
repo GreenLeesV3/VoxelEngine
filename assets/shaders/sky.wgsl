@@ -1,12 +1,19 @@
 // Procedural sky dome rendered as a fullscreen triangle before the scene.
 // Uses Rayleigh + Mie scattering approximation driven by the day/night
-// sun direction. Outputs sky color + sun disc + moon + stars + nebula.
+// sun direction. Outputs sky color + sun disc + moon + stars + nebula +
+// 3D volumetric clouds.
 //
 // Night features ported from CazToon's sky_night_features.glsl:
 // - Cube-face projected star grid with hash-based density, twinkle, size variation
 // - Shooting stars (3 slots, periodic, trail rendering)
 // - Night nebula (3D FBM noise, two-color blend, drift)
 // - Moon disc opposite the sun with soft glow
+//
+// Volumetric clouds ported from CazToon's volumetric_clouds.glsl:
+// - 3D FBM noise density with height-varying cloud base
+// - Light optical depth march toward sun for self-shadowing
+// - Day/sunset/night lit+shadow coloring
+// - LOD erosion detail, distance fade, edge glow
 
 struct SkyCam {
     view_proj: mat4x4f,
@@ -252,6 +259,271 @@ struct SkyFOut {
     @location(1) normal: vec4f,
     @location(2) linear_depth: vec4f,
 };
+// ============================================================================
+// Volumetric clouds — ported from CazToon's volumetric_clouds.glsl
+// ============================================================================
+
+// Cloud constants (CazToon settings/sky.glsl defaults)
+const CLOUD_3D_STEPS     = 24;
+const CLOUD_3D_COVERAGE  = 0.65;
+const CLOUD_3D_DENSITY   = 2.00;
+const CLOUD_3D_HEIGHT    = 300.0;
+const CLOUD_3D_THICKNESS = 150.0;
+const CLOUD_3D_SCALE     = 1.0;
+const CLOUD_3D_CELL_SIZE = 60.0;
+const CLOUD_3D_DETAIL    = 1.0;
+const CLOUD_3D_SPEED     = 6.0;
+const CLOUD_3D_BRIGHTNESS = 1.2;
+const CLOUD_3D_DISTANCE   = 8000.0;
+const CLOUD_3D_EDGE_GLOW  = 0.1;
+const CYCLE_SECS          = 1320.0;
+const SEA_LEVEL_OFFSET    = 0.0;
+
+fn vc_hash31(p: vec3f) -> f32 {
+    var v = fract(p * vec3f(0.1031, 0.1030, 0.0973));
+    v = v + dot(v, v.yzx + 33.33);
+    return fract((v.x + v.y) * v.z);
+}
+
+fn vc_hash21(p: vec2f) -> f32 {
+    var v = fract(p * vec2f(0.1031, 0.1030));
+    v = v + dot(v, v.yx + 33.33);
+    return fract((v.x + v.y) * v.x);
+}
+
+fn vc_noise3d(p: vec3f) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let ff = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let a = vc_hash31(i);
+    let b = vc_hash31(i + vec3f(1.0, 0.0, 0.0));
+    let c = vc_hash31(i + vec3f(0.0, 1.0, 0.0));
+    let d = vc_hash31(i + vec3f(1.0, 1.0, 0.0));
+    let e = vc_hash31(i + vec3f(0.0, 0.0, 1.0));
+    let g = vc_hash31(i + vec3f(1.0, 0.0, 1.0));
+    let h = vc_hash31(i + vec3f(0.0, 1.0, 1.0));
+    let k = vc_hash31(i + vec3f(1.0, 1.0, 1.0));
+    return mix(
+        mix(mix(a, b, ff.x), mix(c, d, ff.x), ff.y),
+        mix(mix(e, g, ff.x), mix(h, k, ff.x), ff.y),
+        ff.z
+    );
+}
+
+fn vc_noise2d(p: vec2f) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let ff = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let a = vc_hash21(i);
+    let b = vc_hash21(i + vec2f(1.0, 0.0));
+    let c = vc_hash21(i + vec2f(0.0, 1.0));
+    let d = vc_hash21(i + vec2f(1.0, 1.0));
+    return mix(mix(a, b, ff.x), mix(c, d, ff.x), ff.y);
+}
+
+fn vc_cloud_density(world_pos: vec3f, time: f32, dist_from_cam: f32) -> f32 {
+    let y = world_pos.y;
+    let base_height = CLOUD_3D_HEIGHT + SEA_LEVEL_OFFSET;
+    let thick = CLOUD_3D_THICKNESS;
+    let cell_size = max(CLOUD_3D_CELL_SIZE, 1.0);
+    let cell_norm = 25.0 / cell_size;
+
+    let layer_bottom = base_height - thick * 0.8;
+    let layer_top = base_height + thick * 2.0;
+    if (y < layer_bottom || y > layer_top) { return 0.0; }
+
+    let wind_angle = 1.2;
+    let wind_dir = vec2f(cos(wind_angle), sin(wind_angle));
+    let wind_vel = CLOUD_3D_SPEED * wind_dir;
+    let alt_frac_raw = clamp((y - base_height) / thick, 0.0, 1.0);
+    let wind_offset = wind_vel * (time + 30.0 * alt_frac_raw * alt_frac_raw);
+
+    let h_pos = (world_pos.xz + wind_vel * time) * CLOUD_3D_SCALE * 0.001 * cell_norm;
+    let height_offset = vc_noise2d(h_pos) * thick * 1.0
+        + vc_noise2d(h_pos * 3.3) * thick * 0.4
+        - thick * 0.5;
+
+    let local_base = base_height + height_offset;
+    let local_top = local_base + thick;
+    if (y < local_base || y > local_top) { return 0.0; }
+
+    let alt_frac = (y - local_base) / thick;
+
+    let base_scale = CLOUD_3D_SCALE * 0.001 * cell_norm;
+    let base_pos = vec3f(
+        (world_pos.x + wind_offset.x) * base_scale,
+        world_pos.y * base_scale * 0.8,
+        (world_pos.z + wind_offset.y) * base_scale
+    );
+
+    let base_high_freq_fade = 1.0 - smoothstep(4000.0, 7000.0, dist_from_cam);
+    let noise = vc_noise3d(base_pos) * (0.65 + 0.35 * (1.0 - base_high_freq_fade))
+        + vc_noise3d(base_pos * 2.7) * 0.35 * base_high_freq_fade;
+
+    let threshold = 1.0 - CLOUD_3D_COVERAGE;
+    let t_val = clamp((noise - threshold) / 0.3, 0.0, 1.0);
+    var density = t_val * t_val;
+
+    if (density < 0.001) { return 0.0; }
+
+    let bottom_clip = smoothstep(0.0, 0.12, alt_frac);
+    let top_dome = 1.0 - smoothstep(0.6, 1.0, alt_frac);
+    density = density * bottom_clip * top_dome;
+
+    if (density < 0.001) { return 0.0; }
+
+    let lod_fade_small  = 1.0 - smoothstep(1500.0, 3000.0, dist_from_cam);
+    let lod_fade_medium = 1.0 - smoothstep(3000.0, 5000.0, dist_from_cam);
+    let lod_fade_large  = 1.0 - smoothstep(5000.0, 8000.0, dist_from_cam);
+
+    let wind3d = vec3f(wind_vel.x, 0.0, wind_vel.y) * time;
+
+    var erosion = 0.0;
+    if (lod_fade_large > 0.01) {
+        let detail0 = vc_noise3d((world_pos + wind3d * 0.2) * 0.005);
+        erosion = erosion + 0.7 * detail0 * detail0 * lod_fade_large;
+    }
+    if (lod_fade_medium > 0.01) {
+        let detail1 = vc_noise3d((world_pos + wind3d * 0.15) * 0.012);
+        erosion = erosion + 0.5 * detail1 * detail1 * lod_fade_medium;
+    }
+    if (lod_fade_small > 0.01) {
+        let detail2 = vc_noise3d((world_pos + wind3d * 0.1) * 0.028);
+        erosion = erosion + 0.3 * detail2 * detail2 * lod_fade_small;
+    }
+    density = density - CLOUD_3D_DETAIL * erosion;
+    density = max(density, 0.0);
+
+    return density;
+}
+
+const VC_LIGHT_STEPS = 5;
+fn vc_light_optical_depth(origin: vec3f, light_dir: vec3f, time: f32, dist_from_cam: f32) -> f32 {
+    var step_len = 10.0;
+    var optical_depth = 0.0;
+    var pos = origin;
+
+    for (var i = 0; i < VC_LIGHT_STEPS; i = i + 1) {
+        pos = pos + light_dir * step_len;
+        optical_depth = optical_depth + vc_cloud_density(pos, time, dist_from_cam) * step_len;
+        step_len = step_len * 2.0;
+    }
+    return optical_depth;
+}
+
+fn vc_cloud_color(light_opt_depth: f32, alt_frac: f32, sun_angle_frac: f32) -> vec3f {
+    let angle = fract(sun_angle_frac);
+    // Engine cycle: day=0.0-0.45, sunset=0.45-0.52, blue_hour=0.52-0.57,
+    // night=0.57-0.89, dawn=0.89-0.93, sunrise=0.93-1.0 (wraps to day).
+    let day_amount = smoothstep(0.0, 0.02, angle) * (1.0 - smoothstep(0.43, 0.45, angle));
+    let twilight_amount = smoothstep(0.43, 0.45, angle) * (1.0 - smoothstep(0.57, 0.59, angle))
+        + smoothstep(0.91, 0.93, angle);
+    let night_amount = smoothstep(0.57, 0.59, angle) * (1.0 - smoothstep(0.91, 0.93, angle));
+
+    let total = max(day_amount + twilight_amount + night_amount, 0.001);
+    let day_amt = day_amount / total;
+    let twl_amt = twilight_amount / total;
+    let night_amt = night_amount / total;
+
+    let day_lit = vec3f(1.0, 1.0, 1.0) * CLOUD_3D_BRIGHTNESS;
+    let day_shadow = vec3f(0.45, 0.50, 0.70) * CLOUD_3D_BRIGHTNESS;
+
+    let sunset_lit = vec3f(1.0, 0.85, 0.65) * CLOUD_3D_BRIGHTNESS;
+    let sunset_shadow = vec3f(0.50, 0.38, 0.48) * CLOUD_3D_BRIGHTNESS;
+
+    let night_lit = vec3f(0.20, 0.24, 0.38) * CLOUD_3D_BRIGHTNESS;
+    let night_shadow = vec3f(0.08, 0.09, 0.18) * CLOUD_3D_BRIGHTNESS;
+
+    let lit_color = day_lit * day_amt + sunset_lit * twl_amt + night_lit * night_amt;
+    let shadow_color = day_shadow * day_amt + sunset_shadow * twl_amt + night_shadow * night_amt;
+
+    var sun_shadow = exp(-light_opt_depth * 0.04);
+    sun_shadow = max(sun_shadow, 0.15);
+
+    let alt_light = mix(0.5, 1.0, alt_frac);
+    let light_factor = sun_shadow * alt_light;
+
+    return mix(shadow_color, lit_color, light_factor);
+}
+
+fn render_volumetric_clouds(world_dir: vec3f, time: f32, cam_pos: vec3f, sun_angle: f32, sun_dir_world: vec3f, max_dist: f32, frag_coord: vec2f, frame: f32) -> vec4f {
+    let dir = normalize(world_dir);
+
+    let base_height = CLOUD_3D_HEIGHT + SEA_LEVEL_OFFSET;
+    let layer_bottom = base_height - CLOUD_3D_THICKNESS * 0.8;
+    let layer_top = base_height + CLOUD_3D_THICKNESS * 2.0;
+
+    var t_min = 0.0;
+    var t_max = 0.0;
+    if (abs(dir.y) < 0.0005) {
+        if (cam_pos.y >= layer_bottom && cam_pos.y <= layer_top) {
+            t_min = 0.0; t_max = 8000.0;
+        } else {
+            return vec4f(0.0);
+        }
+    } else {
+        let t0 = (layer_bottom - cam_pos.y) / dir.y;
+        let t1 = (layer_top - cam_pos.y) / dir.y;
+        t_min = min(t0, t1);
+        t_max = max(t0, t1);
+    }
+
+    t_min = max(t_min, 0.0);
+    if (t_min >= t_max) { return vec4f(0.0); }
+    t_max = min(t_max, max_dist);
+    if (t_min >= t_max) { return vec4f(0.0); }
+
+    let cloud_render_dist = CLOUD_3D_DISTANCE;
+    let fade_start = cloud_render_dist * 0.4;
+
+    if (t_min > cloud_render_dist * 1.2) { return vec4f(0.0); }
+
+    let march_dist = min(t_max - t_min, 12000.0);
+    let step_len = march_dist / f32(CLOUD_3D_STEPS);
+
+    let dither = fract(sin(dot(frag_coord + frame * 0.7183, vec2f(12.9898, 78.233))) * 43758.5453);
+    let ray_start = t_min + step_len * dither;
+
+    let extinct_coeff = CLOUD_3D_DENSITY * 0.015;
+    var acc_color = vec3f(0.0);
+    var transmittance = 1.0;
+
+    for (var i = 0; i < CLOUD_3D_STEPS; i = i + 1) {
+        if (transmittance < 0.05) { break; }
+
+        let t = ray_start + step_len * f32(i);
+        if (t > t_max) { break; }
+
+        let sample_pos = cam_pos + dir * t;
+        var density = vc_cloud_density(sample_pos, time, t);
+
+        if (density < 0.001) { continue; }
+
+        let horiz_dist = length(sample_pos.xz - cam_pos.xz);
+        var dist_fade = 1.0 - smoothstep(fade_start, cloud_render_dist * 0.95, horiz_dist);
+        dist_fade = dist_fade * dist_fade;
+        density = density * dist_fade;
+
+        if (density < 0.001) { continue; }
+
+        let step_opt_depth = density * extinct_coeff * step_len;
+        let step_transmittance = exp(-step_opt_depth);
+
+        let light_od = vc_light_optical_depth(sample_pos, sun_dir_world, time, t);
+        let alt_frac = clamp((sample_pos.y - base_height) / max(CLOUD_3D_THICKNESS, 1.0), 0.0, 1.0);
+        var step_color = vc_cloud_color(light_od, alt_frac, sun_angle);
+        let edge_glow = (1.0 - smoothstep(0.18, 0.82, density)) * CLOUD_3D_EDGE_GLOW;
+        step_color = step_color + step_color * edge_glow * 0.35;
+
+        let weight = (1.0 - step_transmittance) * transmittance;
+        acc_color = acc_color + step_color * weight;
+
+        transmittance = transmittance * step_transmittance;
+    }
+
+    let alpha = 1.0 - transmittance;
+    return vec4f(acc_color, alpha);
+}
 
 @fragment
 fn fs(in: VOut) -> SkyFOut {
@@ -350,6 +622,23 @@ fn fs(in: VOut) -> SkyFOut {
     if (nebula_vis > 0.01) {
         let nebula = sky_night_nebula(dir, time);
         sky += nebula * nebula_vis;
+    }
+
+    // --- 3D Volumetric clouds (CazToon's renderVolumetricClouds) ---
+    // Raymarch cloud layers only for upward-looking pixels (dir.y > 0).
+    // Clouds sit at CLOUD_3D_HEIGHT (300m) above sea level.
+    if (dir.y > 0.001 && cam.zenith_color.w > 0.5) {
+        let sun_angle_frac = fract(time / CYCLE_SECS);
+        let cloud_result = render_volumetric_clouds(
+            dir, time, cam.cam_pos.xyz,
+            sun_angle_frac, sun_dir,
+            CLOUD_3D_DISTANCE,
+            in.ndc * vec2f(512.0, 512.0), // approx frag coord for dither
+            0.0 // frame counter (static dither for now)
+        );
+        if (cloud_result.a > 0.001) {
+            sky = sky * (1.0 - clamp(cloud_result.a, 0.0, 1.0)) + cloud_result.rgb;
+        }
     }
 
     var out: SkyFOut;

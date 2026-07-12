@@ -44,9 +44,10 @@ struct GpuMesh {
     instance: wgpu::Buffer,
     aabb_min: Vec3,
     aabb_max: Vec3,
-    /// Whether this chunk's mesh contains any water (material ID 9) voxels.
-    /// Set at upload time so the water pass can skip chunks without water.
     has_water: bool,
+    grass_vertices: Option<wgpu::Buffer>,
+    grass_indices: Option<wgpu::Buffer>,
+    grass_index_count: u32,
 }
 
 /// Stats for the debug HUD.
@@ -77,11 +78,8 @@ pub type BodyMeshKey = (u32, u32);
 /// mesh store.
 pub struct VoxelPipeline {
     pipeline: wgpu::RenderPipeline,
-    /// Water-only pipeline variant: alpha blending, depth_write disabled,
-    /// specialization constant water_pass=1 so only mat_id==9 fragments
-    /// survive. Draws after the opaque pass so terrain behind water is
-    /// already in the depth buffer and shows through the alpha blend.
     water_pipeline: wgpu::RenderPipeline,
+    grass_pipeline: wgpu::RenderPipeline,
     camera_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     chunks: vox_core::FxHashMap<IVec3, GpuMesh>,
@@ -98,6 +96,7 @@ impl VoxelPipeline {
     pub fn new(
         gpu: &Gpu,
         shader_source: &str,
+        grass_shader_source: &str,
         registry: &MaterialRegistry,
         voxel_size_m: f32,
         shadow_sample_bgl: Option<&wgpu::BindGroupLayout>,
@@ -356,7 +355,7 @@ impl VoxelPipeline {
                 module: &shader,
                 entry_point: "vs",
                 compilation_options: Default::default(),
-                buffers: &[vertex_layout, instance_layout],
+                buffers: &[vertex_layout.clone(), instance_layout.clone()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -396,10 +395,73 @@ impl VoxelPipeline {
             multisample: Default::default(),
             multiview: None,
         });
+        // Grass blade pipeline: separate shader with CazToon wind sway.
+        // Uses the same camera uniform (group 0) and chunk instance (group 1).
+        // Cull=None for double-sided blades, alpha-tested for crisp edges.
+        let grass_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("grass shader"),
+            source: wgpu::ShaderSource::Wgsl(grass_shader_source.into()),
+        });
+        let grass_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: 16, // f32x3 pos + f32 height_factor
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 12, shader_location: 1 },
+            ],
+        };
+        let grass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("grass pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &grass_shader,
+                entry_point: "vs_main",
+                compilation_options: Default::default(),
+                buffers: &[grass_vertex_layout, instance_layout],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &grass_shader,
+                entry_point: "fs_main",
+                compilation_options: Default::default(),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: crate::postprocess::COLOR_FORMAT,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: crate::postprocess::NORMAL_FORMAT,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: crate::postprocess::DEPTH_COPY_FORMAT,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // double-sided blades
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: Default::default(),
+            multiview: None,
+        });
 
         Self {
             pipeline,
             water_pipeline,
+            grass_pipeline,
             camera_buf,
             bind_group,
             chunks: Default::default(),
@@ -435,6 +497,23 @@ impl VoxelPipeline {
             usage: wgpu::BufferUsages::VERTEX,
         });
         let has_water = mesh.vertices.iter().any(|v| v.material == 9);
+
+        let grass_vertices = if !mesh.grass_vertices.is_empty() {
+            Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk grass vertices"),
+                contents: bytemuck::cast_slice(&mesh.grass_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            }))
+        } else { None };
+        let grass_indices = if !mesh.grass_indices.is_empty() {
+            Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk grass indices"),
+                contents: bytemuck::cast_slice(&mesh.grass_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            }))
+        } else { None };
+        let grass_index_count = mesh.grass_indices.len() as u32;
+
         self.chunks.insert(
             key,
             GpuMesh {
@@ -445,6 +524,9 @@ impl VoxelPipeline {
                 aabb_min: origin_m,
                 aabb_max: origin_m + Vec3::splat(chunk_extent_m),
                 has_water,
+                grass_vertices,
+                grass_indices,
+                grass_index_count,
             },
         );
     }
@@ -610,6 +692,47 @@ impl VoxelPipeline {
             stats.drawn += 1;
         }
         stats
+    }
+
+    /// Draw baked grass blades for visible chunks within `grass_radius` of
+    /// `cam_pos`. Uses the grass pipeline (cull=None, alpha blend, no depth
+    /// write). Chunks without grass buffers are skipped.
+    pub fn draw_grass<'p>(
+        &'p self,
+        pass: &mut wgpu::RenderPass<'p>,
+        frustum: &Frustum,
+        cam_pos: Vec3,
+        grass_radius: f32,
+    ) {
+        pass.set_pipeline(&self.grass_pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        let r2 = grass_radius * grass_radius;
+        for mesh in self.chunks.values() {
+            // Skip chunks without grass geometry.
+            let grass_verts = match &mesh.grass_vertices {
+                Some(v) => v,
+                None => continue,
+            };
+            let grass_idx = match &mesh.grass_indices {
+                Some(i) => i,
+                None => continue,
+            };
+            // Distance cull: skip chunks beyond grass radius.
+            let center = (mesh.aabb_min + mesh.aabb_max) * 0.5;
+            let dx = center.x - cam_pos.x;
+            let dz = center.z - cam_pos.z;
+            if dx * dx + dz * dz > r2 {
+                continue;
+            }
+            // Frustum cull.
+            if !frustum.aabb_visible(mesh.aabb_min, mesh.aabb_max) {
+                continue;
+            }
+            pass.set_vertex_buffer(0, grass_verts.slice(..));
+            pass.set_vertex_buffer(1, mesh.instance.slice(..));
+            pass.set_index_buffer(grass_idx.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.grass_index_count, 0, 0..1);
+        }
     }
 
     /// Draw water-only chunk geometry (non-water fragments discarded).

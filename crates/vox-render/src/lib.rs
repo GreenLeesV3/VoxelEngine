@@ -18,7 +18,7 @@ pub use frustum::Frustum;
 pub use gpu::{DEPTH_FORMAT, Frame, Gpu};
 pub use mario_pipeline::{MarioCameraUniform, MarioPipeline, MarioVertex};
 pub use particles::{MAX_PARTICLES, ParticleInstance, ParticlePipeline};
-pub use grass_pipeline::{GrassPipeline, GrassVertex, MAX_GRASS_BLADES};
+pub use grass_pipeline::{GrassPipeline, MAX_GRASS_BLADES};
 pub use postprocess::{COLOR_FORMAT, PostProcessPipeline};
 pub use voxel_pipeline::{BodyMeshKey, DrawStats, ShadowPipeline, VoxelPipeline};
 pub use sky_pipeline::{SkyPipeline, SkyUniform};
