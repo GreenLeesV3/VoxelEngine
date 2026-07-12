@@ -594,13 +594,13 @@ pub fn apply_blast_impulse(
 const DEBRIS_FRACTION: f32 = 0.25;
 /// Max debris bodies per blast.
 const MAX_DEBRIS: usize = 30;
-/// Max voxels per debris cluster.
-const MAX_CLUSTER_VOXELS: usize = 8;
+/// Max voxels per debris cluster (capped at 4 to match CLUTTER_MAX_VOXELS
+/// so debris auto-despawns via the clutter lifetime system).
+const MAX_CLUSTER_VOXELS: usize = 4;
 /// Debris launch speed scaling.
 const DEBRIS_SPEED_SCALE: f32 = 0.6;
 /// Debris max launch speed (m/s).
 const DEBRIS_MAX_SPEED: f32 = 8.0;
-/// Debris max spin (rad/s).
 const DEBRIS_SPIN_MAX: f32 = 0.4;
 
 /// Create flying debris bodies from the ACTUAL carved-away voxels.
@@ -672,11 +672,11 @@ fn spawn_carved_debris(
         }
 
         let grid = VoxelGrid::new(dims, voxels);
-        let chip_center = voxel_center_m(start, voxel_size_m);
-        let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, chip_center) else { continue; };
+        let props = mass_props(&grid, registry, voxel_size_m);
+        let com_world = min.as_vec3() * voxel_size_m + props.com_local;
+        let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, com_world) else { continue; };
 
-        // Launch outward from blast center with slight upward bias.
-        let offset = chip_center - center_m;
+        let offset = com_world - center_m;
         let dist = offset.length();
         let dir = if dist > 1e-6 { offset / dist } else { Vec3::Y };
         let falloff = 1.0 / (1.0 + dist * 0.12);
@@ -1304,8 +1304,8 @@ mod tests {
         for (_, body) in phys.iter() {
             let sc = body.grid.solid_count();
             assert!(
-                sc == 3 || sc == 5 || sc == 7,
-                "each chip is a small debris fragment (3/5/7 voxels), got {sc}"
+                sc >= 1 && sc <= 4,
+                "each debris cluster is 1-4 voxels, got {sc}"
             );
             assert!(!body.sleep.asleep);
         }

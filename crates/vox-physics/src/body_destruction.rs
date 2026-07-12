@@ -450,7 +450,7 @@ pub fn carve_body_sphere_at_impact(
         let h = crate::destruction::small_hash(_seed, local_pos.x as u32);
         if h % 3 != 0 { continue; }
 
-        let local_m = local_pos.as_vec3() * voxel_size_m + parent.grid_offset;
+        let local_m = (local_pos.as_vec3() + 0.5) * voxel_size_m + parent.grid_offset;
         let world_pos = parent.pos + parent.rot * local_m;
 
         let grid = VoxelGrid::new(IVec3::ONE, vec![*mat]);
