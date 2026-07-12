@@ -76,13 +76,11 @@ impl ChunkLoader {
     ) {
         let center = Self::player_chunk(player_pos, world.cfg.voxel_size_m);
         let s = world.cfg.voxel_size_m;
-        // Cap synchronous spawn generation to ~8m radius (enough to stand
-        // on + see nearby terrain). The rest streams in via update().
-        let spawn_radius_m = 8.0;
-        let chunk_m = CHUNK_SIZE as f32 * s;
-        let radius = ((spawn_radius_m / chunk_m).ceil() as i32).max(2);
+        // Synchronous spawn: generate enough chunks to fill the initial view.
+        // Capped at 16 chunks radius (matches render_distance cap).
+        let spawn_radius = self.quality.render_distance(s).min(8);
         let ring = self.quality.detail_ring();
-        self.generate_ring(world, pipeline, gpu, center, radius, ring);
+        self.generate_ring(world, pipeline, gpu, center, spawn_radius, ring);
         self.last_center_chunk = center;
     }
 
@@ -109,28 +107,18 @@ impl ChunkLoader {
             self.last_center_chunk = center;
         }
 
-        // Only run the expensive missing-chunk scan when the player moved
-        // enough. When standing still, use a smaller budget to fill in
-        // remaining chunks without re-scanning the full frontier.
-        let budget = if moved_enough {
-            self.quality.gen_budget(world.cfg.voxel_size_m)
-        } else {
-            // Standing still: still fill in chunks, but cheaper scan.
-            self.quality.gen_budget(world.cfg.voxel_size_m).min(8)
-        };
-
         let render_dist = self.quality.render_distance(world.cfg.voxel_size_m);
         let detail_ring = self.quality.detail_ring();
 
-        // Generate missing chunks (up to budget, nearest first).
-        let generated = self.generate_missing(world, pipeline, gpu, center, render_dist, detail_ring, budget);
+        // Only scan + generate when the player moved enough meters.
+        // Standing still = no scan (chunks near player are already loaded).
+        if !moved_enough {
+            return false;
+        }
 
-        // Evict chunks beyond render distance (only when moved).
-        let evicted = if moved_enough {
-            self.evict_beyond_range(world, pipeline, center, render_dist)
-        } else {
-            false
-        };
+        let budget = self.quality.gen_budget(world.cfg.voxel_size_m);
+        let generated = self.generate_missing(world, pipeline, gpu, center, render_dist, detail_ring, budget);
+        let evicted = self.evict_beyond_range(world, pipeline, center, render_dist);
 
         generated || evicted
     }
@@ -151,35 +139,32 @@ impl ChunkLoader {
         let chunk_min = chunk_of(bmin);
         let chunk_max = chunk_of(bmax - IVec3::ONE);
 
-        // Instead of scanning the full (2*render_dist+1)³ cube every update
-        // (531k iterations at 0.1m), only scan chunks in a shell ring from
-        // inner_r to render_dist. Inner chunks are already loaded; only the
-        // frontier needs checking. This cuts iterations by ~90%.
+        // Only scan a small radius around the player each frame — not the
+        // full render distance sphere. At 0.1m with render_dist=40, scanning
+        // the full sphere is 531k iterations. Instead, check a growing ring
+        // starting from the player outward, stopping once we've found enough
+        // missing chunks to fill the budget. This is O(small) per frame.
         let mut missing: Vec<(i64, IVec3)> = Vec::new();
-        let inner_r = (render_dist - 4).max(0);
-        for dz in -render_dist..=render_dist {
-            for dy in -render_dist..=render_dist {
-                for dx in -render_dist..=render_dist {
-                    // Skip inner cube — already loaded or being loaded.
-                    if dx.abs() <= inner_r && dy.abs() <= inner_r && dz.abs() <= inner_r {
-                        continue;
+        let max_scan_r = render_dist.min(12); // Cap scan radius for perf
+        'outer: for r in 0..=max_scan_r {
+            // Shell at distance r: only check chunks where max(|dx|,|dy|,|dz|) == r
+            for dz in -r..=r {
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        if dx.abs().max(dy.abs()).max(dz.abs()) != r { continue; }
+                        let key = center + IVec3::new(dx, dy, dz);
+                        if key.x < chunk_min.x || key.x > chunk_max.x { continue; }
+                        if key.y < chunk_min.y || key.y > chunk_max.y { continue; }
+                        if key.z < chunk_min.z || key.z > chunk_max.z { continue; }
+                        if world.chunk_at(key).is_some() { continue; }
+                        let dist = (dx * dx + dy * dy + dz * dz) as i64;
+                        missing.push((dist, key));
+                        if missing.len() >= budget * 2 {
+                            break 'outer;
+                        }
                     }
-                    let key = center + IVec3::new(dx, dy, dz);
-                    if key.x < chunk_min.x || key.x > chunk_max.x { continue; }
-                    if key.y < chunk_min.y || key.y > chunk_max.y { continue; }
-                    if key.z < chunk_min.z || key.z > chunk_max.z { continue; }
-                    if world.chunk_at(key).is_some() { continue; }
-                    let dist = (dx * dx + dy * dy + dz * dz) as i64;
-                    missing.push((dist, key));
                 }
             }
-        }
-
-        // Partial selection: only partition the nearest `budget` entries
-        // to the front — O(n) instead of O(n log n) full sort.
-        if budget < missing.len() {
-            missing.select_nth_unstable_by_key(budget - 1, |(d, _)| *d);
-            missing.truncate(budget);
         }
 
         let mut generated = false;

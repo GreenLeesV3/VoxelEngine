@@ -31,7 +31,7 @@ impl Quality {
     /// capped at 24 to avoid explosion at small voxel sizes).
     pub fn render_distance(self, voxel_size_m: f32) -> i32 {
         let chunk_m = CHUNK_SIZE as f32 * voxel_size_m;
-        ((self.render_distance_m() / chunk_m).ceil() as i32).min(48)
+        ((self.render_distance_m() / chunk_m).ceil() as i32).min(16)
     }
 
     /// Detail ring radius in chunks. Trees root only within this ring;
