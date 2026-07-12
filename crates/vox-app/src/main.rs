@@ -39,12 +39,12 @@ use vox_core::{
 };
 use vox_debug::hud::HudState;
 use vox_debug::{DebugOverlay, OverlayState};
-use vox_gen::{TerrainGen, TerrainMaterials, TreeMaterials};
+use vox_gen::{ChunkBand, TerrainGen, TerrainMaterials, TreeMaterials};
 use vox_mesh::{VoxelSlab, mesh_slab};
 use vox_physics::{Body, BodyId, ImpactEvent, PhysicsWorld, VoxelGrid};
-use vox_platform::{App, FrameControl, FrameTiming, InputState, run_app};
 use vox_render::{BodyMeshKey, Camera, Frustum, Gpu, ParticlePipeline, ShadowPipeline, SkyPipeline, SkyUniform, VoxelPipeline};
-use vox_world::{AIR, Voxel, World};
+use vox_platform::{App, FrameControl, FrameTiming, InputState, run_app};
+use vox_world::{AIR, Chunk, Voxel, World};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
@@ -75,7 +75,7 @@ fn build_world_upfront(
     let mut world = World::new(cfg);
     world.set_solid_table(solid_table(registry));
 
-    // Generate every chunk in the world extent.
+    // Phase 1: Fill terrain in parallel (each chunk is independent).
     let s = world.cfg.voxel_size_m;
     let (bmin, bmax) = world.bounds_voxels();
     let chunk_min = chunk_of(bmin);
@@ -83,25 +83,36 @@ fn build_world_upfront(
     let total = (chunk_max.x - chunk_min.x + 1) as u64
         * (chunk_max.y - chunk_min.y + 1) as u64
         * (chunk_max.z - chunk_min.z + 1) as u64;
-    tracing::info!(total_chunks = total, chunk_m = CHUNK_SIZE as f32 * s, "generating world upfront");
+    tracing::info!(total_chunks = total, chunk_m = CHUNK_SIZE as f32 * s, "generating world upfront (parallel terrain)");
 
-    let center = IVec3::ZERO;
-    let detail_ring = 999; // No gate — all trees root.
-    let mut count = 0u64;
-    for cy in chunk_min.y..=chunk_max.y {
-        for cz in chunk_min.z..=chunk_max.z {
-            for cx in chunk_min.x..=chunk_max.x {
-                let key = IVec3::new(cx, cy, cz);
-                chunk_loader.generate_chunk(&mut world, key, center, detail_ring);
-                count += 1;
-                if count % 1000 == 0 {
-                    tracing::info!(generated = count, total, "world gen progress");
-                }
-            }
-        }
+    // Collect all chunk keys.
+    let keys: Vec<IVec3> = (chunk_min.y..=chunk_max.y)
+        .flat_map(|cy| (chunk_min.z..=chunk_max.z)
+            .flat_map(move |cz| (chunk_min.x..=chunk_max.x)
+                .map(move |cx| IVec3::new(cx, cy, cz))))
+        .collect();
+
+    // Phase 1: Fill terrain in parallel (each chunk is independent).
+    let terrain_data = chunk_loader.par_fill_terrain(&keys, s);
+    tracing::info!(chunks = terrain_data.len(), "terrain fill complete (parallel)");
+
+    // Insert chunks into the world and collect (key, band) for tree stamping.
+    world.set_suppress_edit_tracking(true);
+    let tree_targets: Vec<(IVec3, ChunkBand)> = terrain_data.into_iter()
+        .map(|(key, chunk, band)| {
+            world.insert_chunk(key, chunk);
+            (key, band)
+        })
+        .collect();
+    world.set_suppress_edit_tracking(false);
+    tracing::info!(chunks = world.chunk_count(), "terrain inserted");
+
+    // Phase 2: Stamp trees sequentially (cross-chunk writes need ordering).
+    tracing::info!("stamping trees...");
+    for (key, band) in &tree_targets {
+        chunk_loader.stamp_trees(&mut world, *key, *band);
     }
     tracing::info!(chunks = world.chunk_count(), "world generation complete");
-
     Ok(world)
 }
 

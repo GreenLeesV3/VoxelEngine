@@ -1,11 +1,11 @@
 //! Player-centered chunk streaming: generates chunks around the player on
 //! demand, evicts them beyond render distance. Mirrors `SurfaceProvider`'s
-//! center/threshold/radius idiom.
+//! approach but for world terrain chunks.
 //!
 //! Pristine chunks (generated, never edited) evict fully — regenerated
 //! deterministically on return. Edited chunks keep their voxel data; only
 //! their GPU mesh drops.
-
+use rayon::prelude::*;
 use glam::{IVec3, Vec3};
 use vox_core::consts::CHUNK_SIZE;
 use vox_core::{WorldConfig, chunk_of, chunk_origin};
@@ -216,6 +216,72 @@ impl ChunkLoader {
     /// out by the detail-ring check → only near-neighbor canopy stamps.
     /// This keeps trees whole across ALL chunk boundaries, not just the
     /// detail-ring boundary.
+
+    /// Fill terrain only (no tree stamping). Safe to call in parallel —
+    /// each chunk is independent. Returns the ChunkBand so the caller
+    /// knows whether to stamp trees afterward.
+    pub fn fill_terrain_only(&self, world: &mut World, key: IVec3) -> ChunkBand {
+        let s = world.cfg.voxel_size_m;
+        world.set_suppress_edit_tracking(true);
+        let band = self.terrain.chunk_band(key, s);
+        match band {
+            ChunkBand::Stone => {
+                world.insert_chunk(key, Chunk::uniform(self.terrain_mats.stone));
+            }
+            ChunkBand::Air => {
+                world.insert_chunk(key, Chunk::uniform(AIR));
+            }
+            ChunkBand::Surface => {
+                let chunk = self.terrain.fill_surface_chunk(key, s, self.terrain_mats, &self.biomes);
+                world.insert_chunk(key, chunk);
+            }
+        }
+        world.set_suppress_edit_tracking(false);
+        band
+    }
+
+    /// Stamp trees for a chunk (sequential — cross-chunk writes).
+    pub fn stamp_trees(&self, world: &mut World, key: IVec3, band: ChunkBand) {
+        if !matches!(band, ChunkBand::Surface | ChunkBand::Air) { return; }
+        let s = world.cfg.voxel_size_m;
+        let origin = chunk_origin(key);
+        world.set_clip(origin, origin + IVec3::splat(CHUNK_SIZE as i32));
+        world.set_suppress_edit_tracking(true);
+
+        let chunk_m = CHUNK_SIZE as f32 * s;
+        let canopy_reach = ((10.0 / chunk_m).ceil() as i32 + 1).max(2);
+        for dy in -canopy_reach..=canopy_reach {
+            for dz in -canopy_reach..=canopy_reach {
+                for dx in -canopy_reach..=canopy_reach {
+                    let neighbor = IVec3::new(key.x + dx, key.y + dy, key.z + dz);
+                    let trees = trees_for_chunk(&world.cfg, &self.terrain, neighbor);
+                    for tree in &trees {
+                        stamp_tree(world, tree, self.tree_mats);
+                    }
+                }
+            }
+        }
+
+        world.clear_clip();
+        world.set_suppress_edit_tracking(false);
+    }
+
+    /// Generate terrain for all keys in parallel (no World borrow needed).
+    /// Returns (key, chunk, band) tuples for sequential insertion + tree stamping.
+    pub fn par_fill_terrain(&self, keys: &[IVec3], s: f32) -> Vec<(IVec3, Chunk, ChunkBand)> {
+        keys.par_iter()
+            .map(|&key| {
+                let band = self.terrain.chunk_band(key, s);
+                let chunk = match band {
+                    ChunkBand::Stone => Chunk::uniform(self.terrain_mats.stone),
+                    ChunkBand::Air => Chunk::uniform(AIR),
+                    ChunkBand::Surface => self.terrain.fill_surface_chunk(
+                        key, s, self.terrain_mats, &self.biomes),
+                };
+                (key, chunk, band)
+            })
+            .collect()
+    }
     pub fn generate_chunk(
         &self,
         world: &mut World,
