@@ -97,26 +97,40 @@ impl ChunkLoader {
     ) -> bool {
         let s = world.cfg.voxel_size_m;
         let center = Self::player_chunk(player_pos, s);
-
-        // Only act when the player moved enough meters (not every chunk
-        // crossing — at 0.1m voxels chunks are only 3.2m, too frequent).
+        // Skip the full missing-chunk scan unless the player moved enough
+        // meters OR we haven't filled the render distance yet. At 0.1m
+        // voxels chunks are only 3.2m, so the threshold prevents scanning
+        // every frame — but we still need to fill in chunks after spawn.
         let chunk_m = CHUNK_SIZE as f32 * s;
         let moved_chunks = (center - self.last_center_chunk).abs().max_element();
         let moved_m = moved_chunks as f32 * chunk_m;
-        if moved_m < RELOAD_THRESHOLD_M {
-            return false;
+        let moved_enough = moved_m >= RELOAD_THRESHOLD_M;
+        if moved_enough {
+            self.last_center_chunk = center;
         }
-        self.last_center_chunk = center;
+
+        // Only run the expensive missing-chunk scan when the player moved
+        // enough. When standing still, use a smaller budget to fill in
+        // remaining chunks without re-scanning the full frontier.
+        let budget = if moved_enough {
+            self.quality.gen_budget(world.cfg.voxel_size_m)
+        } else {
+            // Standing still: still fill in chunks, but cheaper scan.
+            self.quality.gen_budget(world.cfg.voxel_size_m).min(8)
+        };
 
         let render_dist = self.quality.render_distance(world.cfg.voxel_size_m);
         let detail_ring = self.quality.detail_ring();
-        let budget = self.quality.gen_budget(world.cfg.voxel_size_m);
 
         // Generate missing chunks (up to budget, nearest first).
         let generated = self.generate_missing(world, pipeline, gpu, center, render_dist, detail_ring, budget);
 
-        // Evict chunks beyond render distance.
-        let evicted = self.evict_beyond_range(world, pipeline, center, render_dist);
+        // Evict chunks beyond render distance (only when moved).
+        let evicted = if moved_enough {
+            self.evict_beyond_range(world, pipeline, center, render_dist)
+        } else {
+            false
+        };
 
         generated || evicted
     }
