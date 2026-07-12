@@ -11,7 +11,7 @@ use vox_core::consts::CHUNK_SIZE;
 use vox_core::{WorldConfig, chunk_of, chunk_origin};
 use vox_gen::{BiomeMap, ChunkBand, TerrainGen, TerrainMaterials, TreeMaterials, stamp_tree, trees_for_chunk};
 use vox_render::{Gpu, VoxelPipeline};
-use vox_world::{Chunk, World};
+use vox_world::{AIR, Chunk, World};
 
 use crate::args::Quality;
 
@@ -213,36 +213,30 @@ impl ChunkLoader {
                 world.insert_chunk(key, Chunk::uniform(self.terrain_mats.stone));
             }
             ChunkBand::Air => {
-                // Absent chunks read as air — nothing to insert.
+                // Insert an empty chunk so tree canopy voxels from
+                // surface chunks below have somewhere to land.
+                world.insert_chunk(key, Chunk::uniform(AIR));
             }
             ChunkBand::Surface => {
                 let chunk = self.terrain.fill_surface_chunk(key, s, self.terrain_mats, &self.biomes);
                 world.insert_chunk(key, chunk);
+            }
+        }
 
-                // Stamp all trees whose canopy overlaps this chunk. Tree
-                // existence is gated by the ROOT chunk's tier (root within
-                // detail ring → tree exists). The loop is unconditional —
-                // it covers both own-rooted trees (dx=0, dz=0) and
-                // neighbor-rooted trees. The clip guard ensures only voxels
-                // within this chunk are written; the rest are dropped.
-                let origin = chunk_origin(key);
-                let clip_min = origin;
-                let clip_max = origin + IVec3::splat(CHUNK_SIZE as i32);
-                world.set_clip(clip_min, clip_max);
+        // Canopy stamping runs for both Surface AND Air chunks so trees
+        // whose canopy extends into the chunk above (Air) get their
+        // upper leaves stamped. Stone chunks are too deep for canopy.
+        if matches!(self.terrain.chunk_band(key, s), ChunkBand::Surface | ChunkBand::Air) {
+            let origin = chunk_origin(key);
+            let clip_min = origin;
+            let clip_max = origin + IVec3::splat(CHUNK_SIZE as i32);
+            world.set_clip(clip_min, clip_max);
 
-                // Canopy reach is ~5m; at 0.1m voxels that's ~50 voxels
-                // (< 2 chunks of 3.2m), at 1.0m voxels it's < 1 chunk
-                // (32m). A 5x5 neighborhood (±2 chunks) is conservative
-                // and the inner loop is cheap (trees_for_chunk returns
-                // ~0-3 trees per chunk).
-                const CANOPY_REACH_CHUNKS: i32 = 2;
+            const CANOPY_REACH_CHUNKS: i32 = 2;
+            for dy in -CANOPY_REACH_CHUNKS..=CANOPY_REACH_CHUNKS {
                 for dz in -CANOPY_REACH_CHUNKS..=CANOPY_REACH_CHUNKS {
                     for dx in -CANOPY_REACH_CHUNKS..=CANOPY_REACH_CHUNKS {
-                        let neighbor = IVec3::new(key.x + dx, key.y, key.z + dz);
-                        // Root-chunk-tier gate: only stamp from near
-                        // (detail-ring) root chunks. Self (dx=0, dz=0) is
-                        // included when this chunk is in the detail ring,
-                        // excluded when it's far.
+                        let neighbor = IVec3::new(key.x + dx, key.y + dy, key.z + dz);
                         let ndx = neighbor.x - center_chunk.x;
                         let ndz = neighbor.z - center_chunk.z;
                         if ndx.abs() > detail_ring || ndz.abs() > detail_ring {
@@ -254,9 +248,9 @@ impl ChunkLoader {
                         }
                     }
                 }
-
-                world.clear_clip();
             }
+
+            world.clear_clip();
         }
 
         world.set_suppress_edit_tracking(false);

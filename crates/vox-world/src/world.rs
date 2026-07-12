@@ -83,7 +83,7 @@ impl<'w> SolidLookup<'w> {
         };
         match chunk {
             Some(c) => c.get(local_of(v)) != AIR,
-            None => false,
+            None => true, // unloaded chunks assumed solid (streaming terrain)
         }
     }
 }
