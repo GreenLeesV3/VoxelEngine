@@ -50,7 +50,7 @@ use std::collections::BinaryHeap;
 
 use glam::{IVec3, Vec3, Vec3Swizzles};
 use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
-use vox_core::{FxHashSet, MaterialRegistry, voxel_at, voxel_center_m};
+use vox_core::{FxHashMap, FxHashSet, MaterialRegistry, voxel_at, voxel_center_m};
 use vox_world::{AIR, SolidLookup, Voxel, World};
 
 use crate::BodyId;
@@ -590,6 +590,111 @@ pub fn apply_blast_impulse(
     }
 }
 
+/// Fraction of carved voxels that become flying debris (rest vanish as dust).
+const DEBRIS_FRACTION: f32 = 0.25;
+/// Max debris bodies per blast.
+const MAX_DEBRIS: usize = 30;
+/// Max voxels per debris cluster.
+const MAX_CLUSTER_VOXELS: usize = 8;
+/// Debris launch speed scaling.
+const DEBRIS_SPEED_SCALE: f32 = 0.6;
+/// Debris max launch speed (m/s).
+const DEBRIS_MAX_SPEED: f32 = 8.0;
+/// Debris max spin (rad/s).
+const DEBRIS_SPIN_MAX: f32 = 0.4;
+
+/// Create flying debris bodies from the ACTUAL carved-away voxels.
+/// Clusters adjacent removed voxels by material into small physics bodies
+/// and launches them outward from the blast center. This is not "spawning
+/// debris in" — these are the real blocks that were just blown up.
+fn spawn_carved_debris(
+    phys: &mut PhysicsWorld,
+    registry: &MaterialRegistry,
+    removed: &[(IVec3, Voxel)],
+    voxel_size_m: f32,
+    center_m: Vec3,
+    power: f32,
+    seed: u32,
+) -> Vec<BodyId> {
+    if removed.is_empty() { return Vec::new(); }
+
+    let target = ((removed.len() as f32 * DEBRIS_FRACTION) as usize).clamp(1, MAX_DEBRIS);
+
+    // Deterministic sample: pick seed voxels for debris clusters.
+    let mut ranked: Vec<(u32, usize)> = removed
+        .iter().enumerate()
+        .map(|(i, _)| (small_hash(seed, i as u32), i))
+        .collect();
+    if target < ranked.len() {
+        ranked.select_nth_unstable_by_key(target - 1, |&(h, _)| h);
+        ranked.truncate(target);
+    }
+
+    // Map of all removed voxels for neighbor lookup during clustering.
+    let removed_map: FxHashMap<IVec3, Voxel> = removed.iter().cloned().collect();
+    let mut used: FxHashSet<IVec3> = FxHashSet::default();
+    let mut ids = Vec::with_capacity(target);
+
+    for &(_, i) in ranked.iter() {
+        let (start, mat) = removed[i];
+        if used.contains(&start) || mat == AIR { continue; }
+
+        // Flood-fill cluster of same-material neighbors from the removed set.
+        let mut cluster: Vec<IVec3> = vec![start];
+        used.insert(start);
+        let mut frontier: Vec<IVec3> = vec![start];
+        while cluster.len() < MAX_CLUSTER_VOXELS && !frontier.is_empty() {
+            let v = frontier.pop().unwrap();
+            for d in DIRS {
+                let n = v + d;
+                if !used.contains(&n) {
+                    if let Some(&nm) = removed_map.get(&n) {
+                        if nm == mat {
+                            used.insert(n);
+                            cluster.push(n);
+                            frontier.push(n);
+                            if cluster.len() >= MAX_CLUSTER_VOXELS { break; }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build a VoxelGrid from the actual cluster voxels.
+        let mut min = IVec3::splat(i32::MAX);
+        let mut max = IVec3::splat(i32::MIN);
+        for &v in &cluster { min = min.min(v); max = max.max(v); }
+        let dims = max - min + IVec3::ONE;
+        let mut voxels = vec![AIR; (dims.x * dims.y * dims.z) as usize];
+        for &v in &cluster {
+            let l = v - min;
+            voxels[(l.x + l.z * dims.x + l.y * dims.x * dims.z) as usize] = mat;
+        }
+
+        let grid = VoxelGrid::new(dims, voxels);
+        let chip_center = voxel_center_m(start, voxel_size_m);
+        let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, chip_center) else { continue; };
+
+        // Launch outward from blast center with slight upward bias.
+        let offset = chip_center - center_m;
+        let dist = offset.length();
+        let dir = if dist > 1e-6 { offset / dist } else { Vec3::Y };
+        let falloff = 1.0 / (1.0 + dist * 0.12);
+        let speed = (power * DEBRIS_SPEED_SCALE * falloff).min(DEBRIS_MAX_SPEED);
+        body.vel = dir * speed + Vec3::Y * speed * 0.35;
+
+        let h2 = small_hash(seed, cluster[0].x as u32);
+        body.omega = Vec3::new(
+            ((h2 & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
+            (((h2 >> 8) & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
+            (((h2 >> 16) & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
+        ) * DEBRIS_SPIN_MAX;
+
+        ids.push(phys.spawn(body));
+    }
+    ids
+}
+
 
 /// Carve a jagged [`ExplosionShape`] (not a plain sphere -- see its docs),
 /// detach anything left unsupported, give the new debris a blast impulse,
@@ -608,14 +713,12 @@ pub fn blast(
     direction: Option<Vec3>,
 ) -> CarveResult {
     let mut carve = carve_explosion(world, center_m, radius_m, seed, direction);
+    let s = world.cfg.voxel_size_m;
     let removed_positions: Vec<IVec3> = carve.removed.iter().map(|&(v, _)| v).collect();
     let mut ids = detach_unsupported(world, phys, registry, &removed_positions);
+    // Debris from the actual carved voxels — real blocks blown outward.
+    ids.extend(spawn_carved_debris(phys, registry, &carve.removed, s, center_m, power, seed));
     apply_blast_impulse(phys, &ids, center_m, power, seed, direction);
-
-    let s = world.cfg.voxel_size_m;
-    // Debris comes from detach_unsupported (actual disconnected voxels).
-    // No template chip spawning — natural breakage only.
-
     phys.wake_region(carve.region.0.as_vec3() * s, carve.region.1.as_vec3() * s);
     carve.spawned = ids;
     carve

@@ -440,8 +440,38 @@ pub fn carve_body_sphere_at_impact(
     };
     phys.despawn(id);
     let mut ids = finish_carve(phys, registry, grid, voxel_size_m, parent);
-    // Debris comes from finish_carve (actual fractured voxels).
-    // No template chip spawning — natural breakage only.
+
+    // Debris from the actual carved voxels: convert local grid positions
+    // to world space and spawn small flying bodies from them.
+    let world_center = center_world_m;
+    for (local_pos, mat) in &removed {
+        if *mat == AIR { continue; }
+        // Sample ~30% of removed voxels as single-voxel debris.
+        let h = crate::destruction::small_hash(_seed, local_pos.x as u32);
+        if h % 3 != 0 { continue; }
+
+        let local_m = local_pos.as_vec3() * voxel_size_m + parent.grid_offset;
+        let world_pos = parent.pos + parent.rot * local_m;
+
+        let grid = VoxelGrid::new(IVec3::ONE, vec![*mat]);
+        let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, world_pos) else { continue; };
+
+        // Launch along impact direction with inherited velocity.
+        let offset = world_pos - world_center;
+        let dist = offset.length();
+        let dir = if dist > 1e-6 { offset / dist } else { _impact_dir };
+        let speed = (_impact_speed * 0.4).min(4.0);
+        body.vel = parent.vel + dir * speed + Vec3::Y * speed * 0.3;
+
+        let h2 = crate::destruction::small_hash(_seed ^ 0xdead, local_pos.y as u32);
+        body.omega = parent.omega + Vec3::new(
+            ((h2 & 0xFF) as f32 / 255.0 - 0.5) * 0.4,
+            (((h2 >> 8) & 0xFF) as f32 / 255.0 - 0.5) * 0.4,
+            (((h2 >> 16) & 0xFF) as f32 / 255.0 - 0.5) * 0.4,
+        );
+
+        ids.push(phys.spawn(body));
+    }
     ids
 }
 
