@@ -76,7 +76,11 @@ impl ChunkLoader {
     ) {
         let center = Self::player_chunk(player_pos, world.cfg.voxel_size_m);
         let s = world.cfg.voxel_size_m;
-        let radius = self.quality.render_distance(s).max(2);
+        // Cap synchronous spawn generation to ~8m radius (enough to stand
+        // on + see nearby terrain). The rest streams in via update().
+        let spawn_radius_m = 8.0;
+        let chunk_m = CHUNK_SIZE as f32 * s;
+        let radius = ((spawn_radius_m / chunk_m).ceil() as i32).max(2);
         let ring = self.quality.detail_ring();
         self.generate_ring(world, pipeline, gpu, center, radius, ring);
         self.last_center_chunk = center;
