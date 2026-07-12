@@ -59,12 +59,14 @@ impl Quality {
         base * scale
     }
 
-    /// Maximum loaded chunk count (soft cap for eviction).
-    pub fn chunk_cap(self, voxel_size_m: f32) -> usize {
+    /// Maximum loaded chunk count (soft cap for eviction). Scales with
+    /// world height in chunks so it's correct at any voxel size.
+    pub fn chunk_cap(self, voxel_size_m: f32, world_extent_y_m: f32) -> usize {
         let r = self.render_distance(voxel_size_m) as usize;
-        // (2r+1)^2 * height_chunks estimate, plus headroom.
+        let chunk_m = CHUNK_SIZE as f32 * voxel_size_m;
+        let height_chunks = (world_extent_y_m / chunk_m).ceil() as usize;
         let side = 2 * r + 1;
-        side * side * 4 + 64
+        side * side * height_chunks + 64
     }
 }
 

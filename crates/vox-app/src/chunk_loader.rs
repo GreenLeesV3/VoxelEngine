@@ -292,8 +292,7 @@ impl ChunkLoader {
     ) -> bool {
         let render_dist_sq = (render_dist + 1) as i64; // +1 for hysteresis
         let render_dist_sq = render_dist_sq * render_dist_sq;
-        let cap = self.quality.chunk_cap(world.cfg.voxel_size_m);
-
+        let cap = self.quality.chunk_cap(world.cfg.voxel_size_m, world.cfg.extent_m[1]);
         let to_evict: Vec<IVec3> = world
             .chunks()
             .filter(|(key, _)| {
