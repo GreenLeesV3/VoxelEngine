@@ -50,7 +50,7 @@ use std::collections::BinaryHeap;
 
 use glam::{IVec3, Vec3, Vec3Swizzles};
 use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
-use vox_core::{FxHashMap, FxHashSet, MaterialRegistry, voxel_at, voxel_center_m};
+use vox_core::{FxHashSet, MaterialRegistry, voxel_at, voxel_center_m};
 use vox_world::{AIR, SolidLookup, Voxel, World};
 
 use crate::BodyId;
@@ -590,156 +590,13 @@ pub fn apply_blast_impulse(
     }
 }
 
-/// Roughly this fraction of an explosion's removed voxels become small
-/// flying debris chips instead of simply vanishing into air -- capped in
-/// absolute count (below) so a huge terrain crater doesn't spawn hundreds
-/// of one-voxel bodies.
-const DEBRIS_CHIP_FRACTION: f32 = 0.12;
-/// Absolute cap on chips per blast, regardless of how much was removed.
-const MAX_DEBRIS_CHIPS: usize = 40;
-/// Chip outward speed falloff, as a fraction of the main blast impulse's
-/// own falloff shape (see [`apply_blast_impulse`]).
-const DEBRIS_CHIP_SPEED_SCALE: f32 = 0.6;
-/// Hard ceiling on a debris chip's launch speed, in m/s. Unlike
-/// `apply_blast_impulse` (which divides by `sqrt(mass)` for real structural
-/// fragments, appropriately slowing down heavy ones), a chip's mass is
-/// always tiny (one voxel) and barely varies, so that same division would
-/// blow up to an unrealistic speed for anything near the blast center --
-/// launching light rubble clear across the map instead of scattering it
-/// visibly around the crater. Chips ignore mass entirely and are simply
-/// capped: "a chunk gets knocked a few meters," not "a bullet."
-const DEBRIS_CHIP_MAX_SPEED_M_S: f32 = 6.0;
-/// Max angular speed (rad/s) randomly given to a debris chip. Deliberately
-/// tiny (not zero -- a little tumble as it flies out still reads well): a
-/// small two-voxel chip only ever rests on one or two contact points, so
-/// friction has very little leverage to damp rotation once it's on the
-/// ground. Unlike a normal structural fragment, any real spin here can
-/// take a very long time to settle out even after position and linear
-/// velocity are already stable -- and a hard collision in flight can add
-/// much more on top of this regardless, so this only bounds our own
-/// contribution, not the total a chip might end up spinning at.
-const DEBRIS_CHIP_SPIN_MAX: f32 = 0.3;
-
-/// Turn a deterministic sample of `removed` into small flying debris bodies
-/// made from the ACTUAL removed voxels — not template shapes. Each debris
-/// body is a small cluster of adjacent removed voxels with the same material,
-/// preserving the real fracture pattern of the broken terrain.
-fn spawn_debris_chips(
-    phys: &mut PhysicsWorld,
-    registry: &MaterialRegistry,
-    removed: &[(IVec3, Voxel)],
-    voxel_size_m: f32,
-    center_m: Vec3,
-    power: f32,
-    seed: u32,
-) -> Vec<BodyId> {
-    if removed.is_empty() {
-        return Vec::new();
-    }
-
-    let target =
-        ((removed.len() as f32 * DEBRIS_CHIP_FRACTION) as usize).clamp(1, MAX_DEBRIS_CHIPS);
-
-    // Deterministic sample: rank every removed voxel by a seeded hash and
-    // take the lowest `target` as seed voxels for debris clusters.
-    let mut ranked: Vec<(u32, usize)> = removed
-        .iter()
-        .enumerate()
-        .map(|(i, _)| (small_hash(seed, i as u32), i))
-        .collect();
-    if target < ranked.len() {
-        ranked.select_nth_unstable_by_key(target - 1, |&(h, _)| h);
-        ranked.truncate(target);
-    }
-
-    // Build a map of all removed positions for quick neighbor lookup.
-    let removed_map: FxHashMap<IVec3, Voxel> = removed.iter().cloned().collect();
-    let mut used: FxHashSet<IVec3> = FxHashSet::default();
-    let mut ids = Vec::with_capacity(target);
-
-    for &(_, i) in ranked.iter() {
-        let (start, mat) = removed[i];
-        if used.contains(&start) || mat == AIR {
-            continue;
-        }
-
-        // Grow a small cluster from this seed: flood-fill up to
-        // MAX_CHIP_VOXELS neighbors with the same material.
-        const MAX_CHIP_VOXELS: usize = 6;
-        let mut cluster: Vec<IVec3> = vec![start];
-        used.insert(start);
-        let mut frontier: Vec<IVec3> = vec![start];
-
-        while cluster.len() < MAX_CHIP_VOXELS && !frontier.is_empty() {
-            let v = frontier.pop().unwrap();
-            for d in DIRS {
-                let n = v + d;
-                if !used.contains(&n) {
-                    if let Some(&nm) = removed_map.get(&n) {
-                        if nm == mat {
-                            used.insert(n);
-                            cluster.push(n);
-                            frontier.push(n);
-                            if cluster.len() >= MAX_CHIP_VOXELS {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Build a VoxelGrid from the actual cluster voxels.
-        let mut min = IVec3::splat(i32::MAX);
-        let mut max = IVec3::splat(i32::MIN);
-        for &v in &cluster {
-            min = min.min(v);
-            max = max.max(v);
-        }
-        let dims = max - min + IVec3::ONE;
-        let mut voxels = vec![AIR; (dims.x * dims.y * dims.z) as usize];
-        for &v in &cluster {
-            let l = v - min;
-            let idx = (l.x + l.z * dims.x + l.y * dims.x * dims.z) as usize;
-            voxels[idx] = mat;
-        }
-
-        let grid = VoxelGrid::new(dims, voxels);
-        let chip_center_m = voxel_center_m(start, voxel_size_m);
-        let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, chip_center_m) else {
-            continue;
-        };
-
-        let offset = chip_center_m - center_m;
-        let dist = offset.length();
-        let dir = if dist > 1e-6 { offset / dist } else { Vec3::Y };
-        let falloff = 1.0 / (1.0 + dist * 0.15);
-        let speed = (power * DEBRIS_CHIP_SPEED_SCALE * falloff).min(DEBRIS_CHIP_MAX_SPEED_M_S);
-        body.vel = dir * speed + Vec3::Y * speed * 0.3;
-
-        let h2 = small_hash(seed, cluster[0].x as u32);
-        body.omega = Vec3::new(
-            ((h2 & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
-            (((h2 >> 8) & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
-            (((h2 >> 16) & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
-        ) * DEBRIS_CHIP_SPIN_MAX;
-
-        ids.push(phys.spawn(body));
-    }
-
-    ids
-}
 
 /// Carve a jagged [`ExplosionShape`] (not a plain sphere -- see its docs),
 /// detach anything left unsupported, give the new debris a blast impulse,
-/// scatter a sample of the carved-away material as small flying debris
-/// chips instead of letting it simply vanish (see [`spawn_debris_chips`] --
-/// a bomb should leave visible rubble around the crater, not a clean void),
 /// and wake any resting bodies the carve disturbed. `power` is the blast
 /// strength (pass [`vox_core::Tunables::blast_power`] for the live-tunable
-/// default); `seed` drives the crater's shape, the debris chip sample and
-/// their spin, and the detached-fragment impulse, so the whole blast is
-/// reproducible from one seed.
+/// default); `seed` drives the crater's shape and the detached-fragment
+/// impulse, so the whole blast is reproducible from one seed.
 pub fn blast(
     world: &mut World,
     phys: &mut PhysicsWorld,

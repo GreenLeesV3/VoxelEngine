@@ -232,9 +232,8 @@ pub fn split_components(grid: &VoxelGrid) -> Vec<(VoxelGrid, IVec3)> {
 }
 
 /// The parent body's state needed to place and set the motion of each
-/// fragment [`finish_carve`] produces. `Copy`: both `finish_carve` and
-/// [`spawn_impact_chips`] need their own snapshot of it after the same
-/// carve, taken before the parent body is despawned.
+/// fragment [`finish_carve`] produces. `Copy`: [`finish_carve`] needs its
+/// own snapshot after the carve, taken before the parent body is despawned.
 #[derive(Clone, Copy)]
 struct ParentState {
     pos: Vec3,
@@ -406,142 +405,21 @@ pub fn carve_body_sphere_at(
     finish_carve(phys, registry, grid, voxel_size_m, parent)
 }
 
-/// Fraction of an impact fracture's removed voxels that become tiny flying
-/// debris chips instead of simply vanishing -- see
-/// [`crate::destruction::spawn_debris_chips`] for the same idea against
-/// world terrain. An impact fracture typically removes only a handful of
-/// voxels at a time (unlike a bomb's crater), so the fraction is higher and
-/// the cap much lower.
-const IMPACT_CHIP_FRACTION: f32 = 0.5;
-/// Absolute cap on chips per fracture event, regardless of how much was
-/// removed. Paired with `vox-app`'s `MAX_FRACTURE_RADIUS_VOX` (which bounds
-/// how much a single fracture can ever remove), so this is no longer the
-/// binding constraint on total debris load the way it was when radius was
-/// unbounded -- raised from an earlier `6` because that read as "a handful
-/// of specks next to a big empty hole" rather than a chunk actually
-/// breaking apart into pieces.
-const MAX_IMPACT_CHIPS: usize = 24;
-/// Chip launch speed as a fraction of the impact speed that caused the
-/// fracture -- a graze barely nudges its chips loose, a violent hit sends
-/// them flying: the same "proportional to what actually happened" idea as
-/// the fracture radius itself ([`crate::destruction`]'s `fracture_radius_vox`
-/// analog lives in `vox-app`, but the chips scale with the same input).
-const IMPACT_CHIP_SPEED_SCALE: f32 = 0.5;
-/// Hard ceiling on a chip's launch speed -- same reasoning as
-/// `spawn_debris_chips`'s own cap: a chip's mass barely varies, so scaling
-/// unboundedly with impact speed could fling light rubble across the map
-/// instead of scattering it visibly around the impact.
-const IMPACT_CHIP_MAX_SPEED_M_S: f32 = 4.0;
-/// Max angular speed (rad/s) randomly added to a chip's inherited spin.
-const IMPACT_CHIP_SPIN_MAX: f32 = 0.3;
-
-/// Turn a deterministic sample of an impact fracture's removed voxels into
-/// small flying debris chips launched along `impact_dir`, scaled by
-/// `impact_speed`, instead of letting all of it simply vanish into empty
-/// space -- "tiny chunks fly off, a satisfying mess," not "an orb of
-/// voxels deleted from space." Chips are a small L-shaped triomino, not a
-/// single voxel: see `spawn_debris_chips`'s own doc comment for why a lone
-/// voxel is a physics-degenerate rotation case. `parent` must be a snapshot
-/// of the carved body's transform/motion taken *before* it was despawned
-/// (its own position/rotation no longer exist afterward).
-#[expect(clippy::too_many_arguments, reason = "internal chip assembly")]
-fn spawn_impact_chips(
-    phys: &mut PhysicsWorld,
-    registry: &MaterialRegistry,
-    removed: &[(IVec3, Voxel)],
-    voxel_size_m: f32,
-    parent: &ParentState,
-    impact_dir: Vec3,
-    impact_speed: f32,
-    seed: u32,
-) -> Vec<BodyId> {
-    if removed.is_empty() {
-        return Vec::new();
-    }
-    let target =
-        ((removed.len() as f32 * IMPACT_CHIP_FRACTION) as usize).clamp(1, MAX_IMPACT_CHIPS);
-
-    // Same deterministic partial-selection sampling as `spawn_debris_chips`.
-    let mut ranked: Vec<(u32, usize)> = removed
-        .iter()
-        .enumerate()
-        .map(|(i, _)| (small_hash(seed, i as u32), i))
-        .collect();
-    if target < ranked.len() {
-        ranked.select_nth_unstable_by_key(target - 1, |&(h, _)| h);
-        ranked.truncate(target);
-    }
-
-    let dir = if impact_dir.length_squared() > 1e-9 {
-        impact_dir.normalize()
-    } else {
-        Vec3::Y
-    };
-    let speed = (impact_speed * IMPACT_CHIP_SPEED_SCALE).min(IMPACT_CHIP_MAX_SPEED_M_S);
-
-    let mut ids = Vec::with_capacity(target);
-    for &(h, i) in ranked.iter().take(target) {
-        let (v, mat) = removed[i];
-        let chip_center_world = parent.local_to_world_m(voxel_center_m(v, voxel_size_m));
-        // Chip shape: pick from 3 templates by hash (same variety as
-        // spawn_debris_chips in destruction.rs).
-        let template = h % 3;
-        let (dims, voxels) = if template == 0 {
-            let mut vs = vec![mat; 4];
-            vs[(h as usize) % 4] = AIR;
-            (IVec3::new(2, 2, 1), vs)
-        } else if template == 1 {
-            let mut vs = vec![AIR; 9];
-            vs[1] = mat; vs[3] = mat; vs[4] = mat; vs[5] = mat; vs[7] = mat;
-            (IVec3::new(3, 3, 1), vs)
-        } else {
-            let mut vs = vec![mat; 8];
-            vs[(h as usize) % 8] = AIR;
-            (IVec3::new(2, 2, 2), vs)
-        };
-        let grid = VoxelGrid::new(dims, voxels);
-        let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, chip_center_world)
-        else {
-            continue;
-        };
-
-        // Radial scatter: blend the impact direction with a per-chip
-        // outward radial direction from the impact center. This makes
-        // debris fly outward from the hit point, not all in one stream.
-        let radial_dir = (chip_center_world - parent.pos).normalize_or(dir);
-        let blend = 0.4 + (small_hash(h, 42) as f32 / u32::MAX as f32) * 0.4; // 0.4..0.8
-        let chip_dir = (dir * (1.0 - blend) + radial_dir * blend).normalize_or(dir);
-        body.vel = parent.vel + chip_dir * speed;
-        let h2 = small_hash(h, i as u32);
-        body.omega = parent.omega
-            + Vec3::new(
-                ((h2 & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
-                (((h2 >> 8) & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
-                (((h2 >> 16) & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
-            ) * IMPACT_CHIP_SPIN_MAX;
-
-        ids.push(phys.spawn(body));
-    }
-    ids
-}
 
 /// Same as [`carve_body_sphere_at`], but for the material-based
-/// impact-fracture path: also scatters a sample of the carved material as
-/// small flying debris chips (see [`spawn_impact_chips`]) instead of
-/// letting it all simply vanish. `impact_dir` should be the direction the
+/// impact-fracture path. `impact_dir` should be the direction the
 /// impact pushed into the body (`ImpactEvent::push_dir`); `impact_speed`
-/// scales chip launch speed; `seed` makes the chip sample and their
-/// spin/velocity jitter deterministic.
-#[expect(clippy::too_many_arguments, reason = "internal chip assembly")]
+/// scales fragment impulse; `seed` makes the fracture deterministic.
+#[expect(clippy::too_many_arguments, reason = "API stability")]
 pub fn carve_body_sphere_at_impact(
     phys: &mut PhysicsWorld,
     registry: &MaterialRegistry,
     id: BodyId,
     center_world_m: Vec3,
     radius_m: f32,
-    impact_dir: Vec3,
-    impact_speed: f32,
-    seed: u32,
+    _impact_dir: Vec3,
+    _impact_speed: f32,
+    _seed: u32,
 ) -> Vec<BodyId> {
     let Some(body) = phys.get(id) else {
         return Vec::new();
