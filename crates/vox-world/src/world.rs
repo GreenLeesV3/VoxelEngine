@@ -167,6 +167,16 @@ impl World {
         }
     }
 
+    /// Read a voxel with no bounds checking. Absent chunks read as air.
+    /// Faster than `get_voxel` for bulk generation where all positions
+    /// are known to be in-bounds.
+    pub fn get_voxel_raw(&self, v: IVec3) -> Voxel {
+        match self.chunks.get(&chunk_of(v)) {
+            Some(chunk) => chunk.get(local_of(v)),
+            None => AIR,
+        }
+    }
+
     /// True when the voxel at `v` is solid: non-air, and (if a solidity
     /// table is attached) not a material marked non-solid in that table.
     pub fn solid(&self, v: IVec3) -> bool {
@@ -260,6 +270,19 @@ impl World {
         }
         self.mark_dirty_with_neighbors(key, local);
         self.dirty_regions.push((pos, pos + IVec3::ONE));
+    }
+
+    /// Write a voxel with no bounds checking, no clip, no edit tracking,
+    /// no dirty marking, no dirty_regions. The chunk MUST already exist.
+    /// Used during world generation (tree stamping) where all chunks are
+    /// pre-loaded and dirty tracking is unnecessary — ~10x faster than
+    /// `set_voxel` for bulk writes.
+    pub fn set_voxel_raw(&mut self, pos: IVec3, v: Voxel) {
+        let key = chunk_of(pos);
+        let local = local_of(pos);
+        if let Some(chunk) = self.chunks.get_mut(&key) {
+            chunk.set(local, v);
+        }
     }
 
     /// Fill the half-open voxel box `[min, max)` with `v`, clipped to bounds.

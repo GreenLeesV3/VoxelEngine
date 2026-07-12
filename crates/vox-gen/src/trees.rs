@@ -272,8 +272,8 @@ fn stamp_disc(
             let v = center + IVec3::new(dx, 0, dz);
             let c = voxel_center_m(v, s);
             let in_disc = (Vec2::new(c.x, c.z) - axis).length() <= radius_m;
-            if (in_disc || (dx == 0 && dz == 0)) && replaceable(world.get_voxel(v)) {
-                world.set_voxel(v, material);
+            if (in_disc || (dx == 0 && dz == 0)) && replaceable(world.get_voxel_raw(v)) {
+                world.set_voxel_raw(v, material);
             }
         }
     }
@@ -293,8 +293,8 @@ fn stamp_line(
     for i in 0..=steps {
         p = start_m + dir * (len_m * i as f32 / steps as f32);
         let v = voxel_at(p, s);
-        if wood_replaceable(world.get_voxel(v), mats) {
-            world.set_voxel(v, mats.wood);
+        if wood_replaceable(world.get_voxel_raw(v), mats) {
+            world.set_voxel_raw(v, mats.wood);
         }
     }
     p
@@ -311,8 +311,8 @@ fn stamp_ellipsoid(world: &mut World, center_m: Vec3, radii_m: Vec3, leaves: Vox
                 let v = IVec3::new(x, y, z);
                 let d = (voxel_center_m(v, s) - center_m) / radii_m;
                 if d.x * d.x + d.y * d.y + d.z * d.z <= 1.0 {
-                    if world.get_voxel(v) == AIR {
-                        world.set_voxel(v, leaves);
+                    if world.get_voxel_raw(v) == AIR {
+                        world.set_voxel_raw(v, leaves);
                     }
                 }
             }
