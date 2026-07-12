@@ -157,8 +157,7 @@ impl Eq for Cell {}
 #[inline]
 fn jitter_hash(seed: IVec3, local: [u8; 3]) -> u8 {
     let p = seed + IVec3::new(local[0] as i32, local[1] as i32, local[2] as i32);
-    let mut x = (p.x as u32)
-        .wrapping_mul(0x8529_7a4d)
+    let mut x = (p.x as u32).wrapping_mul(0x8529_7a4d)
         ^ (p.y as u32).wrapping_mul(0x68e3_1da4)
         ^ (p.z as u32).wrapping_mul(0x1b56_c4e9);
     x ^= x >> 15;
@@ -173,15 +172,15 @@ fn jitter_hash(seed: IVec3, local: [u8; 3]) -> u8 {
 /// `p.y + 1`) until hitting something solid or the slab's top padding row
 /// (`inner_dims.y`). Capped at 15. This is a simple top-down column scan --
 /// no horizontal propagation -- so voxels under overhangs get a gradient
-/// (air gap depth) and fully enclosed voxels get 0. Water (material 9) is
-/// treated as transparent to skylight, matching its visual translucency.
+/// (air gap depth) and fully enclosed voxels get 0. Fluids are treated as
+/// transparent to skylight, matching their visual translucency.
 #[inline]
-fn skylight_above(slab: &VoxelSlab, p: IVec3) -> u8 {
+fn skylight_above(slab: &VoxelSlab, p: IVec3, fluids: &[Voxel]) -> u8 {
     let top = slab.inner_dims.y;
     let mut count: u8 = 0;
     let mut y = p.y + 1;
     while y <= top && count < 15 {
-        if slab.opaque(IVec3::new(p.x, y, p.z)) {
+        if slab.opaque(IVec3::new(p.x, y, p.z), fluids) {
             break;
         }
         count += 1;
@@ -203,7 +202,7 @@ fn skylight_above(slab: &VoxelSlab, p: IVec3) -> u8 {
 /// emissive voxels in neighboring chunks (sampled into the shell) contribute
 /// light that bleeds across chunk boundaries. Returns an empty Vec when
 /// there are no emissive materials, letting callers skip the lookup.
-fn blocklight_field(slab: &VoxelSlab, emissive_set: &[Voxel]) -> Vec<u8> {
+fn blocklight_field(slab: &VoxelSlab, emissive_set: &[Voxel], fluids: &[Voxel]) -> Vec<u8> {
     if emissive_set.is_empty() {
         return Vec::new();
     }
@@ -260,7 +259,7 @@ fn blocklight_field(slab: &VoxelSlab, emissive_set: &[Voxel]) -> Vec<u8> {
                 continue;
             }
             let ni = idx(n);
-            if light[ni] < next && !slab.opaque(n) {
+            if light[ni] < next && !slab.opaque(n, fluids) {
                 light[ni] = next;
                 queue.push(n);
             }
@@ -285,20 +284,24 @@ fn light_at(field: &[u8], padded: IVec3, rel: IVec3) -> u8 {
 
 /// Greedy-mesh a slab into quads. `jitter_seed` anchors the baked per-vertex
 /// jitter pattern (see `jitter_hash`) -- pass a chunk's world origin for
-/// chunks, `IVec3::ZERO` for a body's own local mesh. `emissive_set` lists
-/// material ids that emit blocklight; the mesher BFS-propagates their light
-/// through air and bakes the per-voxel level into each vertex.
+/// chunks, `IVec3::ZERO` for a body's own local mesh. `fluids` lists fluid
+/// voxel ids whose `water_depth` is baked into vertex jitter (any material in
+/// the set gets depth-based jitter instead of hash jitter). `emissive_set`
+/// lists material ids that emit blocklight; the mesher BFS-propagates their
+/// light through air and bakes the per-voxel level into each vertex.
+/// `slice_masks` optionally marks which per-axis slices contain any solid
+/// voxel, letting the mesher skip all-air slices cheaply.
 pub fn mesh_slab(
     slab: &VoxelSlab,
     jitter_seed: IVec3,
-    water_voxel: Voxel,
+    fluids: &[Voxel],
     emissive_set: &[Voxel],
     slice_masks: Option<&[[bool; CHUNK_SIZE]; 3]>,
 ) -> MeshData {
     let mut mesh = MeshData::default();
     let dims = slab.inner_dims;
     let padded = dims + IVec3::splat(2);
-    let blocklight = blocklight_field(slab, emissive_set);
+    let blocklight = blocklight_field(slab, emissive_set, fluids);
 
     // Hoist the mask buffer outside the face loop: allocate once, clear and
     // reuse per face direction. The buffer is always sized to the largest
@@ -348,9 +351,9 @@ pub fn mesh_slab(
                     p[axis] = slice;
                     p[u_axis] = u;
                     p[v_axis] = v;
-                    let is_water = slab.get(p) == vox_world::Voxel(9);
-                    let cell = if (slab.opaque(p) && !slab.opaque(p + normal))
-                        || (is_water && !slab.solid(p + normal))
+                    let is_fluid = fluids.contains(&slab.get(p));
+                    let cell = if (slab.opaque(p, fluids) && !slab.opaque(p + normal, fluids))
+                        || (is_fluid && !slab.solid(p + normal))
                     {
                         let outer = p + normal;
                         let mut ao4 = [0u8; 4];
@@ -360,10 +363,25 @@ pub fn mesh_slab(
                             let u_off = if cu == 0 { -u_dir } else { u_dir };
                             let v_off = if cv == 0 { -v_dir } else { v_dir };
                             ao4[i] = ao(
-                                slab.opaque(outer + u_off),
-                                slab.opaque(outer + v_off),
-                                slab.opaque(outer + u_off + v_off),
+                                slab.opaque(outer + u_off, fluids),
+                                slab.opaque(outer + v_off, fluids),
+                                slab.opaque(outer + u_off + v_off, fluids),
                             );
+                        }
+                        // Darken AO by per-voxel damage: the shader's AO
+                        // term is `0.45 + 0.55 * ao`, so reducing a fully-
+                        // open corner (ao=3) toward 0 visibly darkens the
+                        // voxel. Damage 1.0 halves AO (3 -> 1, ~0.63x
+                        // brightness); damage 0.0 is a no-op. Because
+                        // `Cell::eq` compares ao4, damaged and pristine
+                        // voxels won't greedy-merge -- the damage boundary
+                        // shows as a natural seam, not a smear.
+                        let dmg = slab.damage_at(p);
+                        if dmg > 0.0 {
+                            let factor = 1.0 - dmg * 0.5;
+                            for ao in &mut ao4 {
+                                *ao = (*ao as f32 * factor) as u8;
+                            }
                         }
                         // Compute water column depth: for water faces,
                         // count same-material voxels below (Y down) until
@@ -372,7 +390,7 @@ pub fn mesh_slab(
                         // depth-based darkening.
                         let mat = slab.get(p);
                         let mut depth: u8 = 0;
-                        if mat == water_voxel {
+                        if fluids.contains(&mat) {
                             // Start at 1: the face voxel itself is one
                             // layer of water. Then count additional
                             // water voxels below.
@@ -387,7 +405,7 @@ pub fn mesh_slab(
                             material: mat,
                             ao4,
                             water_depth: depth,
-                            skylight: skylight_above(slab, p),
+                            skylight: skylight_above(slab, p, fluids),
                             blocklight: light_at(&blocklight, padded, outer),
                         })
                     } else {
@@ -421,8 +439,20 @@ pub fn mesh_slab(
                         h += 1;
                     }
                     emit_quad(
-                        &mut mesh, cell, normal_id, axis, sign, slice, u_axis, v_axis, u0, v0, w, h,
-                        jitter_seed, water_voxel,
+                        &mut mesh,
+                        cell,
+                        normal_id,
+                        axis,
+                        sign,
+                        slice,
+                        u_axis,
+                        v_axis,
+                        u0,
+                        v0,
+                        w,
+                        h,
+                        jitter_seed,
+                        fluids,
                     );
                     for vv in v0..v0 + h {
                         for uu in u0..u0 + w {
@@ -556,7 +586,7 @@ fn emit_quad(
     w: i32,
     h: i32,
     jitter_seed: IVec3,
-    water_voxel: Voxel,
+    fluids: &[Voxel],
 ) {
     // Corner positions on the face plane, in (du, dv) order 00, 10, 01, 11.
     let plane = if sign > 0 { slice + 1 } else { slice };
@@ -576,7 +606,11 @@ fn emit_quad(
             pos,
             ao: cell.ao4[i] | (cell.skylight << 4),
             normal: normal_id | (cell.blocklight << 4),
-            jitter: if cell.material == water_voxel { cell.water_depth } else { jitter_hash(jitter_seed, pos) },
+            jitter: if fluids.contains(&cell.material) {
+                cell.water_depth
+            } else {
+                jitter_hash(jitter_seed, pos)
+            },
             material: cell.material.0,
         });
     }
@@ -643,7 +677,7 @@ mod tests {
     #[test]
     fn empty_slab_zero_quads() {
         let slab = slab_of(IVec3::splat(4), &[]);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[], &[], None);
         assert_eq!(mesh.quads(), 0);
         assert!(mesh.is_empty());
     }
@@ -651,7 +685,7 @@ mod tests {
     #[test]
     fn single_voxel_six_quads() {
         let slab = slab_of(IVec3::splat(3), &[(IVec3::splat(1), STONE)]);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[], &[], None);
         assert_eq!(mesh.quads(), 6);
         assert_eq!(mesh.indices.len(), 36);
     }
@@ -677,19 +711,25 @@ mod tests {
                 (IVec3::new(1, 2, 1), STONE),
             ],
         );
-        let mesh_a = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0), &[], None);
-        let mesh_b = mesh_slab(&slab, IVec3::new(7, -3, 42), Voxel(0), &[], None);
+        let mesh_a = mesh_slab(&slab, IVec3::new(7, -3, 42), &[], &[], None);
+        let mesh_b = mesh_slab(&slab, IVec3::new(7, -3, 42), &[], &[], None);
         let jitter_a: Vec<u8> = mesh_a.vertices.iter().map(|v| v.jitter).collect();
         let jitter_b: Vec<u8> = mesh_b.vertices.iter().map(|v| v.jitter).collect();
-        assert_eq!(jitter_a, jitter_b, "same geometry + same seed must match exactly");
+        assert_eq!(
+            jitter_a, jitter_b,
+            "same geometry + same seed must match exactly"
+        );
 
         // A body (seed always zero) meshed twice must also match, and a
         // *different* seed (a different chunk's origin) must generally
         // produce a different pattern -- confirming the seed actually
         // participates, not just the local position.
-        let mesh_c = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
+        let mesh_c = mesh_slab(&slab, IVec3::ZERO, &[], &[], None);
         let jitter_c: Vec<u8> = mesh_c.vertices.iter().map(|v| v.jitter).collect();
-        assert_ne!(jitter_a, jitter_c, "different seeds should not collide onto the same pattern");
+        assert_ne!(
+            jitter_a, jitter_c,
+            "different seeds should not collide onto the same pattern"
+        );
     }
 
     #[test]
@@ -698,7 +738,7 @@ mod tests {
             IVec3::new(2, 1, 1),
             &[(IVec3::new(0, 0, 0), STONE), (IVec3::new(1, 0, 0), STONE)],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[], &[], None);
         assert_eq!(mesh.quads(), 6, "coplanar same-material faces must merge");
     }
 
@@ -708,7 +748,7 @@ mod tests {
             IVec3::new(2, 1, 1),
             &[(IVec3::new(0, 0, 0), STONE), (IVec3::new(1, 0, 0), DIRT)],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[], &[], None);
         // 2 end caps + 4 long sides split in two each = 2 + 8 = 10.
         assert_eq!(mesh.quads(), 10);
     }
@@ -725,7 +765,7 @@ mod tests {
             }
         }
         let slab = slab_of(dims, &solids);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[], &[], None);
         // Skylight splits each side face at the top row (the topmost voxel
         // sees air above in the padding, so skylight=1; the rest see solid
         // above, skylight=0). Top and bottom faces are uniform. So: 2 caps
@@ -754,7 +794,7 @@ mod tests {
                 }
             }
             let slab = slab_of(dims, &solids);
-            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
+            let mesh = mesh_slab(&slab, IVec3::ZERO, &[], &[], None);
 
             // Brute-force expected exposed faces.
             let mut expected: HashSet<(IVec3, u8)> = HashSet::new();
@@ -824,7 +864,7 @@ mod tests {
             }
         }
         let slab = slab_of(dims, &solids);
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[], &[], None);
         assert!(!mesh.is_empty());
 
         for tri in mesh.indices.chunks_exact(3) {
@@ -857,7 +897,7 @@ mod tests {
                 (IVec3::new(0, 1, 0), STONE), // wall on top of (0,0,0)
             ],
         );
-        let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(0), &[], None);
+        let mesh = mesh_slab(&slab, IVec3::ZERO, &[], &[], None);
 
         // Top faces (+Y, normal id 2) of the floor at y=1 (excluding the wall
         // voxel's own top at y=2).

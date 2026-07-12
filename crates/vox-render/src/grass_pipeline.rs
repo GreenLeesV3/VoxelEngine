@@ -6,9 +6,9 @@
 //! blade vertices (4 per blade, 3-5 blades per voxel). The vertex buffer
 //! is rewritten each frame — like the particle system, not the chunk mesher.
 
-use bytemuck::{Pod, Zeroable};
 
 use crate::gpu::{DEPTH_FORMAT, Gpu};
+use bytemuck::{Pod, Zeroable};
 
 /// Max grass blades. 100k blades = 400k vertices = ~5MB. Plenty for
 /// nearby terrain; blades beyond ~60m aren't generated.
@@ -218,11 +218,14 @@ impl GrassPipeline {
         if vertices.is_empty() {
             return;
         }
-        let byte_len = (vertices.len() * std::mem::size_of::<GrassVertex>()).min(
-            MAX_GRASS_BLADES * 6 * std::mem::size_of::<GrassVertex>(),
-        );
+        let byte_len = (vertices.len() * std::mem::size_of::<GrassVertex>())
+            .min(MAX_GRASS_BLADES * 6 * std::mem::size_of::<GrassVertex>());
         let count = (byte_len / std::mem::size_of::<GrassVertex>()) as u32;
-        queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&vertices[..count as usize]));
+        queue.write_buffer(
+            &self.vertex_buf,
+            0,
+            bytemuck::cast_slice(&vertices[..count as usize]),
+        );
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);

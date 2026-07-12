@@ -6,7 +6,6 @@ use crate::RenderError;
 /// Depth buffer format used by the main render pass.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-
 /// Owns the wgpu device, queue, window surface, and depth buffer.
 pub struct Gpu {
     surface: wgpu::Surface<'static>,
@@ -55,7 +54,6 @@ impl Gpu {
             driver = %adapter_info.driver,
             "selected GPU adapter"
         );
-
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -178,7 +176,6 @@ impl Gpu {
     pub fn surface_size(&self) -> (u32, u32) {
         (self.config.width, self.config.height)
     }
-
 }
 
 /// One acquired swapchain frame: render into [`Frame::view`], then call
@@ -219,7 +216,6 @@ fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
     });
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
-
 
 /// Select the wgpu backend from the `WGPU_BACKEND` environment variable,
 /// falling back to `Backends::PRIMARY` (Vulkan + DX12 + Metal) so the

@@ -1,0 +1,14 @@
+{
+  "planPath": "docs/plans/2026-07-11-progressive-damage.md",
+  "tasks": [
+    {"id": 0, "subject": "Task 1: Add damage field to VoxelGrid", "status": "pending"},
+    {"id": 1, "subject": "Task 2: Sync damage through split_components", "status": "pending", "blockedBy": [0]},
+    {"id": 2, "subject": "Task 3: Add damage_dirty flag to Body and decay in solver", "status": "pending", "blockedBy": [0]},
+    {"id": 3, "subject": "Task 4: Add damage constants and sub-threshold damage logic", "status": "pending", "blockedBy": [1, 2]},
+    {"id": 4, "subject": "Task 5: Visual feedback — damage darkening in body mesh", "status": "pending", "blockedBy": [0]},
+    {"id": 5, "subject": "Task 6: Re-mesh on damage change", "status": "pending", "blockedBy": [3, 4]},
+    {"id": 6, "subject": "Task 7: Tests for damage system", "status": "pending", "blockedBy": [1, 2]},
+    {"id": 7, "subject": "Task 8: Full verification", "status": "pending", "blockedBy": [3, 5, 6]}
+  ],
+  "lastUpdated": "2026-07-11T00:00:00Z"
+}

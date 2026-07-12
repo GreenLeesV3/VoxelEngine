@@ -48,15 +48,14 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use glam::{IVec3, Vec3};
+use glam::{IVec3, Vec3, Vec3Swizzles};
 use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
-use vox_core::{FxHashMap, MaterialRegistry, voxel_at, voxel_center_m};
+use vox_core::{FxHashSet, MaterialRegistry, voxel_at, voxel_center_m};
 use vox_world::{AIR, SolidLookup, Voxel, World};
 
 use crate::BodyId;
 use crate::body::{Body, VoxelGrid, mass_props};
 use crate::solver::PhysicsWorld;
-use crate::grid::DIRS;
 
 /// Extra voxels searched beyond the carved region on every side when
 /// computing [`CarveResult::region`] — used only to size the `wake_region`
@@ -166,11 +165,6 @@ pub(crate) struct ExplosionShape {
 }
 
 impl ExplosionShape {
-    /// Build a jagged explosion shape. `direction`, when `Some`, biases the
-    /// spike starburst toward that direction: forward-cone spikes are given
-    /// longer reach (up to the full `EXPLOSION_SPIKE_LENGTH_RANGE`), while
-    /// backward-facing spikes are shortened. `None` produces the original
-    /// uniform starburst — identical to the pre-directional blast.
     pub(crate) fn new(center: Vec3, radius_m: f32, seed: u32, direction: Option<Vec3>) -> Self {
         let golden_angle = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
         let n = EXPLOSION_SPIKE_COUNT;
@@ -355,6 +349,16 @@ pub fn carve_capsule(world: &mut World, start_m: Vec3, end_m: Vec3, radius_m: f3
     }
 }
 
+/// The six face-adjacent directions.
+const DIRS: [IVec3; 6] = [
+    IVec3::X,
+    IVec3::NEG_X,
+    IVec3::Y,
+    IVec3::NEG_Y,
+    IVec3::Z,
+    IVec3::NEG_Z,
+];
+
 /// Early-bailout cap for [`flood_from`]'s "is this obviously anchored"
 /// check — deliberately much larger than [`MAX_BODY_VOXELS`]. The two caps
 /// answer different questions and must not share a value: this one only
@@ -401,46 +405,11 @@ enum FloodResult {
 /// a `Bounded` result still explores every reachable voxel regardless of
 /// order (there's nowhere left to go before the queue/heap empties either
 /// way) — only how fast an `Anchored` result is reached changes.
-/// Chunk-local bitset for flood-fill visited tracking (#77).
-/// Replaces FxHashSet<IVec3> with per-chunk 32³ bit arrays — O(1) bit
-/// test/set with far better cache locality than hash insert/probe.
-struct ChunkBitSet {
-    chunks: FxHashMap<IVec3, Box<[u8; 4096]>>,
-}
-
-impl ChunkBitSet {
-    fn new() -> Self {
-        Self { chunks: FxHashMap::default() }
-    }
-    #[inline]
-    fn pos_to_key(v: IVec3) -> (IVec3, usize) {
-        let chunk = IVec3::new(v.x.div_euclid(32), v.y.div_euclid(32), v.z.div_euclid(32));
-        let local = IVec3::new(v.x.rem_euclid(32), v.y.rem_euclid(32), v.z.rem_euclid(32));
-        let bit = (local.y as usize * 32 + local.z as usize) * 32 + local.x as usize;
-        (chunk, bit)
-    }
-    #[inline]
-    fn contains(&self, v: IVec3) -> bool {
-        let (chunk, bit) = Self::pos_to_key(v);
-        match self.chunks.get(&chunk) {
-            Some(bits) => (bits[bit >> 3] & (1 << (bit & 7))) != 0,
-            None => false,
-        }
-    }
-    #[inline]
-    fn insert(&mut self, v: IVec3) -> bool {
-        let (chunk, bit) = Self::pos_to_key(v);
-        let bits = self.chunks.entry(chunk).or_insert_with(|| Box::new([0u8; 4096]));
-        let mask = 1u8 << (bit & 7);
-        if (bits[bit >> 3] & mask) != 0 { false } else { bits[bit >> 3] |= mask; true }
-    }
-}
-
 fn flood_from(
     world: &World,
     lookup: &mut SolidLookup<'_>,
     start: IVec3,
-    visited: &mut ChunkBitSet,
+    visited: &mut FxHashSet<IVec3>,
 ) -> FloodResult {
     let floor_y = world.bounds_voxels().0.y;
     // Keyed by (distance-to-floor, x, y, z) -- IVec3 isn't Ord, so the voxel
@@ -459,7 +428,7 @@ fn flood_from(
         component.push(v);
         for d in DIRS {
             let n = v + d;
-            if lookup.solid(n) && visited.insert(n) {
+            if lookup.present(n) && visited.insert(n) {
                 heap.push(Reverse(key(n)));
             }
         }
@@ -486,7 +455,7 @@ pub fn detach_unsupported(
     registry: &MaterialRegistry,
     removed: &[IVec3],
 ) -> Vec<BodyId> {
-    let mut visited = ChunkBitSet::new();
+    let mut visited: FxHashSet<IVec3> = FxHashSet::default();
     let mut components: Vec<Vec<IVec3>> = Vec::new();
     // Shared across every seed in this call, not rebuilt per flood: most
     // seeds from the same edit land in the same handful of chunks, so the
@@ -495,10 +464,11 @@ pub fn detach_unsupported(
     for &r in removed {
         for d in DIRS {
             let seed = r + d;
-            if visited.contains(seed) || !lookup.solid(seed) {
+            if visited.contains(&seed) || !lookup.present(seed) {
                 continue;
             }
-            if let FloodResult::Bounded(component) = flood_from(world, &mut lookup, seed, &mut visited)
+            if let FloodResult::Bounded(component) =
+                flood_from(world, &mut lookup, seed, &mut visited)
             {
                 components.push(component);
             }
@@ -565,9 +535,8 @@ pub(crate) fn small_hash(a: u32, b: u32) -> u32 {
 /// ([`vox_core::Tunables::blast_power`], typically). Public so callers can
 /// apply the same "explosion" feel to bodies carved directly (e.g. the Bomb
 /// tool hitting an existing debris body, not just the static world).
-/// `direction`, when `Some`, cone-weights the impulse: full power forward,
-/// reduced lateral, minimal backward (a shaped charge). `None` is the
-/// original uniform radial impulse.
+/// `direction`, when `Some`, cone-weights the impulse so forward debris
+/// gets full power and backward debris gets ~15% — a shaped-charge effect.
 pub fn apply_blast_impulse(
     phys: &mut PhysicsWorld,
     ids: &[BodyId],
@@ -595,6 +564,19 @@ pub fn apply_blast_impulse(
             speed *= 0.15 + cone * 0.85;
         }
 
+        // Clamp the upward velocity component. Without this, debris whose
+        // COM is above the blast center (common for ground-level blasts
+        // whose downward ExplosionShape spikes carve vertical channels into
+        // terrain) gets launched straight up at unrealistic speeds, producing
+        // "tall pillars rising from the ground." Horizontal outburst is the
+        // dominant visual of a real explosion; the vertical component is
+        // secondary. Cap it at 40% of the horizontal speed.
+        let mut vel = dir * speed;
+        let h_speed = vel.xz().length();
+        if vel.y > h_speed * 0.4 {
+            vel.y = h_speed * 0.4;
+        }
+
         let h = small_hash(seed, i as u32);
         let spin = Vec3::new(
             ((h & 0xFF) as f32 / 255.0 - 0.5) * 2.0,
@@ -603,8 +585,8 @@ pub fn apply_blast_impulse(
         ) * BLAST_SPIN_MAX;
 
         // `apply_impulse` scales its first argument by inverse mass, so
-        // passing `dir * speed * mass` yields exactly `dir * speed` velocity.
-        phys.apply_impulse(id, dir * speed * mass, spin);
+        // passing `vel * mass` yields exactly `vel` velocity.
+        phys.apply_impulse(id, vel * mass, spin);
     }
 }
 
@@ -681,30 +663,46 @@ fn spawn_debris_chips(
     for &(h, i) in ranked.iter().take(target) {
         let (v, mat) = removed[i];
         let chip_center_m = voxel_center_m(v, voxel_size_m);
-        // A small L-shaped triomino (2x2x1 minus one corner), not a single
-        // voxel or a straight bar: a literal single-voxel body is a physics
-        // degenerate case (its only surface sample point sits exactly at
-        // its own center of mass, so contact friction can never generate
-        // torque there); a straight two-voxel bar fixes that for rotation
-        // *across* its length but is still degenerate for spin *around*
-        // its own long axis (every contact point still lies exactly on
-        // that axis, zero arm, so that one rotation component never damps
-        // either -- confirmed by a chip holding an *exactly constant*
-        // angular velocity across a 30-second settle window). An L-shape
-        // has no straight line through all its voxel centers, so no axis
-        // of rotation is ever torque-free.
-        let mut voxels = vec![mat; 4];
-        voxels[(h as usize) % 4] = AIR;
-        let grid = VoxelGrid::new(IVec3::new(2, 2, 1), voxels);
+        // Chip shape: pick from 3 templates by hash for visual variety.
+        // All avoid the single-voxel and straight-bar degenerate cases
+        // (no torque-free axis of rotation — see the L-shape comment below).
+        // Template 0 (33%): 3-voxel L-triomino (2x2x1 minus one corner).
+        // Template 1 (33%): 5-voxel plus-sign (3x3x1 cross).
+        // Template 2 (33%): 7-voxel block (2x2x2 minus one corner).
+        // Larger chips (5, 7 voxels) are above CLUTTER_MAX_VOXELS (4) so
+        // they persist — smaller center rubble clears in 35-60s, larger
+        // edge chunks stay as permanent debris.
+        let template = h % 3;
+        let (dims, voxels) = if template == 0 {
+            // 3-voxel L-triomino: 2x2x1 minus one corner.
+            let mut vs = vec![mat; 4];
+            vs[(h as usize) % 4] = AIR;
+            (IVec3::new(2, 2, 1), vs)
+        } else if template == 1 {
+            // 5-voxel plus-sign: 3x3x1 cross, 4 arms + center.
+            let mut vs = vec![AIR; 9];
+            vs[1] = mat; // top
+            vs[3] = mat; // left
+            vs[4] = mat; // center
+            vs[5] = mat; // right
+            vs[7] = mat; // bottom
+            (IVec3::new(3, 3, 1), vs)
+        } else {
+            // 7-voxel block: 2x2x2 minus one corner.
+            let mut vs = vec![mat; 8];
+            vs[(h as usize) % 8] = AIR;
+            (IVec3::new(2, 2, 2), vs)
+        };
+        let grid = VoxelGrid::new(dims, voxels);
         let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, chip_center_m) else {
-            continue; // Shouldn't happen for a solid grid, but no reason to crash if it does.
+            continue;
         };
 
         let offset = chip_center_m - center_m;
         let dist = offset.length();
         let dir = if dist > 1e-6 { offset / dist } else { Vec3::Y };
-        let speed =
-            (power * DEBRIS_CHIP_SPEED_SCALE / dist.max(BLAST_MIN_DIST_M)).min(DEBRIS_CHIP_MAX_SPEED_M_S);
+        let speed = (power * DEBRIS_CHIP_SPEED_SCALE / dist.max(BLAST_MIN_DIST_M))
+            .min(DEBRIS_CHIP_MAX_SPEED_M_S);
         body.vel = dir * speed;
 
         let h2 = small_hash(h, i as u32);
@@ -728,10 +726,7 @@ fn spawn_debris_chips(
 /// strength (pass [`vox_core::Tunables::blast_power`] for the live-tunable
 /// default); `seed` drives the crater's shape, the debris chip sample and
 /// their spin, and the detached-fragment impulse, so the whole blast is
-/// reproducible from one seed. `direction`, when `Some`, biases both the
-/// crater shape and the debris impulse toward that direction — a shaped
-/// charge that cuts a focused cone through walls; `None` is the original
-/// uniform blast.
+/// reproducible from one seed.
 pub fn blast(
     world: &mut World,
     phys: &mut PhysicsWorld,
@@ -749,7 +744,13 @@ pub fn blast(
 
     let s = world.cfg.voxel_size_m;
     ids.extend(spawn_debris_chips(
-        phys, registry, &carve.removed, s, center_m, power, seed,
+        phys,
+        registry,
+        &carve.removed,
+        s,
+        center_m,
+        power,
+        seed,
     ));
 
     phys.wake_region(carve.region.0.as_vec3() * s, carve.region.1.as_vec3() * s);
@@ -917,7 +918,11 @@ mod tests {
         assert_eq!(ids.len(), 1, "the 100,000-voxel block must detach");
         let body = phys.get(ids[0]).expect("alive");
         assert_eq!(body.grid.solid_count(), 100_000);
-        assert_eq!(world.get_voxel(IVec3::new(5, 5, 5)), STONE, "floor untouched");
+        assert_eq!(
+            world.get_voxel(IVec3::new(5, 5, 5)),
+            STONE,
+            "floor untouched"
+        );
     }
 
     #[test]
@@ -946,7 +951,11 @@ mod tests {
 
         assert_eq!(ids.len(), 1, "the severed trunk top must detach");
         let body = phys.get(ids[0]).expect("alive");
-        assert_eq!(body.grid.solid_count(), 33 - 13, "must capture the full top");
+        assert_eq!(
+            body.grid.solid_count(),
+            33 - 13,
+            "must capture the full top"
+        );
         // The huge terrain slab must be completely untouched.
         assert_eq!(world.get_voxel(IVec3::new(10, 1, 10)), STONE);
         assert_eq!(world.get_voxel(IVec3::new(90, 1, 90)), STONE);
@@ -1005,8 +1014,16 @@ mod tests {
 
         assert!(carve.removed.len() > 20, "must carve a real tunnel");
         // The tunnel must reach clean through both faces of the wall.
-        assert_eq!(world.get_voxel(IVec3::new(31, 12, 40)), AIR, "near face open");
-        assert_eq!(world.get_voxel(IVec3::new(66, 12, 40)), AIR, "far face open");
+        assert_eq!(
+            world.get_voxel(IVec3::new(31, 12, 40)),
+            AIR,
+            "near face open"
+        );
+        assert_eq!(
+            world.get_voxel(IVec3::new(66, 12, 40)),
+            AIR,
+            "far face open"
+        );
         // Material well above and below the tunnel survives.
         assert_eq!(world.get_voxel(IVec3::new(31, 35, 40)), STONE);
         assert_eq!(world.get_voxel(IVec3::new(31, 4, 40)), STONE);
@@ -1170,7 +1187,10 @@ mod tests {
             .removed
             .iter()
             .any(|&(v, _)| (voxel_center_m(v, 1.0) - center).length() > radius + 0.5);
-        assert!(reaches_past_radius, "spikes must extend past the base crater");
+        assert!(
+            reaches_past_radius,
+            "spikes must extend past the base crater"
+        );
     }
 
     /// Same center, radius, and seed must carve an identical shape every
@@ -1298,7 +1318,16 @@ mod tests {
         let reg = registry();
         let mut phys = PhysicsWorld::new();
 
-        let carve = blast(&mut world, &mut phys, &reg, Vec3::new(10.0, 10.0, 10.0), 3.0, 40.0, 5, None);
+        let carve = blast(
+            &mut world,
+            &mut phys,
+            &reg,
+            Vec3::new(10.0, 10.0, 10.0),
+            3.0,
+            40.0,
+            5,
+            None,
+        );
 
         assert!(!carve.removed.is_empty(), "must carve something");
         assert!(
@@ -1307,7 +1336,11 @@ mod tests {
              chips, not just vanish into air"
         );
         for (_, body) in phys.iter() {
-            assert_eq!(body.grid.solid_count(), 3, "each chip is a small L-shaped triomino");
+            let sc = body.grid.solid_count();
+            assert!(
+                sc == 3 || sc == 5 || sc == 7,
+                "each chip is a small debris fragment (3/5/7 voxels), got {sc}"
+            );
             assert!(!body.sleep.asleep);
         }
     }

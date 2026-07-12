@@ -138,7 +138,7 @@ fn shadow_visibility(world_pos: vec3f) -> f32 {
         return 1.0;
     }
     let ndc = clip.xyz / clip.w;
-    // NDC outside [-1,1]: beyond the orthographic box -- lit.
+    // glam's `orthographic_rh` uses wgpu's 0..1 depth range.
     if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z > 1.0 || ndc.z < 0.0) {
         return 1.0;
     }
@@ -228,6 +228,14 @@ fn g_smith(nov: f32, nol: f32, a: f32) -> f32 {
 // has depth_write_enabled=true, the water pipeline has it false so terrain
 // behind water is not depth-culled.
 override water_pass: u32 = 0u;
+// Specialization constant: the material id for muddy_water, or 0 if absent.
+// 0 = air, which is_fluid will never match, so muddy_water rendering is
+// disabled cleanly when the material doesn't exist.
+override muddy_water_id: u32 = 0u;
+
+fn is_fluid(id: u32) -> bool {
+    return id == 9u || (muddy_water_id != 0u && id == muddy_water_id);
+}
 
 struct FOut {
     @location(0) color: vec4f,
@@ -238,8 +246,8 @@ struct FOut {
 @fragment
 fn fs(in: VOut) -> FOut {
     // Pass selection: each pipeline variant only draws its own materials.
-    if (water_pass == 0u && in.mat_id == 9u) { discard; }
-    if (water_pass == 1u && in.mat_id != 9u) { discard; }
+    if (water_pass == 0u && is_fluid(in.mat_id)) { discard; }
+    if (water_pass == 1u && !is_fluid(in.mat_id)) { discard; }
 
     // Emissive materials (fire, ember, lava): render at full brightness,
     // skipping sun/shadow/ambient/AO so they glow regardless of time of day
@@ -301,8 +309,13 @@ fn fs(in: VOut) -> FOut {
     // Shadow mapping (#14): sample the directional shadow map and attenuate
     // direct sunlight by ~50% on occluded fragments. At night (sun_strength
     // ~0) the sun term is already zero, so skip the texture fetch entirely.
-    if (cam.sun_dir.w > 0.0 && in.mat_id != 9u) {
+    // Water (mat 9) is excluded from receiving shadows -- a transparent
+    // surface darkening under shadow reads wrong.
+    if (cam.sun_dir.w > 0.0 && !is_fluid(in.mat_id)) {
         vis = shadow_visibility(in.world_pos);
+        // vis=1 fully lit (sun unchanged); vis=0 fully shadowed (sun halved).
+        // Ambient and fill light are untouched, so shadowed terrain dims
+        // toward ambient rather than going black.
         sun = sun * mix(0.5, 1.0, vis);
     }
 
@@ -365,7 +378,7 @@ fn fs(in: VOut) -> FOut {
     // driven by cam.ambient_sky.w. Intensity 0 => no cracks (clean multiply
     // by 0). Water (mat 9) is skipped — cracks belong on solid terrain.
     // Applied to lit color before fog so distant cracked voxels still fog.
-    if (cam.ambient_sky.w > 0.0 && in.mat_id != 9u) {
+    if (cam.ambient_sky.w > 0.0 && !is_fluid(in.mat_id)) {
         let k = crack_factor(in.world_pos / cam.fog.z) * cam.ambient_sky.w;
         c = mix(c, vec3f(0.05, 0.04, 0.03), clamp(k, 0.0, 1.0) * 0.55);
     }
@@ -375,7 +388,7 @@ fn fs(in: VOut) -> FOut {
     c = mix(c, cam.sky_color.xyz, f * f);
     // Water (material ID 9): semi-transparent with a subtle refraction ripple
     // that perturbs the fog mix slightly via a sin wave on world XZ + time.
-    let alpha = select(1.0, 0.85, in.mat_id == 9u);
+    let alpha = select(1.0, select(0.85, 0.80, in.mat_id == muddy_water_id), is_fluid(in.mat_id));
     if (in.mat_id == 9u) {
         let t = cam.sun_color.w;
         let ripple = sin(in.world_pos.x * 3.0 + t * 2.0) * 0.5 + sin(in.world_pos.z * 2.3 + t * 1.7) * 0.5;

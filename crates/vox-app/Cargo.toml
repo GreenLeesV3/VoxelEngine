@@ -5,6 +5,15 @@ version.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["mario"]
+mario = [
+    "dep:cpal",
+    "dep:vox-sm64",
+    "vox-render/mario",
+    "vox-sm64/native",
+]
+
 [dependencies]
 vox-core = { workspace = true }
 vox-world = { workspace = true }
@@ -13,7 +22,7 @@ vox-mesh = { workspace = true }
 vox-physics = { workspace = true }
 vox-render = { workspace = true }
 vox-platform = { workspace = true }
-vox-sm64 = { workspace = true }
+vox-sm64 = { workspace = true, optional = true }
 vox-debug = { workspace = true }
 vox-sim = { workspace = true }
 glam = { workspace = true }
@@ -23,4 +32,4 @@ pollster = { workspace = true }
 rayon = { workspace = true }
 winit = { workspace = true }
 wgpu = { workspace = true }
-cpal = "0.15"
+cpal = { version = "0.15", optional = true }

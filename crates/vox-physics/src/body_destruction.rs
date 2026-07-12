@@ -12,8 +12,8 @@
 
 
 use glam::{IVec3, Quat, Vec3};
-use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
 use vox_core::MaterialRegistry;
+use vox_core::consts::{DEBRIS_MIN_VOXELS, MAX_BODY_VOXELS};
 use vox_world::{AIR, Voxel};
 
 use vox_core::voxel_center_m;
@@ -140,8 +140,12 @@ pub fn carve_body_capsule(
     let seg = end_local_m - start_local_m;
     let seg_len_sq = seg.length_squared();
     let pad = Vec3::splat(radius_m);
-    let min = ((start_local_m.min(end_local_m) - pad) / s).floor().as_ivec3();
-    let max = ((start_local_m.max(end_local_m) + pad) / s).ceil().as_ivec3();
+    let min = ((start_local_m.min(end_local_m) - pad) / s)
+        .floor()
+        .as_ivec3();
+    let max = ((start_local_m.max(end_local_m) + pad) / s)
+        .ceil()
+        .as_ivec3();
     edit_grid_box(grid, min, max, |p, cur| {
         if cur == AIR {
             return None;
@@ -209,13 +213,18 @@ pub fn split_components(grid: &VoxelGrid) -> Vec<(VoxelGrid, IVec3)> {
                     max = max.max(v);
                 }
                 let dims = max - min + IVec3::ONE;
-                let mut voxels = vec![AIR; (dims.x * dims.y * dims.z) as usize];
+                let total = (dims.x * dims.y * dims.z) as usize;
+                let mut voxels = vec![AIR; total];
+                let mut damage = vec![0.0; total];
                 for &v in &comp {
                     let mat = grid.get(v);
+                    let dmg = grid.damage_at(v);
                     let l = v - min;
-                    voxels[grid_index(dims, l)] = mat;
+                    let idx = grid_index(dims, l);
+                    voxels[idx] = mat;
+                    damage[idx] = dmg;
                 }
-                out.push((VoxelGrid::new(dims, voxels), min));
+                out.push((VoxelGrid::new_with_damage(dims, voxels, damage), min));
             }
         }
     }
@@ -265,7 +274,8 @@ fn finish_carve(
             continue;
         }
         let sub_com_world = parent.pos
-            + parent.rot * (sub_min.as_vec3() * voxel_size_m + parent.grid_offset + props.com_local);
+            + parent.rot
+                * (sub_min.as_vec3() * voxel_size_m + parent.grid_offset + props.com_local);
         if let Some(mut body) = Body::from_grid(sub_grid, registry, voxel_size_m, sub_com_world) {
             body.rot = parent.rot;
             body.prev_rot = parent.rot;
@@ -277,6 +287,59 @@ fn finish_carve(
     }
     ids
 }
+/// Apply damage to a debris body's voxels. Sub-threshold impacts call this
+/// instead of carving. Adds damage to the specified voxels; any voxel reaching
+/// 1.0 crumbles (becomes AIR). If any voxels crumble, the body is despawned
+/// and [`finish_carve`] splits + respawns fragments. If none crumble, the body
+/// is mutated in-place with `damage_dirty` set.
+///
+/// Returns `Some(Vec<BodyId>)` if the body was despawned (crumble case --
+/// caller should `replace_body` with the returned IDs), or `None` if the body
+/// was mutated in-place (no crumble -- body still exists at the same ID).
+pub fn apply_body_damage(
+    phys: &mut PhysicsWorld,
+    registry: &MaterialRegistry,
+    id: BodyId,
+    damage_voxels: &[(IVec3, f32)],
+    voxel_size_m: f32,
+) -> Option<Vec<BodyId>> {
+    // Clone the grid to apply damage, because we need to read the parent
+    // state before a possible despawn -- can't borrow the body mutably while
+    // also reading it for position/rotation.
+    let body = phys.get(id)?;
+    let mut grid = body.grid.clone();
+    let parent = ParentState {
+        pos: body.pos,
+        rot: body.rot,
+        vel: body.vel,
+        omega: body.omega,
+        grid_offset: body.grid_offset,
+    };
+
+    let mut crumbled = false;
+    for &(voxel_pos, amount) in damage_voxels {
+        if grid.add_damage(voxel_pos, amount) {
+            if grid.damage_at(voxel_pos) >= 1.0 && grid.solid(voxel_pos) {
+                grid.set(voxel_pos, AIR);
+                crumbled = true;
+            }
+        }
+    }
+
+    if crumbled {
+        // Despawn + split + respawn, same as the fracture path.
+        phys.despawn(id);
+        Some(finish_carve(phys, registry, grid, voxel_size_m, parent))
+    } else {
+        // No crumble -- mutate the body's grid in-place.
+        if let Some(body) = phys.get_mut(id) {
+            body.grid = grid;
+            body.damage_dirty = true;
+        }
+        None
+    }
+}
+
 
 /// Remove exactly one voxel (grid-local coordinates) from an existing
 /// body's own grid, splitting it into however many disconnected fragments
@@ -420,16 +483,35 @@ fn spawn_impact_chips(
     for &(h, i) in ranked.iter().take(target) {
         let (v, mat) = removed[i];
         let chip_center_world = parent.local_to_world_m(voxel_center_m(v, voxel_size_m));
-
-        let mut voxels = vec![mat; 4];
-        voxels[(h as usize) % 4] = AIR;
-        let grid = VoxelGrid::new(IVec3::new(2, 2, 1), voxels);
+        // Chip shape: pick from 3 templates by hash (same variety as
+        // spawn_debris_chips in destruction.rs).
+        let template = h % 3;
+        let (dims, voxels) = if template == 0 {
+            let mut vs = vec![mat; 4];
+            vs[(h as usize) % 4] = AIR;
+            (IVec3::new(2, 2, 1), vs)
+        } else if template == 1 {
+            let mut vs = vec![AIR; 9];
+            vs[1] = mat; vs[3] = mat; vs[4] = mat; vs[5] = mat; vs[7] = mat;
+            (IVec3::new(3, 3, 1), vs)
+        } else {
+            let mut vs = vec![mat; 8];
+            vs[(h as usize) % 8] = AIR;
+            (IVec3::new(2, 2, 2), vs)
+        };
+        let grid = VoxelGrid::new(dims, voxels);
         let Some(mut body) = Body::from_grid(grid, registry, voxel_size_m, chip_center_world)
         else {
-            continue; // Shouldn't happen for a solid grid, but no reason to crash if it does.
+            continue;
         };
 
-        body.vel = parent.vel + dir * speed;
+        // Radial scatter: blend the impact direction with a per-chip
+        // outward radial direction from the impact center. This makes
+        // debris fly outward from the hit point, not all in one stream.
+        let radial_dir = (chip_center_world - parent.pos).normalize_or(dir);
+        let blend = 0.4 + (small_hash(h, 42) as f32 / u32::MAX as f32) * 0.4; // 0.4..0.8
+        let chip_dir = (dir * (1.0 - blend) + radial_dir * blend).normalize_or(dir);
+        body.vel = parent.vel + chip_dir * speed;
         let h2 = small_hash(h, i as u32);
         body.omega = parent.omega
             + Vec3::new(
@@ -636,9 +718,16 @@ mod tests {
         let spawned = carve_body_sphere_at(&mut phys, &reg, id, corner_world, 0.6);
 
         assert!(phys.get(id).is_none());
-        assert_eq!(spawned.len(), 1, "chipping a corner must not split the cube");
+        assert_eq!(
+            spawned.len(),
+            1,
+            "chipping a corner must not split the cube"
+        );
         let f = phys.get(spawned[0]).unwrap();
-        assert!(f.grid.solid_count() < 6 * 6 * 6, "must have lost some voxels");
+        assert!(
+            f.grid.solid_count() < 6 * 6 * 6,
+            "must have lost some voxels"
+        );
     }
 
     #[test]
@@ -687,11 +776,31 @@ mod tests {
         let spawned = carve_body_capsule_at(&mut phys, &reg, id, start, end, 0.15);
 
         assert!(phys.get(id).is_none(), "the original body must be gone");
-        assert_eq!(spawned.len(), 1, "hollowing the core must not split the tube");
+        assert_eq!(
+            spawned.len(),
+            1,
+            "hollowing the core must not split the tube"
+        );
         let remaining = phys.get(spawned[0]).unwrap().grid.solid_count();
         assert!(
             remaining < original_count,
             "must have removed the center column: {remaining} vs {original_count}"
         );
+    }
+
+    #[test]
+    fn split_components_carries_damage() {
+        // Build a 4x1x1 grid, damage the left half, disconnect by removing middle.
+        let mut grid = VoxelGrid::new(IVec3::new(4, 1, 1), vec![STONE; 4]);
+        grid.add_damage(IVec3::new(0, 0, 0), 0.7);
+        grid.set(IVec3::new(2, 0, 0), AIR); // disconnect left from right
+        let components = split_components(&grid);
+        assert_eq!(components.len(), 2, "must split into 2 components");
+        // Left component (voxel 0) should carry damage 0.7.
+        let left = components.iter().find(|(_, min)| min.x == 0).unwrap();
+        assert_eq!(left.0.damage_at(IVec3::ZERO), 0.7, "left fragment must carry damage");
+        // Right component (voxel 3) should have 0 damage.
+        let right = components.iter().find(|(_, min)| min.x == 3).unwrap();
+        assert_eq!(right.0.damage_at(IVec3::ZERO), 0.0, "right fragment must be pristine");
     }
 }

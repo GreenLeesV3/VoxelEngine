@@ -1165,3 +1165,83 @@ materials on steep gradients have reduced effective strength when struck. No new
 system — just a tunable making the existing impact→carve→detach loop more
 aggressive on slopes.
 Feasibility: **medium**.
+## Weapons & First-Person Combat (Round 3)
+
+### 58. First-Person Weapon Viewmodel — Static Mesh
+Add a first-person weapon viewmodel rendered in a separate pass with a tighter
+FOV (~55° vs world's 70°). New WeaponPipeline in vox-render mirroring MarioPipeline
+(camera uniform + texture + vertex/index buffers). New weapon.wgsl shader reusing
+cel-shading lighting from voxel.wgsl. WeaponVertex: [pos, normal, uv] (28 bytes).
+Render after water in the scene pass so it receives post-processing. Add gltf crate
+dep for GLB loading. ~500 LOC, ~2 days. Foundation for all weapon features.
+
+### 59. Skeletal Animation System for Weapon Viewmodels
+Build a skeletal animation pipeline: SkinnedVertex (adds joint_indices + joint_weights,
+56 bytes), bone hierarchy from GLTF skins, per-frame keyframe interpolation
+(Quat::slerp for rotation, Vec3::lerp for translation), GPU vertex-shader skinning
+(upload array<mat4x4<f32>, 256> uniform, 4-bone blend per vertex). Adapt Bevy's
+skinning.wgsl skin_model() function. ~2000-3000 LOC, ~5-7 days on top of #58.
+Unlocks animated reload/fire/aim/sprint.
+
+### 60. Weapon Animation State Machine
+Lightweight state machine: Idle → AimDownSight → Firing → Reloading → Inspect.
+Cross-fade blending between states (slerp/lerp per-joint by blend factor). Wire to
+input (RMB = ADS, LMB = fire, R = reload). Procedural recoil kick (pitch impulse),
+weapon sway (lagged mouse_delta), view bob (sinusoidal from movement velocity).
+~500-800 LOC on top of #59. glam provides all the math (Quat::slerp, Vec3::lerp).
+
+### 61. Weapon Asset Pipeline — Bring Your Own (COD local / CC0 public)
+Two-tier asset strategy mirroring the SM64 ROM approach:
+**Local/personal**: Download pre-extracted COD weapon packs from Open3DLab (Blender
+.blend with rigs + PBR textures), Steam Workshop GMod SWEPs (Source .mdl with full
+FPS viewmodel + animation sets), or GitHub (Lohkas/IW4-Modeldump — all MW2
+viewmodels + animations). Convert via Blender to GLB. Keep in .gitignore — never
+commit (Activision actively DMCA-takedowns public repos with COD assets).
+**Public repo**: Quaternius Ultimate Guns (CC0, stylized, voxel-friendly) + Mixamo
+rifle animations (free mocap, bake to engine format). Both are legal to redistribute.
+GLB is the runtime format (self-contained: mesh + skin + animations + textures).
+
+### 61a. CC0 Weapon Packs — Distributable in the Public Repo
+These packs are public domain (CC0) or permissive license — safe to commit, ship,
+and redistribute in the open-source repo. They're the legal baseline for weapons.
+
+- **Quaternius Ultimate Guns Pack** (CC0, free): 40 stylized low-poly gun models
+  in FBX/OBJ/Blend. Cartoon aesthetic that fits a voxel engine. No animations.
+  URL: https://quaternius.com/packs/ultimategun.html
+- **Quaternius Animated Guns Pack** (CC0, free): 6 animated guns (P90, revolver,
+  pistol, shotgun, sniper rifle) with basic mechanical animations (slide/bolt).
+  No first-person arm/viewmodel rigs. URL: https://quaternius.com/packs/animatedguns.html
+- **Kenney Blaster Kit** (CC0, free): Sci-fi/retro stylized weapons in
+  OBJ/GLTF. Clean, game-ready, voxel-aesthetic compatible. No animations.
+  URL: https://kenney.nl/assets/blaster-kit
+- **BoQsc/cc0-melee-weapons-pack-glb** (CC0, free): 21 melee weapons (knife,
+  crowbar, katana, machete, axe) pre-converted to GLB — directly consumable by
+  the gltf crate. URL: https://github.com/BoQsc/cc0-melee-weapons-pack-glb
+- **Sketchfab CC0/CC-BY models** (varies, free): Individual weapon models with
+  downloadable GLTF/FBX + PBR textures. Filter by CC0 license. Quality ranges
+  from low-poly to near-photoreal. URL: https://sketchfab.com (filter: CC0,
+  downloadable, weapon/rifle)
+- **Mixamo (Adobe)** (free, commercial-OK): Professional mocap animation clips
+  for rifle/shooter poses (idle, aim, reload, walk-with-weapon, sprint). Download
+  "Without Skin" FBX, retarget to your rig, bake to engine format. Do NOT commit
+  raw Mixamo FBX files — bake animation data into your own format first.
+  URL: https://www.mixamo.com
+
+All CC0 packs can be converted to GLB via Blender and committed directly to the
+repo. The engine loads GLB at runtime via the gltf crate (see #58/#59).
+
+### 62. Firearm Gameplay — Hitscan + Voxel Destruction
+Left-click fires: raycast from player eye along look direction (reuse existing
+Tools::raycast_scene). Hit point triggers voxel carve (small radius, like Scalable
+Dig) or debris body fracture (reuse impact fracture system). Ammo + fire rate
+cooldown on VoxApp. Muzzle flash particle (reuse ParticleSystem). Weapon switch
+via hotbar (slots 7-9). Recoil applied as camera pitch kick + viewmodel animation.
+Reuses 100% of existing destruction/physics infrastructure — no new simulation.
+
+### 63. Weapon Variety — Attachments & Materials
+Data-driven weapon definitions (TOML, like material defs): damage, fire rate, ammo
+capacity, recoil pattern, reload time, projectile type (hitscan vs projectile),
+carve radius. Attachment system: scope (changes FOV/zoom), suppressor (no muzzle
+flash, reduced recoil), extended mag. Voxel-material interaction: bullets penetrate
+weak materials (leaves, glass) but stop on stone. Pairs with #16 chain-reaction
+explosives for explosive ammo types.

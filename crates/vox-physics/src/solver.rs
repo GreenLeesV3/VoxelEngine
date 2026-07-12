@@ -5,13 +5,12 @@
 //! face) so stacks converge across frames; settled bodies sleep at ~zero
 //! cost until an impulse or a nearby world edit wakes them.
 
-
-use glam::{Quat, Vec3};
-use vox_core::{FxHashMap, FxHashSet, Tunables};
+use glam::{Mat3, Quat, Vec3};
 use vox_core::consts::{
     CLUTTER_LIFETIME_MAX_S, CLUTTER_LIFETIME_MIN_S, CLUTTER_MAX_VOXELS, CONTACT_SLOP, GRAVITY,
     SLEEP_FRAMES, SOLVER_ITERS, SUBSTEPS,
 };
+use vox_core::{FxHashMap, Tunables};
 use vox_world::{SolidLookup, Voxel, World};
 
 use crate::body::{Body, BodyId};
@@ -61,6 +60,26 @@ pub struct ImpactEvent {
     pub push_dir: Vec3,
 }
 
+/// A distance constraint between two bodies. Maintains a fixed rest length
+/// between two anchor points. Used for rope/chain segments.
+#[derive(Clone, Debug)]
+pub struct Joint {
+    /// Slot index of body A.
+    pub body_a: usize,
+    /// Slot index of body B.
+    pub body_b: usize,
+    /// Anchor on body A, relative to COM, body-local frame (meters).
+    pub anchor_a: Vec3,
+    /// Anchor on body B, relative to COM, body-local frame.
+    pub anchor_b: Vec3,
+    /// Rest length between anchors (meters).
+    pub rest_length: f32,
+    /// Accumulated Lagrange multiplier (warm start).
+    pub acc_lambda: f32,
+    /// Compliance (inverse stiffness). 0 = rigid.
+    pub compliance: f32,
+}
+
 /// Two distinct mutable borrows out of the slot array.
 fn two_mut(slots: &mut [Option<Body>], a: usize, b: usize) -> (&mut Body, &mut Body) {
     debug_assert_ne!(a, b);
@@ -106,9 +125,6 @@ const MAX_ANGULAR_SPEED_RAD_S: f32 = 20.0;
 /// purpose: a blast-kicked fragment (`BLAST_SPIN_MAX` = 3 rad/s) still has
 /// most of its tumble after a full second of flight.
 const ANGULAR_DAMPING_AIR: f32 = 0.3;
-/// Water density in kg/m³ for buoyancy calculations. Matches the water
-/// material's density in core.toml.
-const WATER_DENSITY: f32 = 1000.0;
 /// Per-second velocity/angular damping while submerged in water — higher
 /// than air drag to make water feel viscous.
 const WATER_DRAG: f32 = 3.0;
@@ -147,30 +163,33 @@ pub struct PhysicsWorld {
     broadphase: Broadphase,
     contact_flags: Vec<bool>,
     pos_corr: Vec<Vec3>,
-    contacts_scratch: Vec<Contact>,
-    staged_scratch: Vec<Contact>,
     pub tunables: Tunables,
     lifetime_rng: u64,
-    /// The voxel material id treated as water for buoyancy. `None` (default)
-    /// disables buoyancy — bodies fall through water. Set by the app at
-    /// construction from the registry's water material, same pattern as
-    /// `FluidSim::water`.
-    water_voxel: Option<Voxel>,
+    joints: Vec<Joint>,
+    /// Fluid materials with their densities for buoyancy. Each entry is
+    /// (material id, density kg/m³). Empty (default) disables buoyancy.
+    /// Set by the app at construction from the registry's fluid materials.
+    fluids: Vec<(Voxel, f32)>,
 }
 
 impl PhysicsWorld {
     pub fn new() -> Self {
         Self {
             lifetime_rng: 0x2545_F491_4F6C_DD1D,
-            water_voxel: None,
             ..Self::default()
         }
     }
 
-    /// Set the water material id for buoyancy. Called once by the app at
-    /// construction. `None` (the default) disables buoyancy.
+    /// Set a single water material id for buoyancy (backward compat).
+    /// Uses the standard water density (1000 kg/m³).
     pub fn set_water_voxel(&mut self, v: Voxel) {
-        self.water_voxel = Some(v);
+        self.fluids = vec![(v, 1000.0)];
+    }
+
+    /// Set the fluid materials with their densities for buoyancy.
+    /// Called once by the app at construction. Replaces any prior set.
+    pub fn set_fluid_voxels(&mut self, fluids: Vec<(Voxel, f32)>) {
+        self.fluids = fluids;
     }
 
     /// xorshift64* -- deterministic, dependency-free spawn jitter (same
@@ -238,17 +257,51 @@ impl PhysicsWorld {
     pub fn despawn(&mut self, id: BodyId) {
         let slot = id.slot as usize;
         if self.generations.get(slot) == Some(&id.generation) && self.slots[slot].is_some() {
+            self.remove_joints_for_slot(slot);
             self.slots[slot] = None;
             self.generations[slot] += 1;
             self.free.push(slot);
-            // Drop warm-start entries that referenced this slot —
-            // otherwise they'd match a future body that reuses the slot
-            // (generation bump makes the BodyId stale, but `warm` is
-            // keyed by raw slot index, not generation).
-            let slot_u32 = slot as u32;
-            self.warm
-                .retain(|k, _| k.0 != slot_u32 && k.1 != slot_u32);
         }
+    }
+
+    /// Add a distance joint between two bodies. Returns the joint index.
+    pub fn add_joint(
+        &mut self,
+        a: BodyId,
+        b: BodyId,
+        anchor_a: Vec3,
+        anchor_b: Vec3,
+        rest_length: f32,
+        compliance: f32,
+    ) -> usize {
+        let joint = Joint {
+            body_a: a.slot as usize,
+            body_b: b.slot as usize,
+            anchor_a,
+            anchor_b,
+            rest_length,
+            acc_lambda: 0.0,
+            compliance,
+        };
+        self.joints.push(joint);
+        self.joints.len() - 1
+    }
+
+    /// Check if two body slots are connected by a joint.
+    fn are_joined(&self, a: usize, b: usize) -> bool {
+        self.joints.iter().any(|j| {
+            (j.body_a == a && j.body_b == b) || (j.body_a == b && j.body_b == a)
+        })
+    }
+
+    /// Remove all joints referencing a given body slot (called on despawn).
+    fn remove_joints_for_slot(&mut self, slot: usize) {
+        self.joints.retain(|j| j.body_a != slot && j.body_b != slot);
+    }
+
+    /// Read access to joints (for debugging/rendering).
+    pub fn joints(&self) -> &[Joint] {
+        &self.joints
     }
 
     pub fn get(&self, id: BodyId) -> Option<&Body> {
@@ -307,18 +360,11 @@ impl PhysicsWorld {
                     slot: slot as u32,
                     generation: self.generations[slot],
                 });
+                self.remove_joints_for_slot(slot);
                 self.slots[slot] = None;
                 self.generations[slot] += 1;
                 self.free.push(slot);
             }
-        }
-        if !removed.is_empty() {
-            // Same warm-start cleanup as `despawn`, batched for all freed
-            // slots at once.
-            let freed: FxHashSet<u32> =
-                removed.iter().map(|id| id.slot).collect();
-            self.warm
-                .retain(|k, _| !freed.contains(&k.0) && !freed.contains(&k.1));
         }
         removed
     }
@@ -342,7 +388,7 @@ impl PhysicsWorld {
         }
         if let Some(body) = self.slots[slot].as_mut() {
             body.vel += impulse * body.inv_mass;
-            body.omega += body.inv_iw * angular;
+            body.omega += angular;
             body.sleep.asleep = false;
             body.sleep.quiet_steps = 0;
         }
@@ -366,10 +412,8 @@ impl PhysicsWorld {
         // every substep.
         let mut peaks: FxHashMap<usize, (f32, Vec3, Vec3)> = FxHashMap::default();
         let h = dt / SUBSTEPS as f32;
-        self.broadphase.build(&self.slots);
-        let mut lookup = SolidLookup::new(world);
         for _ in 0..SUBSTEPS {
-            self.substep(world, h, &mut peaks, &mut lookup);
+            self.substep(world, h, &mut peaks);
         }
         let impacts = peaks
             .into_iter()
@@ -383,6 +427,16 @@ impl PhysicsWorld {
                 push_dir,
             })
             .collect();
+
+        // Tick damage decay on awake bodies with damage. Once per full step
+        // (not per substep): 0.05/s means ~20s to heal, so substep granularity
+        // is pointless. Sleeping bodies freeze their damage until woken.
+        let decay = vox_core::consts::DAMAGE_DECAY_PER_S;
+        for body in self.slots.iter_mut().flatten() {
+            if !body.sleep.asleep && body.grid.has_damage() {
+                body.grid.tick_damage_decay(dt, decay);
+            }
+        }
 
         // Update per-body quiet counters.
         for body in self.slots.iter_mut().flatten() {
@@ -452,10 +506,20 @@ impl PhysicsWorld {
             }
             parent[x]
         }
-        for &(a, b) in self.broadphase.pairs() {
-            let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        fn union(parent: &mut [usize], a: usize, b: usize) {
+            let (ra, rb) = (find(parent, a), find(parent, b));
             if ra != rb {
                 parent[ra] = rb;
+            }
+        }
+        for &(a, b) in self.broadphase.candidate_pairs(&self.slots) {
+            union(&mut parent, a, b);
+        }
+        // Joint-connected bodies are in the same island so joined bodies
+        // sleep and wake together.
+        for j in &self.joints {
+            if self.slots[j.body_a].is_some() && self.slots[j.body_b].is_some() {
+                union(&mut parent, j.body_a, j.body_b);
             }
         }
         let mut groups: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
@@ -468,7 +532,7 @@ impl PhysicsWorld {
         groups.into_values().collect()
     }
 
-    fn substep(&mut self, world: &World, h: f32, peaks: &mut FxHashMap<usize, (f32, Vec3, Vec3)>, lookup: &mut SolidLookup<'_>) {
+    fn substep(&mut self, world: &World, h: f32, peaks: &mut FxHashMap<usize, (f32, Vec3, Vec3)>) {
         // Refresh every live body's cached world inverse inertia -- rotation
         // only changes at the end of a substep, so this is constant across
         // the whole contact solve below (see `Body::inv_iw`'s docs).
@@ -478,10 +542,8 @@ impl PhysicsWorld {
             body.inv_iw = body.inv_inertia_world();
         }
 
-        // Reuse the persistent SolidLookup (chunk cache carries over between
-        // substeps) and persistent contact buffers (.clear() preserves the
-        // allocation) instead of allocating fresh ones every substep.
-        self.contacts_scratch.clear();
+        let mut lookup = SolidLookup::new(world);
+        let mut contacts: Vec<Contact> = Vec::new();
         // Integrate velocities and collect contacts.
         for (slot, entry) in self.slots.iter_mut().enumerate() {
             let Some(body) = entry else { continue };
@@ -489,9 +551,9 @@ impl PhysicsWorld {
                 continue;
             }
             body.vel.y -= GRAVITY * h;
-            // Buoyancy: if the body's bottom is submerged in a non-solid,
-            // non-air voxel (water), apply an upward force. Lightweight:
-            // samples the AABB bottom center, not per-voxel.
+            // Buoyancy: if the body's bottom is submerged in a fluid voxel
+            // (water or any registered fluid), apply an upward force.
+            // Lightweight: samples the AABB bottom center, not per-voxel.
             let s = 2.0 * body.half_voxel;
             let bottom = Vec3::new(
                 (body.aabb_min.x + body.aabb_max.x) * 0.5,
@@ -500,25 +562,22 @@ impl PhysicsWorld {
             );
             let bottom_vox = vox_core::voxel_at(bottom, s);
             if world.in_bounds(bottom_vox) {
-                if let Some(wv) = self.water_voxel {
-                    if world.get_voxel(bottom_vox) == wv {
-                        let body_height = (body.aabb_max.y - body.aabb_min.y).max(1e-6);
-                        let submerge_depth = body_height.min(
-                            body.aabb_max.y - bottom.y + s
-                        );
-                        let fraction = (submerge_depth / body_height).clamp(0.0, 1.0);
-                        let dims = body.grid.dims;
-                        let volume = (dims.x * dims.y * dims.z) as f32 * s * s * s;
-                        let mass = body.mass();
-                        let avg_density = mass / volume.max(1e-6);
-                        let buoy_accel = (WATER_DENSITY / avg_density - 1.0) * GRAVITY * fraction;
-                        if buoy_accel > 0.0 {
-                            body.vel.y += buoy_accel * h;
-                        }
-                        let drag = WATER_DRAG * fraction;
-                        body.vel /= 1.0 + drag * h;
-                        body.omega /= 1.0 + drag * h;
+                let voxel = world.get_voxel(bottom_vox);
+                if let Some(&(_, fluid_density)) = self.fluids.iter().find(|(v, _)| *v == voxel) {
+                    let body_height = (body.aabb_max.y - body.aabb_min.y).max(1e-6);
+                    let submerge_depth = body_height.min(body.aabb_max.y - bottom.y + s);
+                    let fraction = (submerge_depth / body_height).clamp(0.0, 1.0);
+                    let dims = body.grid.dims;
+                    let volume = (dims.x * dims.y * dims.z) as f32 * s * s * s;
+                    let mass = body.mass();
+                    let avg_density = mass / volume.max(1e-6);
+                    let buoy_accel = (fluid_density / avg_density - 1.0) * GRAVITY * fraction;
+                    if buoy_accel > 0.0 {
+                        body.vel.y += buoy_accel * h;
                     }
+                    let drag = WATER_DRAG * fraction;
+                    body.vel /= 1.0 + drag * h;
+                    body.omega /= 1.0 + drag * h;
                 }
             }
             if body.vel.length() > MAX_SPEED {
@@ -528,16 +587,33 @@ impl PhysicsWorld {
                 body.omega = body.omega.normalize() * MAX_ANGULAR_SPEED_RAD_S;
             }
             debug_assert!(body.vel.is_finite() && body.pos.is_finite());
-            world_contacts(body, slot, &mut self.contacts_scratch, lookup);
+            // Jointed bodies skip world contacts: the per-voxel surface
+            // contact system generates dozens of contacts per segment,
+            // and interleaving those with joint constraints across 8
+            // solver iterations creates a feedback loop that produces
+            // wild velocity oscillation (the rope "freaks out"). The
+            // joints handle the rope's physical behavior; terrain
+            // collision is skipped to keep the solver stable. Rope is
+            // still cuttable by tools (dig/bomb/laser carve directly).
+            if !self.joints.iter().any(|j| {
+                j.body_a == slot || j.body_b == slot
+            }) {
+                world_contacts(body, slot, &mut contacts, &mut lookup);
+            }
         }
 
         // Body-body narrowphase over broadphase candidates. One staging
         // buffer reused across every pair (`Vec::append` drains it but
         // keeps its capacity) instead of a fresh allocation per touching
-        // pair per substep. The broadphase pairs were built once at the
-        // top of step() and are reused across all substeps.
-        self.staged_scratch.clear();
-        for &(a, b) in self.broadphase.pairs() {
+        // pair per substep.
+        let mut staged: Vec<Contact> = Vec::new();
+        let pairs: Vec<(usize, usize)> = self.broadphase.candidate_pairs(&self.slots).to_vec();
+        for (a, b) in pairs {
+            // Skip contact between jointed bodies — the joint handles their
+            // connection. Contacts between rope segments fight the joint.
+            if self.are_joined(a, b) {
+                continue;
+            }
             let (asleep_a, asleep_b) = {
                 let ba = self.slots[a].as_ref().expect("pair body alive");
                 let bb = self.slots[b].as_ref().expect("pair body alive");
@@ -563,11 +639,11 @@ impl PhysicsWorld {
                 target_asleep = true;
             }
 
-            self.staged_scratch.clear();
+            staged.clear();
             let result = {
                 let sb = self.slots[sampler].as_ref().expect("alive");
                 let tb = self.slots[target].as_ref().expect("alive");
-                pair_contacts(sb, sampler, tb, target, target_asleep, &mut self.staged_scratch)
+                pair_contacts(sb, sampler, tb, target, target_asleep, &mut staged)
             };
             if result.contact_count == 0 {
                 continue;
@@ -577,16 +653,16 @@ impl PhysicsWorld {
                 let tb = self.slots[target].as_mut().expect("alive");
                 tb.sleep.asleep = false;
                 tb.sleep.quiet_steps = 0;
-                self.staged_scratch.clear();
+                staged.clear();
                 let sb_ref = self.slots[sampler].as_ref().expect("alive");
                 let tb_ref = self.slots[target].as_ref().expect("alive");
-                pair_contacts(sb_ref, sampler, tb_ref, target, false, &mut self.staged_scratch);
+                pair_contacts(sb_ref, sampler, tb_ref, target, false, &mut staged);
             }
-            self.contacts_scratch.append(&mut self.staged_scratch);
+            contacts.append(&mut staged);
         }
 
         // Warm start from the previous substep's accumulated impulses.
-        for c in &mut self.contacts_scratch {
+        for c in &mut contacts {
             if let Some(&(n0, t10, t20)) = self.warm.get(&c.key) {
                 c.acc_n = n0;
                 c.acc_t1 = t10;
@@ -594,6 +670,12 @@ impl PhysicsWorld {
                 let p = c.normal * n0 + c.t1 * t10 + c.t2 * t20;
                 Self::apply_contact_impulse(&mut self.slots, c, p);
             }
+        }
+        // Joint warm start: disabled — was causing energy injection and
+        // explosion. The velocity solve converges within 8 iterations for
+        // the small joint counts in a rope chain. Just reset accumulators.
+        for j in &mut self.joints {
+            j.acc_lambda = 0.0;
         }
 
         // Velocity iterations: normal impulse stopping approach only, then
@@ -612,7 +694,7 @@ impl PhysicsWorld {
         // recovered *positionally* (split impulse, below), which by
         // construction cannot add kinetic energy to anything.
         for _ in 0..SOLVER_ITERS {
-            for c in &mut self.contacts_scratch {
+            for c in &mut contacts {
                 let vn = Self::relative_velocity(&self.slots, c).dot(c.normal);
                 let lambda = -vn / c.kn;
                 let new_acc = (c.acc_n + lambda).max(0.0);
@@ -632,13 +714,71 @@ impl PhysicsWorld {
                     Self::apply_contact_impulse(&mut self.slots, c, t * applied_t);
                 }
             }
+            // Joint distance constraints (interleaved with contacts for
+            // convergence). Read block computes all Copy-typed values so the
+            // immutable borrow of self.slots ends before two_mut.
+            for j in &mut self.joints {
+                let (ba, bb) = match (self.slots[j.body_a].as_ref(), self.slots[j.body_b].as_ref()) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => continue,
+                };
+                if ba.sleep.asleep && bb.sleep.asleep {
+                    continue;
+                }
+                let asleep_a = ba.sleep.asleep;
+                let asleep_b = bb.sleep.asleep;
+                let ra = ba.rot * j.anchor_a;
+                let rb = bb.rot * j.anchor_b;
+                let d = (bb.pos + rb) - (ba.pos + ra);
+                let dist = d.length();
+                if dist < 1e-6 {
+                    continue;
+                }
+                let n = d / dist;
+                // Velocity-based solve: cancel relative velocity along the
+                // constraint axis. No position correction (disabled to
+                // prevent chain feedback loops); slight sag is acceptable.
+                let v_rel = (bb.vel + bb.omega.cross(rb)) - (ba.vel + ba.omega.cross(ra));
+                let vn = v_rel.dot(n);
+                let ima = if asleep_a { 0.0 } else { ba.inv_mass };
+                let imb = if asleep_b { 0.0 } else { bb.inv_mass };
+                let iwa = if asleep_a { Mat3::ZERO } else { ba.inv_iw };
+                let iwb = if asleep_b { Mat3::ZERO } else { bb.inv_iw };
+                let ra_cross_n = ra.cross(n);
+                let rb_cross_n = rb.cross(n);
+                let keff = ima + imb
+                    + iwa.mul_vec3(ra_cross_n).dot(ra_cross_n)
+                    + iwb.mul_vec3(rb_cross_n).dot(rb_cross_n);
+                if keff <= 0.0 {
+                    continue;
+                }
+                let lambda = -vn / (keff + j.compliance);
+                // Clamp the impulse to prevent solver divergence in joint
+                // chains: when contacts and joints compete (rope segment
+                // touching terrain), successive iterations can amplify the
+                // impulse. Cap at the impulse that would bring the relative
+                // velocity to MAX_SPEED — enough to constrain, not enough
+                // to diverge.
+                let max_lambda = MAX_SPEED / keff;
+                let lambda = lambda.clamp(-max_lambda, max_lambda);
+                let p = n * lambda;
+                let (ba, bb) = two_mut(&mut self.slots, j.body_a, j.body_b);
+                if !asleep_a {
+                    ba.vel += p * ba.inv_mass;
+                    ba.omega += ba.inv_iw * ra.cross(p);
+                }
+                if !asleep_b {
+                    bb.vel -= p * bb.inv_mass;
+                    bb.omega -= bb.inv_iw * rb.cross(p);
+                }
+            }
         }
 
         // Record each body's hardest single contact this substep, for
         // material-based impact fracture (see `ImpactEvent`). Positions
         // here are pre-integration, matching the frame `c.r_arm`/`r_arm_b`
         // were computed in when this substep's contacts were generated.
-        for c in &self.contacts_scratch {
+        for c in &contacts {
             if c.acc_n <= 0.0 || c.approach_speed < MIN_IMPACT_APPROACH_SPEED_M_S {
                 continue;
             }
@@ -667,7 +807,7 @@ impl PhysicsWorld {
         // resistance below.
         self.contact_flags.clear();
         self.contact_flags.resize(self.slots.len(), false);
-        for c in &self.contacts_scratch {
+        for c in &contacts {
             self.contact_flags[c.body] = true;
             if let Some(b) = c.body_b {
                 self.contact_flags[b] = true;
@@ -689,6 +829,22 @@ impl PhysicsWorld {
             if body.sleep.asleep {
                 continue;
             }
+            // NaN guard: the interleaved contact+joint velocity solve can
+            // produce non-finite velocities when jointed bodies (rope
+            // chains) generate competing world contacts — the impulses
+            // oscillate across solver iterations. Without this guard the
+            // NaN propagates into position (`pos += vel * h`), making the
+            // body invisible (NaN transforms produce no rasterized
+            // geometry). Reset to zero instead of integrating garbage.
+            if !body.vel.is_finite() {
+                body.vel = Vec3::ZERO;
+            }
+            if !body.omega.is_finite() {
+                body.omega = Vec3::ZERO;
+            }
+            if body.vel.length() > MAX_SPEED {
+                body.vel = body.vel.normalize() * MAX_SPEED;
+            }
             body.pos += body.vel * h;
             let mut damping = ANGULAR_DAMPING_AIR;
             if self.contact_flags[slot] && body.surface.len() <= SMALL_BODY_MAX_SURFACE_POINTS {
@@ -700,18 +856,13 @@ impl PhysicsWorld {
             }
             let om = body.omega;
             let dq = Quat::from_xyzw(om.x, om.y, om.z, 0.0) * body.rot;
-            let q = Quat::from_xyzw(
+            body.rot = Quat::from_xyzw(
                 body.rot.x + 0.5 * h * dq.x,
                 body.rot.y + 0.5 * h * dq.y,
                 body.rot.z + 0.5 * h * dq.z,
                 body.rot.w + 0.5 * h * dq.w,
-            );
-            // Length-gate the normalization: a degenerate rotation (e.g.
-            // from a zero-length quaternion after a NaN leak) would
-            // produce NaNs from `normalize()`, poisoning every downstream
-            // transform. Only renormalize when the length is meaningful.
-            let len_sq = q.length_squared();
-            body.rot = if len_sq > 1e-12 { q / len_sq.sqrt() } else { body.rot };
+            )
+            .normalize();
             body.refresh_aabb();
         }
 
@@ -727,7 +878,7 @@ impl PhysicsWorld {
         self.pos_corr.clear();
         self.pos_corr.resize(self.slots.len(), Vec3::ZERO);
         for _ in 0..POSITION_ITERS {
-            for c in &self.contacts_scratch {
+            for c in &contacts {
                 let corr_b = c.body_b.map_or(Vec3::ZERO, |b| self.pos_corr[b]);
                 let already = (self.pos_corr[c.body] - corr_b).dot(c.normal);
                 let remaining = (c.depth - CONTACT_SLOP) - already;
@@ -749,6 +900,12 @@ impl PhysicsWorld {
                     None => self.pos_corr[c.body] += c.normal * push,
                 }
             }
+            // Joint position correction disabled — velocity solve alone
+            // prevents explosion. Position correction in a joint chain
+            // creates a feedback loop (correcting one joint violates the
+            // next), causing solver divergence and frame-rate death.
+            // The velocity-only solve allows slight sag under gravity,
+            // which is acceptable for flexible rope.
         }
         for (slot, entry) in self.slots.iter_mut().enumerate() {
             let Some(body) = entry else { continue };
@@ -760,10 +917,8 @@ impl PhysicsWorld {
         }
 
         // Persist accumulated impulses for the next substep's warm start.
-        // `.clear()` preserves the map's backing allocation; the insert loop
-        // repopulates it with this substep's accumulated impulses.
         self.warm.clear();
-        for c in &self.contacts_scratch {
+        for c in &contacts {
             self.warm.insert(c.key, (c.acc_n, c.acc_t1, c.acc_t2));
         }
     }
@@ -921,13 +1076,19 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_impact, "a body falling 6 m onto stone must report an impact");
+        assert!(
+            saw_impact,
+            "a body falling 6 m onto stone must report an impact"
+        );
         assert!(max_impulse > 0.0);
 
         // Once settled and asleep, further steps must be quiet -- no
         // spurious impacts from steady resting contact.
         let quiet = phys.step(&world, PHYSICS_DT);
-        assert!(quiet.is_empty(), "resting body must not report an impact: {quiet:?}");
+        assert!(
+            quiet.is_empty(),
+            "resting body must not report an impact: {quiet:?}"
+        );
     }
 
     #[test]
@@ -1144,7 +1305,10 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_landing, "a body falling 6 m onto stone must report an impact");
+        assert!(
+            saw_landing,
+            "a body falling 6 m onto stone must report an impact"
+        );
         assert!(
             !saw_impact_after_landing,
             "settling under steady contact must not keep reporting fresh impacts"
@@ -1189,7 +1353,10 @@ mod tests {
                 break;
             }
         }
-        assert!(slept, "a small chip must eventually settle and sleep, not spin forever");
+        assert!(
+            slept,
+            "a small chip must eventually settle and sleep, not spin forever"
+        );
     }
 
     /// A small chip already on the ground, spun hard around the vertical
@@ -1265,7 +1432,10 @@ mod tests {
         for _ in 0..300 {
             phys.step(&world, PHYSICS_DT);
         }
-        assert!(phys.get(big).unwrap().sleep.asleep, "big cube must settle first");
+        assert!(
+            phys.get(big).unwrap().sleep.asleep,
+            "big cube must settle first"
+        );
         let rest_pos = phys.get(big).unwrap().pos;
 
         let corner = rest_pos - Vec3::new(0.95, 0.95, 0.95);
@@ -1333,10 +1503,152 @@ mod tests {
         // Push it past even the longest possible lifetime.
         let expired = phys.tick_lifetimes(CLUTTER_LIFETIME_MAX_S + 1.0);
         assert_eq!(expired, vec![clutter_id]);
-        assert!(phys.get(clutter_id).is_none(), "expired clutter must be despawned");
+        assert!(
+            phys.get(clutter_id).is_none(),
+            "expired clutter must be despawned"
+        );
         assert!(
             phys.get(permanent_id).is_some(),
             "an untimed body must survive any number of ticks"
+        );
+    }
+    /// A body less dense than the fluid it sits in must float when that
+    /// fluid is a *second* registered fluid (muddy_water), not just plain
+    /// water. Before generalizing `water_voxel` to `fluid_voxels`, only the
+    /// single configured water material triggered buoyancy, so a body in
+    /// muddy_water sank straight through it to the floor.
+    ///
+    /// This test uses a dedicated registry so the fluids can be marked
+    /// `solid = false` and a `set_solid_table` attached — without it,
+    /// `World::solid` falls back to "any non-air voxel is solid"
+    /// (world.rs legacy path), muddy_water would act as a solid platform,
+    /// and the body would rest on top of it regardless of buoyancy (a
+    /// false green). The body is built from "foam" (density 300) so
+    /// `buoy_accel = (1000/300 - 1)*GRAVITY` exceeds gravity and the body
+    /// actually rises; wood (700) is denser than water's buoyant reference
+    /// (1000) net of gravity and would sink.
+    #[test]
+    fn body_floats_in_a_second_fluid_muddy_water() {
+        // ids: 0=air, 1=stone, 2=muddy_water, 3=water, 4=foam
+        let reg = MaterialRegistry::from_toml_str(
+            r#"
+            [[material]]
+            name = "stone"
+            color = [0.5, 0.5, 0.5]
+            density = 2700.0
+            strength = 50.0
+
+            [[material]]
+            name = "muddy_water"
+            color = [0.4, 0.3, 0.1]
+            density = 1100.0
+            strength = 0.0
+            solid = false
+            fluid = true
+
+            [[material]]
+            name = "water"
+            color = [0.2, 0.4, 0.8]
+            density = 1000.0
+            strength = 0.0
+            solid = false
+            fluid = true
+
+            [[material]]
+            name = "foam"
+            color = [0.9, 0.9, 0.9]
+            density = 300.0
+            strength = 1.0
+            "#,
+            "buoyancy_test.toml",
+        )
+        .expect("registry");
+
+        const STONE: Voxel = Voxel(1);
+        const MUDDY_WATER: Voxel = Voxel(2);
+        const WATER: Voxel = Voxel(3);
+        const FOAM: Voxel = Voxel(4);
+
+        // Build the solidity table from the registry so fluids (ids 2, 3)
+        // read as non-solid and the body passes through them — buoyancy is
+        // then the only upward force.
+        let solid_table: Vec<bool> = (0..reg.len())
+            .map(|i| reg.get(vox_core::MaterialId(i as u16)).is_some_and(|d| d.solid))
+            .collect();
+
+        let mut world = World::new(WorldConfig {
+            voxel_size_m: 0.1,
+            extent_m: [32.0, 24.0, 32.0],
+            ..WorldConfig::default()
+        });
+        world.set_solid_table(solid_table);
+        // Stone floor, top at 4.0 m (voxel y=40).
+        let (_, max) = world.bounds_voxels();
+        world.fill_box(IVec3::ZERO, IVec3::new(max.x, 40, max.z), STONE);
+        // Muddy_water pool on top of the floor, 4.0 m → 7.0 m (voxel y 40→70).
+        world.fill_box(
+            IVec3::new(140, 40, 140),
+            IVec3::new(180, 70, 180),
+            MUDDY_WATER,
+        );
+
+        let mut phys = PhysicsWorld::new();
+        // Register both water and muddy_water as buoyancy fluids. The key
+        // assertion: muddy_water (the *second* fluid) triggers buoyancy.
+        phys.set_fluid_voxels(vec![(WATER, 1000.0), (MUDDY_WATER, 1100.0)]);
+
+        // Foam (density 300) is much lighter than water (1000), so
+        // buoy_accel = (1000/300 - 1)*GRAVITY ≈ 2.33*GRAVITY, far exceeding
+        // gravity — the body rises and bobs near the muddy_water surface.
+        let dims = IVec3::splat(4);
+        let grid = VoxelGrid::new(dims, vec![FOAM; (dims.x * dims.y * dims.z) as usize]);
+        let body = Body::from_grid(grid, &reg, 0.1, Vec3::new(16.0, 5.0, 16.0)).expect("massive body");
+        let id = phys.spawn(body);
+
+        for _ in 0..600 {
+            phys.step(&world, PHYSICS_DT);
+        }
+        let b = phys.get(id).expect("alive");
+        // The body must float inside the pool — well above the stone floor
+        // (4.0 m) and near the muddy_water surface (7.0 m). If buoyancy
+        // never fired (the pre-fix behavior), the body would sink through
+        // the non-solid muddy_water and rest on the stone floor at ~4.0 m.
+        assert!(
+            b.aabb_min.y > 5.0,
+            "foam must float in muddy_water via buoyancy, not sink to the floor: aabb_min.y = {}",
+            b.aabb_min.y
+        );
+    }
+    #[test]
+    fn joint_holds_two_bodies_at_rest_length() {
+        let world = floored_world();
+        let reg = registry();
+        let mut phys = PhysicsWorld::new();
+
+        // Two 2x2x2 stone bodies, 1m apart, joined rigidly (compliance=0).
+        let grid = VoxelGrid::new(IVec3::new(2, 2, 2), vec![Voxel(1); 8]);
+        let body_a =
+            Body::from_grid(grid.clone(), &reg, 0.5, Vec3::new(10.0, 20.0, 10.0)).unwrap();
+        let body_b = Body::from_grid(grid, &reg, 0.5, Vec3::new(11.0, 20.0, 10.0)).unwrap();
+        let id_a = phys.spawn(body_a);
+        let id_b = phys.spawn(body_b);
+
+        phys.add_joint(id_a, id_b, Vec3::ZERO, Vec3::ZERO, 1.0, 0.0);
+
+        // Run 100 steps (~1.7s free fall from 20m — floor at 4m, still airborne).
+        for step in 0..100 {
+            phys.step(&world, PHYSICS_DT);
+            let a = phys.get(id_a).expect("alive");
+            let b = phys.get(id_b).expect("alive");
+            assert!(a.pos.is_finite() && b.pos.is_finite(), "NaN at step {step}");
+        }
+
+        let a = phys.get(id_a).unwrap();
+        let b = phys.get(id_b).unwrap();
+        let dist = (a.pos - b.pos).length();
+        assert!(
+            (dist - 1.0).abs() < 0.15,
+            "joint should maintain rest length ~1.0m, got {dist}"
         );
     }
 }

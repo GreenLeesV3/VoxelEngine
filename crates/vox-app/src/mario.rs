@@ -14,9 +14,9 @@ use std::path::Path;
 
 use glam::{Quat, Vec3};
 use vox_render::{MarioCameraUniform, MarioPipeline};
+pub use vox_sm64::SURFACE_RADIUS_M;
 use vox_sm64::{
-    aabb_box_surfaces, quat_to_sm64_euler, MarioInputs, Sm64, SurfaceObject, SurfaceProvider,
-    SURFACE_RADIUS_M,
+    MarioInputs, Sm64, SurfaceObject, SurfaceProvider, aabb_box_surfaces, quat_to_sm64_euler,
 };
 use vox_world::World;
 use winit::keyboard::KeyCode;
@@ -119,13 +119,7 @@ impl MarioMode {
         }
 
         let (tex_w, tex_h) = sm64.texture_dimensions();
-        let pipeline = MarioPipeline::new(
-            gpu,
-            mario_shader,
-            sm64.texture_rgba(),
-            tex_w,
-            tex_h,
-        );
+        let pipeline = MarioPipeline::new(gpu, mario_shader, sm64.texture_rgba(), tex_w, tex_h);
 
         // Extract HUD textures (power meter, icons, digits) from the same
         // ROM. Best-effort — if it fails, Mario mode still works, the HUD
@@ -143,27 +137,27 @@ impl MarioMode {
 
         tracing::info!("Mario mode initialized (ROM loaded, pipeline built)");
         Ok(Self {
-        sm64,
-        audio,
-        mario: None,
-        pipeline,
-        surfaces: SurfaceProvider::new(units_per_meter),
-        cam_yaw: 0.0,
-        cam_pitch: 0.2,
-        tick_accumulator: 0.0,
-        tick_rate: 30.0,
-        last_pos_sm64: [0.0; 3],
-        model_scale: 1.0,
-        units_per_meter,
-        prev_tick_pos: [0.0; 3],
-        pending_ground_pound: None,
-        last_health: 8,
-        last_action: 0,
-        debris_objects: HashMap::new(),
-        hud_textures,
-        hud_texture_cache: None,
-        tick_alpha: 0.0,
-        prev_action: 0,
+            sm64,
+            audio,
+            mario: None,
+            pipeline,
+            surfaces: SurfaceProvider::new(units_per_meter),
+            cam_yaw: 0.0,
+            cam_pitch: 0.2,
+            tick_accumulator: 0.0,
+            tick_rate: 30.0,
+            last_pos_sm64: [0.0; 3],
+            model_scale: 1.0,
+            units_per_meter,
+            prev_tick_pos: [0.0; 3],
+            pending_ground_pound: None,
+            last_health: 8,
+            last_action: 0,
+            debris_objects: HashMap::new(),
+            hud_textures,
+            hud_texture_cache: None,
+            tick_alpha: 0.0,
+            prev_action: 0,
         })
     }
 
@@ -172,7 +166,12 @@ impl MarioMode {
     /// surfaces around the spawn point first, this should succeed.
     pub fn spawn(&mut self, pos_m: Vec3, world: &World) -> Result<(), vox_sm64::Sm64Error> {
         let pos_sm64 = pos_m * self.units_per_meter;
-        let surfaces = vox_sm64::voxel_surfaces_near(world, pos_m, vox_sm64::SURFACE_RADIUS_M, self.units_per_meter);
+        let surfaces = vox_sm64::voxel_surfaces_near(
+            world,
+            pos_m,
+            vox_sm64::SURFACE_RADIUS_M,
+            self.units_per_meter,
+        );
         tracing::info!(
             surfaces = surfaces.len(),
             pos_m = ?pos_m,
@@ -262,6 +261,7 @@ impl MarioMode {
             ticks_this_frame += 1;
             // Save previous state for position interpolation
             self.prev_tick_pos = self.last_pos_sm64;
+            // Now tick
             let state = self.mario.as_mut().unwrap().tick(inputs);
             self.last_pos_sm64 = [state.position.x, state.position.y, state.position.z];
             self.last_health = state.health;
@@ -278,26 +278,19 @@ impl MarioMode {
             }
             self.prev_action = state.action;
         }
-        // Compute tick_alpha BEFORE render_interpolated so it uses the
-        // correct fractional progress for this frame.
         self.tick_alpha = (self.tick_accumulator / tick_dt).clamp(0.0, 1.0);
-
-        // On frames where no tick happened AND we've ticked at least once,
-        // re-evaluate Mario's geometry at the interpolated animation state.
-        // Can't do this before the first tick — the graph node system
-        // needs initialization from sm64_mario_tick first.
-        if false && ticks_this_frame == 0 && self.mario.is_some() && self.tick_alpha < 1.0 {
-            self.mario.as_mut().unwrap().render_interpolated(self.tick_alpha);
-        }
 
         // Interpolate Mario's position between previous and current tick
         // by tick_alpha. The mesh renders at the current tick position
         // (30 Hz, no ghosting), but the camera tracks this smooth
         // interpolated position (120 FPS) — no shake.
         let interp_sm64 = [
-            self.prev_tick_pos[0] + (self.last_pos_sm64[0] - self.prev_tick_pos[0]) * self.tick_alpha,
-            self.prev_tick_pos[1] + (self.last_pos_sm64[1] - self.prev_tick_pos[1]) * self.tick_alpha,
-            self.prev_tick_pos[2] + (self.last_pos_sm64[2] - self.prev_tick_pos[2]) * self.tick_alpha,
+            self.prev_tick_pos[0]
+                + (self.last_pos_sm64[0] - self.prev_tick_pos[0]) * self.tick_alpha,
+            self.prev_tick_pos[1]
+                + (self.last_pos_sm64[1] - self.prev_tick_pos[1]) * self.tick_alpha,
+            self.prev_tick_pos[2]
+                + (self.last_pos_sm64[2] - self.prev_tick_pos[2]) * self.tick_alpha,
         ];
         let pos_m = Vec3::from(interp_sm64) / self.units_per_meter;
 
@@ -316,13 +309,14 @@ impl MarioMode {
         self.pending_ground_pound.take()
     }
     /// Mario's current world-space position in meters (derived from the
- /// last tick's SM64 position). Used by the frame loop to decide which
- /// debris bodies are near enough to feed to [`update_debris`].
- pub fn mario_pos_m(&self) -> Vec3 {
-     Vec3::from(self.last_pos_sm64) / self.units_per_meter
- }
+    /// last tick's SM64 position). Used by the frame loop to decide which
+    /// debris bodies are near enough to feed to [`update_debris`].
+    pub fn mario_pos_m(&self) -> Vec3 {
+        Vec3::from(self.last_pos_sm64) / self.units_per_meter
+    }
 
     /// Mario's current health (0-8, 8 = full). For the SM64 power meter HUD.
+
     pub fn health(&self) -> i16 {
         self.last_health
     }
@@ -334,7 +328,7 @@ impl MarioMode {
 
     /// Get cached MarioHudTextures for the HUD, building them once from
     /// the raw ROM textures. Subsequent calls return the cached Arc.
-    pub fn hud_texture_cache(&mut self) -> Option<&std::sync::Arc<vox_debug::hud::MarioHudTextures>> {
+    pub fn get_hud_texture_cache(&mut self) -> Option<&std::sync::Arc<vox_debug::hud::MarioHudTextures>> {
         if self.hud_texture_cache.is_none() && self.hud_textures.is_some() {
             let ht = self.hud_textures.as_ref().unwrap();
             self.hud_texture_cache = Some(std::sync::Arc::new(vox_debug::hud::MarioHudTextures {
@@ -369,10 +363,7 @@ impl MarioMode {
     /// Bodies already tracked get [`SurfaceObject::move_to`]; bodies no
     /// longer in `bodies` (out of range or despawned) are dropped, which
     /// deletes them from libsm64. Call once per frame after [`tick`].
-    pub fn update_debris(
-        &mut self,
-        bodies: impl Iterator<Item = (u64, Vec3, Quat, Vec3, Vec3)>,
-    ) {
+    pub fn update_debris(&mut self, bodies: impl Iterator<Item = (u64, Vec3, Quat, Vec3, Vec3)>) {
         let upm = self.units_per_meter;
         let mario_pos = self.mario_pos_m();
         // Margin so a body entering the radius doesn't pop its surface
@@ -414,7 +405,11 @@ impl MarioMode {
                 let surfaces = aabb_box_surfaces(min_i, max_i);
                 match SurfaceObject::create(&self.sm64, &surfaces, transform) {
                     Ok(obj) => {
-                        tracing::debug!(key, surfaces = surfaces.len(), "debris surface object created");
+                        tracing::debug!(
+                            key,
+                            surfaces = surfaces.len(),
+                            "debris surface object created"
+                        );
                         self.debris_objects.insert(key, obj);
                     }
                     Err(e) => {
@@ -453,7 +448,8 @@ impl MarioMode {
         // At 30 units/m (original), Mario is 5.3m and cam is 10m/5m.
         // At 60 units/m, Mario is 2.67m and cam scales to 5m/2.5m.
         let scale = 30.0 / self.units_per_meter;
-        mario_pos_m - dir * (CAM_DISTANCE_BASE * scale) + Vec3::new(0.0, CAM_HEIGHT_BASE * scale * 0.5, 0.0)
+        mario_pos_m - dir * (CAM_DISTANCE_BASE * scale)
+            + Vec3::new(0.0, CAM_HEIGHT_BASE * scale * 0.5, 0.0)
     }
 
     /// Camera look direction (from camera toward Mario). Matches the

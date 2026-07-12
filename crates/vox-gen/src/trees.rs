@@ -7,7 +7,7 @@
 //! 1.0 m it degrades gracefully into a chunky Minecraft-style tree.
 
 use glam::{IVec3, Vec2, Vec3};
-use vox_core::{MaterialRegistry, WorldConfig, voxel_at, voxel_center_m};
+use vox_core::{MaterialRegistry, WorldConfig, consts::CHUNK_SIZE, voxel_at, voxel_center_m};
 use vox_world::{AIR, Voxel, World};
 
 use crate::noise::{Fbm, hash2, mix_seed_u64};
@@ -106,6 +106,83 @@ pub fn plan_trees(
                 continue;
             }
             // Headroom: don't plant into the world ceiling.
+            let height = 6.0 + 4.0 * unit(h.rotate_left(19));
+            if base + height + 3.0 > cfg.extent_m[1] {
+                continue;
+            }
+            trees.push(TreeInstance {
+                x_m: x,
+                z_m: z,
+                base_y_m: base,
+                height_m: height,
+                tree_seed: h,
+            });
+        }
+    }
+    trees
+}
+
+/// Trees whose trunk falls within chunk `key`, planned deterministically
+/// from seed + terrain. This is a per-chunk slice of the same plan
+/// `plan_trees` produces globally — same seed, same logic, filtered to
+/// this chunk's XY bounds. The loader calls this during chunk generation
+/// to stamp trees rooted in the target chunk; canopy that extends into
+/// neighbor chunks is clipped by `World::set_clip` at stamp time.
+///
+/// **Quality rule:** Only call this for chunks within the detail ring
+/// (near chunks). Far chunks skip tree rooting but still receive canopy
+/// stamps from near-rooted trees.
+pub fn trees_for_chunk(
+    cfg: &WorldConfig,
+    terrain: &TerrainGen,
+    key: IVec3,
+) -> Vec<TreeInstance> {
+    let s = cfg.voxel_size_m;
+    let chunk_m = CHUNK_SIZE as f32 * s;
+    let origin_x_m = key.x as f32 * chunk_m;
+    let origin_z_m = key.z as f32 * chunk_m;
+
+    // Determine which placement cells overlap this chunk.
+    let cell_min_ci = (origin_x_m / CELL_M).floor() as i32;
+    let cell_max_ci = ((origin_x_m + chunk_m) / CELL_M).ceil() as i32;
+    let cell_min_cj = (origin_z_m / CELL_M).floor() as i32;
+    let cell_max_cj = ((origin_z_m + chunk_m) / CELL_M).ceil() as i32;
+
+    let seed = (cfg.seed as u32) ^ ((cfg.seed >> 32) as u32) ^ 0x7EE5;
+    let density = Fbm::new(3, seed ^ 0xD375);
+    let mut trees = Vec::new();
+
+    for cj in cell_min_cj..=cell_max_cj {
+        for ci in cell_min_ci..=cell_max_ci {
+            let h = hash2(ci, cj, seed);
+            let x = ci as f32 * CELL_M + 1.0 + unit(h) * (CELL_M - 2.0);
+            let z = cj as f32 * CELL_M + 1.0 + unit(h.rotate_left(11)) * (CELL_M - 2.0);
+
+            // Trunk must fall within this chunk's XY voxel bounds.
+            let tx_vox = (x / s) as i32;
+            let tz_vox = (z / s) as i32;
+            let ox = key.x * CHUNK_SIZE as i32;
+            let oz = key.z * CHUNK_SIZE as i32;
+            if tx_vox < ox || tx_vox >= ox + CHUNK_SIZE as i32 {
+                continue;
+            }
+            if tz_vox < oz || tz_vox >= oz + CHUNK_SIZE as i32 {
+                continue;
+            }
+
+            // Same filters as plan_trees.
+            if x < 2.0 || z < 2.0 || x > cfg.extent_m[0] - 2.0 || z > cfg.extent_m[2] - 2.0 {
+                continue;
+            }
+            if density.sample2(Vec2::new(x, z) / 60.0) < DENSITY_THRESHOLD {
+                continue;
+            }
+            let base = terrain.height_m(x, z);
+            let slope_x = (terrain.height_m(x + 1.0, z) - terrain.height_m(x - 1.0, z)).abs() / 2.0;
+            let slope_z = (terrain.height_m(x, z + 1.0) - terrain.height_m(x, z - 1.0)).abs() / 2.0;
+            if slope_x.max(slope_z) > MAX_SLOPE {
+                continue;
+            }
             let height = 6.0 + 4.0 * unit(h.rotate_left(19));
             if base + height + 3.0 > cfg.extent_m[1] {
                 continue;
@@ -428,5 +505,47 @@ mod tests {
         );
         let planted = generate_trees(&mut world, &terrain, mats(), &biomes());
         assert!(planted > 0, "coarse world must still get trees");
+    }
+
+    #[test]
+    fn trees_for_chunk_matches_global_plan_subset() {
+        let cfg = cfg(0.1);
+        let terrain = TerrainGen::new(&cfg);
+        let global = plan_trees(&cfg, &terrain, &biomes());
+
+        // Pick a chunk that contains at least one tree.
+        let s = cfg.voxel_size_m;
+        let chunk_m = CHUNK_SIZE as f32 * s;
+        let target_key = IVec3::new(2, 0, 2);
+        let origin_m = target_key.as_vec3() * chunk_m;
+
+        let per_chunk = trees_for_chunk(&cfg, &terrain, target_key);
+        let global_in_chunk: Vec<&TreeInstance> = global.iter().filter(|t| {
+            // Tree overlaps this chunk if its trunk position is within the
+            // chunk's XY bounds (simplified — canopy reach is handled by
+            // the clip mechanism at stamp time).
+            let tx_vox = (t.x_m / s) as i32;
+            let tz_vox = (t.z_m / s) as i32;
+            let ox = target_key.x * CHUNK_SIZE as i32;
+            let oz = target_key.z * CHUNK_SIZE as i32;
+            tx_vox >= ox && tx_vox < ox + CHUNK_SIZE as i32 &&
+            tz_vox >= oz && tz_vox < oz + CHUNK_SIZE as i32
+        }).collect();
+
+        assert_eq!(per_chunk.len(), global_in_chunk.len(),
+            "per-chunk planning must match global plan for trunk-in-chunk trees");
+        for (pc, g) in per_chunk.iter().zip(global_in_chunk.iter()) {
+            assert_eq!(pc, *g, "tree instances must match");
+        }
+    }
+
+    #[test]
+    fn trees_for_chunk_is_deterministic() {
+        let cfg = cfg(0.1);
+        let terrain = TerrainGen::new(&cfg);
+        let key = IVec3::new(3, 0, 3);
+        let a = trees_for_chunk(&cfg, &terrain, key);
+        let b = trees_for_chunk(&cfg, &terrain, key);
+        assert_eq!(a, b, "same inputs must produce same trees");
     }
 }

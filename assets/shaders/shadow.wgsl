@@ -34,6 +34,7 @@ struct VIn {
 
 struct VOut {
     @builtin(position) clip: vec4f,
+    @location(0) @interpolate(flat) mat_id: u32,
 };
 
 @vertex
@@ -43,5 +44,15 @@ fn vs(v: VIn, inst: Inst) -> VOut {
     let wp = (model * vec4f(local, 1.0)).xyz;
     var out: VOut;
     out.clip = scam.view_proj * vec4f(wp, 1.0);
+    out.mat_id = v.norm_mat.z | (v.norm_mat.w << 8u);
     return out;
+}
+
+@fragment
+fn fs(in: VOut) {
+    // Water is alpha-blended in the main pass and must not become an opaque
+    // shadow caster.
+    if (in.mat_id == 9u) {
+        discard;
+    }
 }

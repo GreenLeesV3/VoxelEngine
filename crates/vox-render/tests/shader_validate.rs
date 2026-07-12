@@ -10,8 +10,7 @@ fn parse_shader(rel: &str) {
         .join("..")
         .join("..")
         .join(rel);
-    let source = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+    let source = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
     let _module = naga::front::wgsl::parse_str(&source)
         .unwrap_or_else(|e| panic!("naga failed to parse {rel}:\n{e}"));
 }
@@ -49,4 +48,19 @@ fn particle_wgsl_parses() {
 #[test]
 fn shadow_wgsl_parses() {
     parse_shader("assets/shaders/shadow.wgsl");
+}
+
+#[test]
+fn mesh_compute_wgsl_parses() {
+    parse_shader("assets/shaders/mesh_compute.wgsl");
+}
+
+#[test]
+fn bloom_wgsl_parses() {
+    parse_shader("assets/shaders/bloom.wgsl");
+}
+
+#[test]
+fn ssao_wgsl_parses() {
+    parse_shader("assets/shaders/ssao.wgsl");
 }

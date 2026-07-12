@@ -8,8 +8,8 @@
 
 use std::collections::VecDeque;
 
-use glam::{Quat, Vec3};
 use crate::player::Player;
+use glam::{Quat, Vec3};
 use vox_physics::{BodyId, PhysicsWorld};
 
 /// Maximum snapshots retained. At one snapshot per second that's 10 minutes
@@ -29,18 +29,19 @@ pub struct Snapshot {
     pub player_yaw: f32,
     pub player_pitch: f32,
     pub game_time: f32,
-    pub bodies: Vec<(Vec3, Quat, Vec3)>,
+    pub bodies: Vec<(BodyId, Vec3, Quat, Vec3)>,
 }
 
 /// Replay recording/playback state. Either `recording` or `playback` is true
-/// at a time, never both. During playback, snapshots are consumed in order
-/// from the front of `snapshots` (the same buffer they were recorded into).
+/// at a time, never both. During playback, snapshots are read at their
+/// recorded one-second cadence and retained for replaying again.
 #[derive(Default)]
 pub struct ReplayState {
     pub recording: bool,
     pub playback: bool,
     pub snapshots: VecDeque<Snapshot>,
     frame_counter: u32,
+    playback_index: usize,
 }
 
 impl ReplayState {
@@ -50,6 +51,7 @@ impl ReplayState {
         self.playback = false;
         self.snapshots.clear();
         self.frame_counter = 0;
+        self.playback_index = 0;
         tracing::info!("replay: recording started");
     }
 
@@ -79,6 +81,8 @@ impl ReplayState {
         }
         self.recording = false;
         self.playback = true;
+        self.frame_counter = RECORD_INTERVAL - 1;
+        self.playback_index = 0;
         tracing::info!(count = self.snapshots.len(), "replay: playback started");
     }
 
@@ -93,9 +97,9 @@ impl ReplayState {
         if self.frame_counter % RECORD_INTERVAL != 0 {
             return;
         }
-        let bodies: Vec<(Vec3, Quat, Vec3)> = phys
+        let bodies: Vec<(BodyId, Vec3, Quat, Vec3)> = phys
             .iter()
-            .map(|(_, b)| (b.pos, b.rot, b.vel))
+            .map(|(id, b)| (id, b.pos, b.rot, b.vel))
             .collect();
         let snap = Snapshot {
             player_pos: player.ctrl.pos,
@@ -110,10 +114,9 @@ impl ReplayState {
         }
     }
 
-    /// Apply the next playback snapshot to the player + physics bodies.
-    /// Returns `false` when the recording is exhausted (and leaves
-    /// `playback` false so the caller stops calling); `true` if a snapshot
-    /// was applied and playback continues.
+    /// Apply the next playback snapshot at the recorded one-second cadence.
+    /// Returns `false` when the recording is exhausted; snapshots remain
+    /// available for another playback run.
     ///
     /// Player position/yaw/pitch are written directly (the caller suppresses
     /// normal input handling while `playback` is true). Debris bodies are
@@ -130,11 +133,17 @@ impl ReplayState {
         if !self.playback {
             return false;
         }
-        let Some(snap) = self.snapshots.pop_front() else {
+        self.frame_counter = self.frame_counter.saturating_add(1);
+        if self.frame_counter < RECORD_INTERVAL {
+            return true;
+        }
+        self.frame_counter = 0;
+        let Some(snap) = self.snapshots.get(self.playback_index).cloned() else {
             self.playback = false;
             tracing::info!("replay: playback finished");
             return false;
         };
+        self.playback_index += 1;
         player.ctrl.pos = snap.player_pos;
         player.yaw = snap.player_yaw;
         player.pitch = snap.player_pitch;
@@ -143,14 +152,11 @@ impl ReplayState {
         // order. Extra live bodies (spawned after recording) keep their state;
         // missing ones are skipped. We can't mutate through `iter()`, so
         // collect ids then update by id.
-        let live_ids: Vec<BodyId> = phys.iter().map(|(id, _)| id).collect();
-        for (i, id) in live_ids.iter().enumerate() {
-            if let Some(&(pos, rot, vel)) = snap.bodies.get(i) {
-                if let Some(b) = phys.get_mut(*id) {
-                    b.pos = pos;
-                    b.rot = rot;
-                    b.vel = vel;
-                }
+        for &(id, pos, rot, vel) in &snap.bodies {
+            if let Some(b) = phys.get_mut(id) {
+                b.pos = pos;
+                b.rot = rot;
+                b.vel = vel;
             }
         }
         true

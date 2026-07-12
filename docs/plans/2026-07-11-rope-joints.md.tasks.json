@@ -1,0 +1,13 @@
+{
+  "planPath": "docs/plans/2026-07-11-rope-joints.md",
+  "tasks": [
+    {"id": 0, "subject": "Task 1: Add Joint struct and storage to PhysicsWorld", "status": "pending"},
+    {"id": 1, "subject": "Task 2: Joint velocity solve in substep", "status": "pending", "blockedBy": [0]},
+    {"id": 2, "subject": "Task 3: Joint island union-find for sleep coordination", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 4: Add rope material", "status": "pending"},
+    {"id": 4, "subject": "Task 5: Rope spawning in main.rs", "status": "pending", "blockedBy": [0, 3]},
+    {"id": 5, "subject": "Task 6: Joint test", "status": "pending", "blockedBy": [1]},
+    {"id": 6, "subject": "Task 7: Update README and verify", "status": "pending", "blockedBy": [2, 4, 5]}
+  ],
+  "lastUpdated": "2026-07-11T00:00:00Z"
+}

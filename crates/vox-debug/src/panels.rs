@@ -35,12 +35,16 @@ fn stats_window(ctx: &Context, state: &OverlayState<'_>) {
                 state.chunks_drawn, state.chunks_culled
             ));
             ui.label(format!("remesh queue: {}", state.mesh_queue));
-            ui.label(format!("body mesh in-flight: {}", state.body_mesh_in_flight));
+            ui.label(format!(
+                "body mesh in-flight: {}",
+                state.body_mesh_in_flight
+            ));
             ui.label(format!(
                 "bodies awake/total: {}/{}",
                 state.bodies_awake, state.bodies_total
             ));
             ui.label(format!("particles: {}", state.particles));
+            ui.label(format!("quality: {}", state.quality_label));
         });
 }
 
@@ -104,6 +108,15 @@ fn tuning_window(ctx: &Context, state: &mut OverlayState<'_>) {
             ui.label("Movement:");
             ui.add(Slider::new(&mut state.tunables.fly_speed, 1.0..=40.0).text("fly speed (m/s)"));
             ui.separator();
+            ui.separator();
+            ui.label("Environment:");
+            ui.checkbox(state.always_day, "Always day");
+            ui.separator();
+            ui.label("Post-processing:");
+            ui.add(Slider::new(&mut state.tunables.ssao_intensity, 0.0..=2.0).text("SSAO intensity"));
+            ui.add(Slider::new(&mut state.tunables.ssao_radius, 0.05..=2.0).text("SSAO radius").logarithmic(true));
+            ui.add(Slider::new(&mut state.tunables.bloom_intensity, 0.0..=2.0).text("Bloom intensity"));
+            ui.add(Slider::new(&mut state.tunables.bloom_threshold, 0.3..=3.0).text("Bloom threshold"));
 
             ui.label("Build material:");
             egui::ComboBox::from_label("")
@@ -121,4 +134,3 @@ fn tuning_window(ctx: &Context, state: &mut OverlayState<'_>) {
                 });
         });
 }
-

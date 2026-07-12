@@ -63,7 +63,13 @@ const C_FILES: &[&str] = &[
 ];
 
 fn main() {
-    let libsm64_dir = PathBuf::from("../../libsm64");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_NATIVE");
+    if std::env::var_os("CARGO_FEATURE_NATIVE").is_none() {
+        return;
+    }
+
+    let libsm64_dir =
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../../libsm64");
 
     // Verify the mario geometry was imported (python script must have run)
     let mario_geo = libsm64_dir.join("src/decomp/mario/geo.inc.c");
@@ -91,6 +97,12 @@ fn main() {
     for f in C_FILES {
         println!("cargo:rerun-if-changed={}", libsm64_dir.join(f).display());
     }
-    println!("cargo:rerun-if-changed={}", libsm64_dir.join("src/libsm64.h").display());
-    println!("cargo:rerun-if-changed={}", libsm64_dir.join("src/gfx_adapter.h").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        libsm64_dir.join("src/libsm64.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        libsm64_dir.join("src/gfx_adapter.h").display()
+    );
 }

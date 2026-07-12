@@ -64,28 +64,6 @@ impl<'w> SolidLookup<'w> {
         }
     }
 
-    /// The voxel at `v`, or `AIR` for out-of-bounds / absent-chunk positions.
-    /// Same semantics as [`World::get_voxel`] but with the same chunk cache
-    /// as [`solid`]/[`present`], so repeated reads in the same chunk skip the
-    /// hash-map lookup.
-    pub fn get_voxel(&mut self, v: IVec3) -> Voxel {
-        if !self.world.in_bounds(v) {
-            return AIR;
-        }
-        let key = chunk_of(v);
-        let chunk = match self.cached {
-            Some((k, c)) if k == key => c,
-            _ => {
-                let c = self.world.chunk_at(key);
-                self.cached = Some((key, c));
-                c
-            }
-        };
-        match chunk {
-            Some(c) => c.get(local_of(v)),
-            None => AIR,
-        }
-    }
     /// True when the voxel at `v` is present (non-air), regardless of
     /// solidity. Used by the connectivity flood to traverse non-solid
     /// materials (leaves, water) that are still physically present in
@@ -132,6 +110,20 @@ pub struct World {
     /// controller, rigidbody-vs-world contacts, and the destruction
     /// connectivity flood all key off `World::solid`/`SolidLookup::solid`.
     solid_table: Option<Vec<bool>>,
+    /// When set, `set_voxel` silently drops writes outside this half-open
+    /// voxel box. Used during chunk generation to prevent tree stamping from
+    /// allocating neighbor chunks. `get_voxel` is unaffected — reads always
+    /// pass through. `None` = no clip (normal gameplay).
+    clip: Option<(IVec3, IVec3)>,
+    /// Chunks that have received gameplay writes (player tools, bombs, fire,
+    /// weathering). Pristine chunks (not in this set) can be evicted and
+    /// regenerated; edited chunks must persist in memory.
+    edited: FxHashSet<IVec3>,
+    /// When true, `set_voxel`/`edit_box` skip marking chunks as edited. Set
+    /// during chunk generation (terrain insert + tree stamping) so generated
+    /// chunks remain pristine and evictable. Gameplay writes always have this
+    /// false.
+    suppress_edit_tracking: bool,
 }
 
 impl World {
@@ -146,6 +138,9 @@ impl World {
             bounds_voxels,
             warned_out_of_bounds: false,
             solid_table: None,
+            clip: None,
+            edited: FxHashSet::default(),
+            suppress_edit_tracking: false,
         }
     }
 
@@ -189,6 +184,34 @@ impl World {
         self.solid_table = Some(table);
     }
 
+    /// Set a clip region: subsequent `set_voxel`/`edit_box` writes outside
+    /// `[min, max)` are silently dropped. Used during chunk generation so tree
+    /// stamping only writes into the target chunk. Reads are never clipped.
+    pub fn set_clip(&mut self, min: IVec3, max: IVec3) {
+        self.clip = Some((min, max));
+    }
+
+    /// Remove the clip region — all in-bounds writes succeed normally.
+    pub fn clear_clip(&mut self) {
+        self.clip = None;
+    }
+
+    /// True if chunk `key` has received gameplay writes (not just generation).
+    pub fn is_edited(&self, key: IVec3) -> bool {
+        self.edited.contains(&key)
+    }
+
+    /// Number of chunks marked as edited.
+    pub fn edited_count(&self) -> usize {
+        self.edited.len()
+    }
+
+    /// Set whether gameplay writes mark chunks as edited. During chunk
+    /// generation, set to `true` so generated terrain+trees stay pristine.
+    pub fn set_suppress_edit_tracking(&mut self, suppress: bool) {
+        self.suppress_edit_tracking = suppress;
+    }
+
     /// True when material id `id` counts as solid, consulting the attached
     /// table if there is one. Shared by `solid()` and `SolidLookup::solid()`
     /// so the two can never disagree.
@@ -210,6 +233,11 @@ impl World {
             }
             return;
         }
+        if let Some((clip_min, clip_max)) = self.clip {
+            if pos.cmplt(clip_min).any() || pos.cmpge(clip_max).any() {
+                return;
+            }
+        }
         let key = chunk_of(pos);
         let local = local_of(pos);
         match self.chunks.entry(key) {
@@ -226,6 +254,9 @@ impl World {
                 }
                 e.insert(Chunk::new()).set(local, v);
             }
+        }
+        if !self.suppress_edit_tracking {
+            self.edited.insert(key);
         }
         self.mark_dirty_with_neighbors(key, local);
         self.dirty_regions.push((pos, pos + IVec3::ONE));
@@ -253,8 +284,12 @@ impl World {
         mut edit: impl FnMut(IVec3, Voxel) -> Option<Voxel>,
     ) {
         let (bmin, bmax) = self.bounds_voxels;
-        let min = min.max(bmin);
-        let max = max.min(bmax);
+        let mut min = min.max(bmin);
+        let mut max = max.min(bmax);
+        if let Some((clip_min, clip_max)) = self.clip {
+            min = min.max(clip_min);
+            max = max.min(clip_max);
+        }
         if min.cmpge(max).any() {
             return;
         }
@@ -301,35 +336,11 @@ impl World {
                     for &(local, v) in &changes {
                         chunk.set(local, v);
                     }
-                    // Track which border faces were touched by any change in
-                    // this chunk, then mark dirty once per chunk instead of
-                    // per-voxel. mark_dirty_with_neighbors inserts the chunk
-                    // plus face-neighbor chunks when a change sits on that
-                    // face; collapsing to one pass preserves those semantics.
-                    self.dirty.insert(key);
-                    let last = CHUNK as u32 - 1;
-                    let mut touched_neg = [false; 3];
-                    let mut touched_pos = [false; 3];
-                    for (local, _) in &changes {
-                        for axis in 0..3 {
-                            if local[axis] == 0 {
-                                touched_neg[axis] = true;
-                            } else if local[axis] == last {
-                                touched_pos[axis] = true;
-                            }
-                        }
+                    if !self.suppress_edit_tracking {
+                        self.edited.insert(key);
                     }
-                    for axis in 0..3 {
-                        if touched_neg[axis] {
-                            let mut n = key;
-                            n[axis] -= 1;
-                            self.dirty.insert(n);
-                        }
-                        if touched_pos[axis] {
-                            let mut n = key;
-                            n[axis] += 1;
-                            self.dirty.insert(n);
-                        }
+                    for (local, _) in changes {
+                        self.mark_dirty_with_neighbors(key, local);
                     }
                 }
             }
@@ -344,6 +355,27 @@ impl World {
         self.dirty_regions
             .push((origin, origin + IVec3::splat(CHUNK)));
         self.chunks.insert(key, chunk);
+        self.dirty.insert(key);
+        for axis in 0..3 {
+            for sign in [-1, 1] {
+                let mut n = key;
+                n[axis] += sign;
+                self.dirty.insert(n);
+            }
+        }
+    }
+
+    /// Remove a chunk from the map, dirtying itself and its six face neighbors
+    /// (neighbors' meshes sample this chunk for face culling, and the chunk's
+    /// own mesh must be dropped). No-op if the chunk is absent. Also removes
+    /// it from the edited set — an evicted chunk is gone.
+    pub fn remove_chunk(&mut self, key: IVec3) {
+        if self.chunks.remove(&key).is_none() {
+            return;
+        }
+        self.edited.remove(&key);
+        // Dirty self (so its mesh is dropped) + neighbors (their face culling
+        // changes when an adjacent chunk disappears).
         self.dirty.insert(key);
         for axis in 0..3 {
             for sign in [-1, 1] {
@@ -576,7 +608,10 @@ mod tests {
         w.set_solid_table(vec![false, true, false]); // [air, solid_mat, water_mat]
         w.set_voxel(IVec3::new(1, 1, 1), Voxel(1));
         w.set_voxel(IVec3::new(2, 2, 2), Voxel(2));
-        assert!(w.solid(IVec3::new(1, 1, 1)), "material id 1 is marked solid");
+        assert!(
+            w.solid(IVec3::new(1, 1, 1)),
+            "material id 1 is marked solid"
+        );
         assert!(
             !w.solid(IVec3::new(2, 2, 2)),
             "material id 2 is marked non-solid"
@@ -593,4 +628,123 @@ mod tests {
             "unknown material ids default solid, never silently pass through"
         );
     }
+
+    #[test]
+    fn clip_blocks_writes_outside_region() {
+        let mut w = world();
+        w.set_clip(IVec3::new(0, 0, 0), IVec3::new(32, 32, 32));
+
+        // Inside clip region — write succeeds.
+        w.set_voxel(IVec3::new(10, 10, 10), STONE);
+        assert_eq!(w.get_voxel(IVec3::new(10, 10, 10)), STONE);
+
+        // Outside clip region — write silently dropped.
+        w.set_voxel(IVec3::new(40, 10, 10), STONE);
+        assert_eq!(w.get_voxel(IVec3::new(40, 10, 10)), AIR);
+        assert!(!w.chunks().any(|(k, _)| k == IVec3::new(1, 0, 0)),
+            "clip must not allocate chunk outside region");
+
+        // After clearing clip — writes work again.
+        w.clear_clip();
+        w.set_voxel(IVec3::new(40, 10, 10), STONE);
+        assert_eq!(w.get_voxel(IVec3::new(40, 10, 10)), STONE);
+    }
+
+    #[test]
+    fn clip_does_not_block_reads() {
+        let mut w = world();
+        w.set_voxel(IVec3::new(40, 10, 10), STONE);
+        w.set_clip(IVec3::new(0, 0, 0), IVec3::new(32, 32, 32));
+
+        // Read outside clip returns the actual voxel, not air.
+        assert_eq!(w.get_voxel(IVec3::new(40, 10, 10)), STONE);
+        assert!(w.solid(IVec3::new(40, 10, 10)));
+    }
+#[test]
+fn gameplay_edit_marks_chunk_edited() {
+    let mut w = world();
+    w.set_voxel(IVec3::new(10, 10, 10), STONE);
+    assert!(w.is_edited(IVec3::new(0, 0, 0)),
+        "gameplay write must mark chunk edited");
+}
+
+#[test]
+fn suppressed_edit_does_not_mark_edited() {
+    let mut w = world();
+    w.set_suppress_edit_tracking(true);
+    w.set_voxel(IVec3::new(10, 10, 10), STONE);
+    assert!(!w.is_edited(IVec3::new(0, 0, 0)),
+        "suppressed write must not mark chunk edited");
+    // Voxel was still written.
+    assert_eq!(w.get_voxel(IVec3::new(10, 10, 10)), STONE);
+    w.set_suppress_edit_tracking(false);
+}
+
+#[test]
+fn insert_chunk_never_marks_edited() {
+    let mut w = world();
+    w.insert_chunk(IVec3::new(1, 1, 1), Chunk::uniform(STONE));
+    assert!(!w.is_edited(IVec3::new(1, 1, 1)),
+        "insert_chunk is generation, never marks edited");
+}
+
+#[test]
+fn edit_box_marks_all_touched_chunks_edited() {
+    let mut w = world();
+    // Box straddles chunk corner at (32, 32, 32).
+    w.fill_box(IVec3::new(30, 30, 30), IVec3::new(35, 35, 35), STONE);
+    for key in [
+        IVec3::new(0, 0, 0),
+        IVec3::new(1, 0, 0),
+        IVec3::new(0, 1, 0),
+        IVec3::new(0, 0, 1),
+        IVec3::new(1, 1, 0),
+        IVec3::new(1, 0, 1),
+        IVec3::new(0, 1, 1),
+        IVec3::new(1, 1, 1),
+    ] {
+        assert!(w.is_edited(key), "chunk {key} not marked edited");
+    }
+}
+
+#[test]
+fn same_value_write_does_not_mark_edited() {
+    let mut w = world();
+    w.set_voxel(IVec3::new(10, 10, 10), STONE);
+    let edited_before = w.is_edited(IVec3::new(0, 0, 0));
+    w.set_voxel(IVec3::new(10, 10, 10), STONE); // same value
+    assert!(edited_before); // was edited
+    // No new chunks marked:
+    assert_eq!(w.edited_count(), 1, "same-value write should not add edited chunks");
+}
+#[test]
+fn remove_chunk_evicts_and_dirties_neighbors() {
+    let mut w = world();
+    w.insert_chunk(IVec3::new(1, 1, 1), Chunk::uniform(STONE));
+    w.drain_dirty(); // clear insert dirty
+
+    w.remove_chunk(IVec3::new(1, 1, 1));
+    assert!(w.chunk_at(IVec3::new(1, 1, 1)).is_none(),
+        "chunk must be removed");
+    // Neighbors dirtied so their meshes update (face culling changes).
+    let dirty: HashSet<_> = w.drain_dirty().into_iter().collect();
+    for key in [
+        IVec3::new(1, 1, 1),
+        IVec3::new(2, 1, 1),
+        IVec3::new(0, 1, 1),
+        IVec3::new(1, 2, 1),
+        IVec3::new(1, 0, 1),
+        IVec3::new(1, 1, 2),
+        IVec3::new(1, 1, 0),
+    ] {
+        assert!(dirty.contains(&key), "neighbor {key} not dirtied by removal");
+    }
+}
+
+#[test]
+fn remove_absent_chunk_is_noop() {
+    let mut w = world();
+    w.remove_chunk(IVec3::new(5, 5, 5));
+    assert!(w.drain_dirty().is_empty(), "removing absent chunk dirties nothing");
+}
 }

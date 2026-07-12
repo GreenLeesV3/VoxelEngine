@@ -86,9 +86,10 @@ impl RemeshQueue {
     }
 
     /// Dispatch up to the per-frame budget, nearest chunks first.
+    /// `fluids` lists fluid voxel ids whose depth is baked into jitter.
     /// `emissive_set` lists material ids that emit blocklight; passed through
     /// to the mesher so it can BFS-propagate their light into vertices.
-    pub fn dispatch(&mut self, world: &World, camera_pos: Vec3, water_voxel: Voxel, emissive_set: &[Voxel]) {
+    pub fn dispatch(&mut self, world: &World, camera_pos: Vec3, fluids: &[Voxel], emissive_set: &[Voxel]) {
         if self.pending.is_empty() {
             return;
         }
@@ -120,9 +121,10 @@ impl RemeshQueue {
             let tx = self.tx.clone();
             let es = emissive_set.clone();
             self.in_flight += 1;
+            let fluids = fluids.to_vec();
             rayon::spawn(move || {
                 let mesh = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mesh_slab(&slab, origin, water_voxel, &es, Some(&masks))
+                    mesh_slab(&slab, origin, &fluids, &es, Some(&masks))
                 }));
                 if let Ok(m) = mesh {
                     let _ = tx.send((key, generation, m));

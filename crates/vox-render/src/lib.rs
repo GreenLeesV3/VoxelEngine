@@ -3,22 +3,27 @@
 //! This crate deliberately has no winit dependency: window types enter only
 //! as [`wgpu::SurfaceTarget`].
 
+pub mod bloom_ssao;
 pub mod camera;
 pub mod frustum;
 pub mod gpu;
+pub mod grass_pipeline;
+#[cfg(feature = "mario")]
 pub mod mario_pipeline;
 pub mod particles;
 pub mod postprocess;
-pub mod grass_pipeline;
 pub mod voxel_pipeline;
 pub mod sky_pipeline;
 
+pub use bloom_ssao::BloomSsaoPipeline;
 pub use camera::Camera;
 pub use frustum::Frustum;
 pub use gpu::{DEPTH_FORMAT, Frame, Gpu};
+pub use grass_pipeline::{GrassPipeline, GrassVertex, MAX_GRASS_BLADES};
+#[cfg(feature = "mario")]
 pub use mario_pipeline::{MarioCameraUniform, MarioPipeline, MarioVertex};
 pub use particles::{MAX_PARTICLES, ParticleInstance, ParticlePipeline};
-pub use grass_pipeline::{GrassPipeline, MAX_GRASS_BLADES};
+
 pub use postprocess::{COLOR_FORMAT, PostProcessPipeline};
 pub use voxel_pipeline::{BodyMeshKey, DrawStats, ShadowPipeline, VoxelPipeline};
 pub use sky_pipeline::{SkyPipeline, SkyUniform};

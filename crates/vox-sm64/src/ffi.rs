@@ -102,12 +102,8 @@ pub type SM64PlaySoundFunctionPtr = Option<extern "C" fn(u32, *mut f32)>;
 // ── extern "C" function declarations ───────────────────────────────────
 
 unsafe extern "C" {
-    pub fn sm64_register_debug_print_function(
-        debugPrintFunction: SM64DebugPrintFunctionPtr,
-    );
-    pub fn sm64_register_play_sound_function(
-        playSoundFunction: SM64PlaySoundFunctionPtr,
-    );
+    pub fn sm64_register_debug_print_function(debugPrintFunction: SM64DebugPrintFunctionPtr);
+    pub fn sm64_register_play_sound_function(playSoundFunction: SM64PlaySoundFunctionPtr);
 
     pub fn sm64_global_init(rom: *const u8, outTexture: *mut u8);
     pub fn sm64_global_terminate();
@@ -127,10 +123,7 @@ unsafe extern "C" {
     ) -> u32;
     pub fn sm64_set_sound_volume(vol: f32);
 
-    pub fn sm64_static_surfaces_load(
-        surfaceArray: *const SM64Surface,
-        numSurfaces: u32,
-    );
+    pub fn sm64_static_surfaces_load(surfaceArray: *const SM64Surface, numSurfaces: u32);
 
     pub fn sm64_mario_create(x: f32, y: f32, z: f32) -> i32;
 
@@ -150,13 +143,8 @@ unsafe extern "C" {
     );
     pub fn sm64_mario_delete(marioId: i32);
 
-    pub fn sm64_surface_object_create(
-        surfaceObject: *const SM64SurfaceObject,
-    ) -> u32;
-    pub fn sm64_surface_object_move(
-        objectId: u32,
-        transform: *const SM64ObjectTransform,
-    );
+    pub fn sm64_surface_object_create(surfaceObject: *const SM64SurfaceObject) -> u32;
+    pub fn sm64_surface_object_move(objectId: u32, transform: *const SM64ObjectTransform);
     pub fn sm64_surface_object_delete(objectId: u32);
 
     pub fn sm64_surface_find_wall_collision(
@@ -172,6 +160,4 @@ unsafe extern "C" {
     pub fn sm64_set_mario_position(marioId: i32, x: f32, y: f32, z: f32);
     pub fn sm64_set_mario_velocity(marioId: i32, x: f32, y: f32, z: f32);
     pub fn sm64_set_mario_faceangle(marioId: i32, y: f32);
-    pub fn gfx_adapter_set_interp_alpha(alpha: f32);
-    pub fn sm64_mario_render_geometry(marioId: i32, outBuffers: *mut SM64MarioGeometryBuffers);
 }

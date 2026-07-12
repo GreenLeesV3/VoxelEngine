@@ -124,12 +124,7 @@ fn effective_mass(
 }
 
 /// Generate world contacts for one awake body into `out`.
-pub fn world_contacts(
-    body: &Body,
-    slot: usize,
-    out: &mut Vec<Contact>,
-    lookup: &mut SolidLookup,
-) {
+pub fn world_contacts(body: &Body, slot: usize, out: &mut Vec<Contact>, lookup: &mut SolidLookup) {
     let r_point = body.half_voxel;
     let inv_iw = body.inv_iw; // solver-refreshed cache, see the field's docs
 
@@ -336,7 +331,12 @@ pub fn pair_contacts(
             depth,
             r_arm,
             r_arm_b,
-            key: (sampler_slot as u32, target_slot as u32, point_idx as u32, face_id),
+            key: (
+                sampler_slot as u32,
+                target_slot as u32,
+                point_idx as u32,
+                face_id,
+            ),
             t1,
             t2,
             kn: effective_mass(n, sampler.inv_mass, &inv_iw_a, r_arm, b_terms),

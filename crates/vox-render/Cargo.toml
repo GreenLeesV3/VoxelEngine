@@ -5,10 +5,14 @@ version.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+mario = ["dep:vox-sm64", "vox-sm64/native"]
+
 [dependencies]
 vox-core = { workspace = true }
 vox-mesh = { workspace = true }
-vox-sm64 = { workspace = true }
+vox-sm64 = { workspace = true, optional = true }
 wgpu = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }

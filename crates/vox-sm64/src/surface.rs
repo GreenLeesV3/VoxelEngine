@@ -28,8 +28,8 @@
 
 use crate::ffi::SM64Surface;
 use glam::{IVec3, UVec3, Vec3};
-use vox_core::consts::CHUNK_SIZE;
 use vox_core::chunk_origin;
+use vox_core::consts::CHUNK_SIZE;
 use vox_world::{AIR, World};
 
 /// SM64 surface type: default solid surface.
@@ -66,7 +66,8 @@ impl SurfaceProvider {
         {
             return false;
         }
-        self.surfaces = voxel_surfaces_near(world, mario_pos_m, SURFACE_RADIUS_M, self.units_per_meter);
+        self.surfaces =
+            voxel_surfaces_near(world, mario_pos_m, SURFACE_RADIUS_M, self.units_per_meter);
         self.last_center = mario_pos_m;
         tracing::debug!(
             surfaces = self.surfaces.len(),
@@ -87,11 +88,15 @@ impl SurfaceProvider {
     }
 }
 
-
 /// Generate SM64 collision surfaces for all exposed voxel faces within
 /// `radius_m` meters of `center_m`, using greedy face merging.
 /// Vertices are in SM64 integer units (meters × `units_per_meter`).
-pub fn voxel_surfaces_near(world: &World, center_m: Vec3, radius_m: f32, units_per_meter: f32) -> Vec<SM64Surface> {
+pub fn voxel_surfaces_near(
+    world: &World,
+    center_m: Vec3,
+    radius_m: f32,
+    units_per_meter: f32,
+) -> Vec<SM64Surface> {
     let voxel_size = world.cfg.voxel_size_m;
     let chunk_size_m = CHUNK_SIZE as f32 * voxel_size;
     let mut surfaces = Vec::new();
@@ -114,7 +119,14 @@ pub fn voxel_surfaces_near(world: &World, center_m: Vec3, radius_m: f32, units_p
         if chunk.solid_count() == 0 {
             continue;
         }
-        greedy_faces_for_chunk(world, chunk_key, chunk, voxel_size, &mut surfaces, units_per_meter);
+        greedy_faces_for_chunk(
+            world,
+            chunk_key,
+            chunk,
+            voxel_size,
+            &mut surfaces,
+            units_per_meter,
+        );
     }
 
     surfaces
@@ -180,13 +192,23 @@ fn greedy_faces_for_chunk(
 
                     // Check if neighbor in the normal direction is air
                     let (nx, ny, nz) = neighbor_offset(axis as u32, sign);
-                    let is_exposed = is_neighbor_air(world, chunk_key, chunk, lx, ly, lz, nx, ny, nz);
+                    let is_exposed =
+                        is_neighbor_air(world, chunk_key, chunk, lx, ly, lz, nx, ny, nz);
                     grid[u as usize][v as usize] = is_exposed;
                 }
             }
 
             // Greedy merge the 2D grid into rectangles
-            merge_grid(grid, axis as u32, sign, slice, chunk_key, voxel_size, surfaces, units_per_meter);
+            merge_grid(
+                grid,
+                axis as u32,
+                sign,
+                slice,
+                chunk_key,
+                voxel_size,
+                surfaces,
+                units_per_meter,
+            );
         }
     }
 }
@@ -289,7 +311,17 @@ fn merge_grid(
 
             // Emit 2 triangles for this merged rectangle
             emit_merged_face(
-                axis, sign, slice, u, v, max_u, max_v, chunk_key, voxel_size, surfaces, units_per_meter,
+                axis,
+                sign,
+                slice,
+                u,
+                v,
+                max_u,
+                max_v,
+                chunk_key,
+                voxel_size,
+                surfaces,
+                units_per_meter,
             );
         }
     }
@@ -313,7 +345,6 @@ fn emit_merged_face(
     surfaces: &mut Vec<SM64Surface>,
     units_per_meter: f32,
 ) {
-
     // The face is at the boundary between slice and slice+sign.
     // For +sign faces: the face is at the top of the voxel (slice + 1 in world units)
     // For -sign faces: the face is at the bottom of the voxel (slice in world units)
@@ -322,17 +353,24 @@ fn emit_merged_face(
     // World voxel coordinates of the rectangle corners
     // (axis determines which coord is the slice, a1/a2 are the grid axes)
     let origin = chunk_origin(chunk_key);
-    let (s_x, s_y, s_z) = (origin.x as f32 * voxel_size, origin.y as f32 * voxel_size, origin.z as f32 * voxel_size);
+    let (s_x, s_y, s_z) = (
+        origin.x as f32 * voxel_size,
+        origin.y as f32 * voxel_size,
+        origin.z as f32 * voxel_size,
+    );
 
     // Compute corner positions in meters, then convert to SM64 units
     // For each axis, the position is: chunk_origin + voxel_coord * voxel_size
-    let (p0, p1, p2, p3) = compute_rect_corners(
-        axis, s_x, s_y, s_z, face_slice, u0, v0, u1, v1, voxel_size,
-    );
+    let (p0, p1, p2, p3) =
+        compute_rect_corners(axis, s_x, s_y, s_z, face_slice, u0, v0, u1, v1, voxel_size);
 
     // Convert to SM64 integer units
     let c = |p: Vec3| -> (i32, i32, i32) {
-        ((p.x * units_per_meter) as i32, (p.y * units_per_meter) as i32, (p.z * units_per_meter) as i32)
+        (
+            (p.x * units_per_meter) as i32,
+            (p.y * units_per_meter) as i32,
+            (p.z * units_per_meter) as i32,
+        )
     };
     let (ax, ay, az) = c(p0);
     let (bx, by, bz) = c(p1);
@@ -408,7 +446,12 @@ fn compute_rect_corners(
             let y1 = s_y + u1_pos;
             let z0 = s_z + v0_pos;
             let z1 = s_z + v1_pos;
-            (Vec3::new(x, y0, z0), Vec3::new(x, y0, z1), Vec3::new(x, y1, z1), Vec3::new(x, y1, z0))
+            (
+                Vec3::new(x, y0, z0),
+                Vec3::new(x, y0, z1),
+                Vec3::new(x, y1, z1),
+                Vec3::new(x, y1, z0),
+            )
         }
         1 => {
             // Y faces: slice=Y, grid=X×Z
@@ -417,7 +460,12 @@ fn compute_rect_corners(
             let x1 = s_x + u1_pos;
             let z0 = s_z + v0_pos;
             let z1 = s_z + v1_pos;
-            (Vec3::new(x0, y, z0), Vec3::new(x1, y, z0), Vec3::new(x1, y, z1), Vec3::new(x0, y, z1))
+            (
+                Vec3::new(x0, y, z0),
+                Vec3::new(x1, y, z0),
+                Vec3::new(x1, y, z1),
+                Vec3::new(x0, y, z1),
+            )
         }
         _ => {
             // Z faces: slice=Z, grid=X×Y
@@ -426,16 +474,27 @@ fn compute_rect_corners(
             let x1 = s_x + u1_pos;
             let y0 = s_y + v0_pos;
             let y1 = s_y + v1_pos;
-            (Vec3::new(x0, y0, z), Vec3::new(x1, y0, z), Vec3::new(x1, y1, z), Vec3::new(x0, y1, z))
+            (
+                Vec3::new(x0, y0, z),
+                Vec3::new(x1, y0, z),
+                Vec3::new(x1, y1, z),
+                Vec3::new(x0, y1, z),
+            )
         }
     }
 }
 
 /// Build an `SM64Surface` from 3 integer vertices (SM64 units).
 fn make_surface(
-    ax: i32, ay: i32, az: i32,
-    bx: i32, by: i32, bz: i32,
-    cx: i32, cy: i32, cz: i32,
+    ax: i32,
+    ay: i32,
+    az: i32,
+    bx: i32,
+    by: i32,
+    bz: i32,
+    cx: i32,
+    cy: i32,
+    cz: i32,
 ) -> SM64Surface {
     SM64Surface {
         type_: SURFACE_DEFAULT,

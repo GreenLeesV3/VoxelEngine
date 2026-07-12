@@ -11,6 +11,9 @@ use crate::grid::DIRS;
 pub struct VoxelGrid {
     pub dims: IVec3,
     pub voxels: Vec<Voxel>,
+    /// Per-voxel damage, 0.0 (pristine) to 1.0 (crumbled). Parallel to
+    /// `voxels`, same length. Only meaningful on debris bodies.
+    pub damage: Vec<f32>,
 }
 
 impl VoxelGrid {
@@ -19,7 +22,19 @@ impl VoxelGrid {
             voxels.len() as i64,
             dims.x as i64 * dims.y as i64 * dims.z as i64
         );
-        Self { dims, voxels }
+        let damage = vec![0.0; voxels.len()];
+        Self { dims, voxels, damage }
+    }
+
+    /// Construct a grid with an existing damage field (e.g. carrying damage
+    /// through `split_components`). `damage.len()` must equal `voxels.len()`.
+    pub fn new_with_damage(dims: IVec3, voxels: Vec<Voxel>, damage: Vec<f32>) -> Self {
+        debug_assert_eq!(
+            voxels.len() as i64,
+            dims.x as i64 * dims.y as i64 * dims.z as i64
+        );
+        debug_assert_eq!(voxels.len(), damage.len());
+        Self { dims, voxels, damage }
     }
 
     #[inline]
@@ -54,6 +69,46 @@ impl VoxelGrid {
     /// Number of solid voxels.
     pub fn solid_count(&self) -> usize {
         self.voxels.iter().filter(|v| **v != AIR).count()
+    }
+
+    /// Damage at `p`; out-of-bounds reads as 0.0 (pristine).
+    #[inline]
+    pub fn damage_at(&self, p: IVec3) -> f32 {
+        if p.cmpge(IVec3::ZERO).all() && p.cmplt(self.dims).all() {
+            self.damage[self.index(p)]
+        } else {
+            0.0
+        }
+    }
+
+    /// Add damage to a solid voxel. Returns true if the voxel accepted damage.
+    #[inline]
+    pub fn add_damage(&mut self, p: IVec3, amount: f32) -> bool {
+        if p.cmpge(IVec3::ZERO).all() && p.cmplt(self.dims).all() {
+            let idx = self.index(p);
+            if self.voxels[idx] != AIR {
+                self.damage[idx] = (self.damage[idx] + amount).min(1.0);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Decay all damage by `decay_rate * dt`. Returns true if any damage changed.
+    pub fn tick_damage_decay(&mut self, dt: f32, decay_rate: f32) -> bool {
+        let mut changed = false;
+        for d in &mut self.damage {
+            if *d > 0.0 {
+                *d = (*d - decay_rate * dt).max(0.0);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Whether any voxel has nonzero damage.
+    pub fn has_damage(&self) -> bool {
+        self.damage.iter().any(|&d| d > 0.0)
     }
 }
 
@@ -293,6 +348,8 @@ pub struct Body {
     /// `vox_core::consts::CLUTTER_MAX_VOXELS` -- and ticked down by
     /// `PhysicsWorld::tick_lifetimes`.
     pub lifetime_s: Option<f32>,
+    /// True when damage values changed since last mesh. Cleared after re-mesh.
+    pub damage_dirty: bool,
 }
 
 impl Body {
@@ -327,8 +384,9 @@ impl Body {
             aabb_max: Vec3::ZERO,
             prev_pos: com_world,
             prev_rot: Quat::IDENTITY,
-            inv_iw: Mat3::IDENTITY,
             lifetime_s: None,
+            damage_dirty: false,
+            inv_iw: Mat3::IDENTITY,
         };
         body.refresh_aabb();
         body.inv_iw = body.inv_inertia_world();
@@ -476,14 +534,8 @@ mod tests {
     #[test]
     fn raycast_grid_hits_the_near_face() {
         let grid = solid_grid(IVec3::splat(4));
-        let hit = raycast_grid(
-            &grid,
-            Vec3::new(-1.0, 0.2, 0.2),
-            Vec3::X,
-            5.0,
-            0.1,
-        )
-        .expect("must hit the near face");
+        let hit = raycast_grid(&grid, Vec3::new(-1.0, 0.2, 0.2), Vec3::X, 5.0, 0.1)
+            .expect("must hit the near face");
         assert_eq!(hit.voxel, IVec3::new(0, 2, 2));
         assert!((hit.dist_m - 1.0).abs() < 1e-4, "got {}", hit.dist_m);
     }
@@ -492,5 +544,36 @@ mod tests {
     fn raycast_grid_misses_when_aimed_away() {
         let grid = solid_grid(IVec3::splat(4));
         assert!(raycast_grid(&grid, Vec3::new(-1.0, 0.2, 0.2), Vec3::NEG_X, 5.0, 0.1).is_none());
+    }
+
+    #[test]
+    fn damage_accumulates_and_caps_at_1() {
+        let mut grid = VoxelGrid::new(IVec3::new(2, 2, 2), vec![Voxel(1); 8]);
+        assert_eq!(grid.damage_at(IVec3::new(0, 0, 0)), 0.0);
+        grid.add_damage(IVec3::new(0, 0, 0), 0.5);
+        assert_eq!(grid.damage_at(IVec3::new(0, 0, 0)), 0.5);
+        grid.add_damage(IVec3::new(0, 0, 0), 0.7);
+        assert_eq!(grid.damage_at(IVec3::new(0, 0, 0)), 1.0, "damage caps at 1.0");
+    }
+
+    #[test]
+    fn damage_does_not_accumulate_on_air() {
+        let mut grid = VoxelGrid::new(IVec3::new(2, 1, 1), vec![AIR, Voxel(1)]);
+        assert!(!grid.add_damage(IVec3::new(0, 0, 0), 0.5), "air rejects damage");
+        assert!(grid.add_damage(IVec3::new(1, 0, 0), 0.5), "solid accepts damage");
+    }
+
+    #[test]
+    fn damage_decays_to_zero() {
+        let mut grid = VoxelGrid::new(IVec3::new(1, 1, 1), vec![Voxel(1)]);
+        grid.add_damage(IVec3::ZERO, 0.5);
+        assert!(grid.has_damage());
+        grid.tick_damage_decay(1.0, 0.05);
+        assert_eq!(grid.damage_at(IVec3::ZERO), 0.45);
+        for _ in 0..20 {
+            grid.tick_damage_decay(1.0, 0.05);
+        }
+        assert_eq!(grid.damage_at(IVec3::ZERO), 0.0);
+        assert!(!grid.has_damage());
     }
 }

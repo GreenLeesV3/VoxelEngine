@@ -93,7 +93,11 @@ impl MarioPipeline {
         // ── Mario texture atlas ───────────────────────────────────
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("mario texture"),
-            size: wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: tex_w,
+                height: tex_h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -116,7 +120,11 @@ impl MarioPipeline {
                 bytes_per_row: Some(tex_w * 4),
                 rows_per_image: Some(tex_h),
             },
-            wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: tex_w,
+                height: tex_h,
+                depth_or_array_layers: 1,
+            },
         );
 
         // ── Sampler ───────────────────────────────────────────────

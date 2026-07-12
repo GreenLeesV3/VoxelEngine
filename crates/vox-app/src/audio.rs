@@ -16,8 +16,8 @@
 //! samples are still queued so it can shrink its output, and the feeder only
 //! pushes when there is room — preventing unbounded growth.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -320,9 +320,10 @@ fn build_stream(ring: Arc<RingBuffer>) -> Option<cpal::Stream> {
     // Create a resampler that converts 32kHz → device rate.
     // Wrapped in std::sync::Mutex for interior mutability from the
     // cpal callback (single-threaded callback, lock is uncontended).
-    let resampler = Arc::new(std::sync::Mutex::new(
-        Resampler::new(SM64_SAMPLE_RATE, out_rate),
-    ));
+    let resampler = Arc::new(std::sync::Mutex::new(Resampler::new(
+        SM64_SAMPLE_RATE,
+        out_rate,
+    )));
 
     let stream = match sample_format {
         SampleFormat::I16 => {
@@ -369,9 +370,7 @@ fn build_stream(ring: Arc<RingBuffer>) -> Option<cpal::Stream> {
 /// Pick a supported output config at 32 kHz with 2 channels, preferring
 /// I16 then F32 then whatever is available. Returns the concrete
 /// `StreamConfig` plus the sample format to build the stream with.
-fn pick_config(
-    device: &cpal::Device,
-) -> Option<(StreamConfig, SampleFormat)> {
+fn pick_config(device: &cpal::Device) -> Option<(StreamConfig, SampleFormat)> {
     let mut configs = device.supported_output_configs().ok()?;
     // Prefer 32 kHz / 2-channel, I16 first, then F32, then any format.
     let mut best: Option<(StreamConfig, SampleFormat)> = None;
@@ -384,8 +383,7 @@ fn pick_config(
         if !(rate..=max).contains(&SM64_SAMPLE_RATE) {
             continue;
         }
-        let cfg = range
-            .with_sample_rate(cpal::SampleRate(SM64_SAMPLE_RATE));
+        let cfg = range.with_sample_rate(cpal::SampleRate(SM64_SAMPLE_RATE));
         let fmt = cfg.sample_format();
         let sc: StreamConfig = cfg.into();
         match fmt {
@@ -503,11 +501,7 @@ impl Resampler {
 }
 
 /// Resample from the ring into an i16 output buffer, silence-filling the tail.
-fn write_i16(
-    ring: &RingBuffer,
-    data: &mut [i16],
-    resampler: &std::sync::Mutex<Resampler>,
-) {
+fn write_i16(ring: &RingBuffer, data: &mut [i16], resampler: &std::sync::Mutex<Resampler>) {
     let mut rs = resampler.lock().unwrap();
     let n = rs.process(ring, data);
     for s in data[n..].iter_mut() {
@@ -515,11 +509,7 @@ fn write_i16(
     }
 }
 
-fn write_f32(
-    ring: &RingBuffer,
-    data: &mut [f32],
-    resampler: &std::sync::Mutex<Resampler>,
-) {
+fn write_f32(ring: &RingBuffer, data: &mut [f32], resampler: &std::sync::Mutex<Resampler>) {
     let mut tmp = [0i16; 1024];
     let mut rs = resampler.lock().unwrap();
     let mut filled = 0;
@@ -542,11 +532,7 @@ fn write_f32(
     }
 }
 
-fn write_u16(
-    ring: &RingBuffer,
-    data: &mut [u16],
-    resampler: &std::sync::Mutex<Resampler>,
-) {
+fn write_u16(ring: &RingBuffer, data: &mut [u16], resampler: &std::sync::Mutex<Resampler>) {
     let mut tmp = [0i16; 1024];
     let mut rs = resampler.lock().unwrap();
     let mut filled = 0;

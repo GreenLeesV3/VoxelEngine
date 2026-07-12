@@ -4,11 +4,10 @@
 //! is an 8-byte-vertex mesh plus a per-draw model matrix supplied through a
 //! one-instance vertex buffer.
 
-
 use glam::{IVec3, Mat4, Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
-use vox_core::{MaterialRegistry, consts::CHUNK_SIZE};
+use vox_core::{consts::CHUNK_SIZE, MaterialId, MaterialRegistry};
 use vox_mesh::{MeshData, VoxelVertex};
 
 use crate::frustum::Frustum;
@@ -44,7 +43,10 @@ struct GpuMesh {
     instance: wgpu::Buffer,
     aabb_min: Vec3,
     aabb_max: Vec3,
-    has_water: bool,
+    /// Whether this chunk's mesh contains any fluid voxels (water, muddy
+    /// water, …). Set at upload time so the water pass can skip chunks
+    /// without fluid.
+    has_fluid: bool,
     grass_vertices: Option<wgpu::Buffer>,
     grass_indices: Option<wgpu::Buffer>,
     grass_index_count: u32,
@@ -84,6 +86,8 @@ pub struct VoxelPipeline {
     bind_group: wgpu::BindGroup,
     chunks: vox_core::FxHashMap<IVec3, GpuMesh>,
     bodies: vox_core::FxHashMap<BodyMeshKey, GpuBodyMesh>,
+    /// Material ids that are fluids (for chunk-level fluid pass culling).
+    fluid_ids: Vec<u16>,
     voxel_size_m: f32,
 }
 
@@ -154,6 +158,19 @@ impl VoxelPipeline {
             contents: bytemuck::cast_slice(&pbr),
             usage: wgpu::BufferUsages::STORAGE,
         });
+
+        // Fluid material ids (water, muddy water, …) for chunk-level fluid
+        // pass culling, and the muddy-water id for the shader's is_fluid test.
+        let fluid_ids: Vec<u16> = (1..registry.len())
+            .filter_map(|i| {
+                let def = registry.get(MaterialId(i as u16))?;
+                def.fluid.then(|| i as u16)
+            })
+            .collect();
+        let muddy_water_id = registry
+            .id_by_name("muddy_water")
+            .map(|m| m.0 as u32)
+            .unwrap_or(0);
 
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("voxel camera uniform"),
@@ -289,7 +306,10 @@ impl VoxelPipeline {
         };
 
         let opaque_constants = wgpu::PipelineCompilationOptions {
-            constants: &std::collections::HashMap::from([("water_pass".into(), 0.0_f64)]),
+            constants: &std::collections::HashMap::from([
+                ("water_pass".into(), 0.0_f64),
+                ("muddy_water_id".into(), muddy_water_id as f64),
+            ]),
             ..Default::default()
         };
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -345,7 +365,10 @@ impl VoxelPipeline {
         // Depth writes disabled so translucent water doesn't occlude terrain
         // drawn in the opaque pass — it still shows through the alpha blend.
         let water_constants = wgpu::PipelineCompilationOptions {
-            constants: &std::collections::HashMap::from([("water_pass".into(), 1.0_f64)]),
+            constants: &std::collections::HashMap::from([
+                ("water_pass".into(), 1.0_f64),
+                ("muddy_water_id".into(), muddy_water_id as f64),
+            ]),
             ..Default::default()
         };
         let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -467,6 +490,7 @@ impl VoxelPipeline {
             chunks: Default::default(),
             bodies: Default::default(),
             voxel_size_m,
+            fluid_ids,
         }
     }
 
@@ -496,7 +520,7 @@ impl VoxelPipeline {
             contents: bytemuck::cast_slice(&model.to_cols_array()),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let has_water = mesh.vertices.iter().any(|v| v.material == 9);
+        let has_fluid = mesh.vertices.iter().any(|v| self.fluid_ids.contains(&v.material));
 
         let grass_vertices = if !mesh.grass_vertices.is_empty() {
             Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -513,7 +537,6 @@ impl VoxelPipeline {
             }))
         } else { None };
         let grass_index_count = mesh.grass_indices.len() as u32;
-
         self.chunks.insert(
             key,
             GpuMesh {
@@ -523,7 +546,7 @@ impl VoxelPipeline {
                 instance,
                 aabb_min: origin_m,
                 aabb_max: origin_m + Vec3::splat(chunk_extent_m),
-                has_water,
+                has_fluid,
                 grass_vertices,
                 grass_indices,
                 grass_index_count,
@@ -541,19 +564,18 @@ impl VoxelPipeline {
         self.chunks.len()
     }
 
-    /// Render all visible chunks into the shadow map via `shadow`. Called
+    /// Render all shadow-casting chunks into the shadow map via `shadow`. Called
     /// inside the shadow render pass (opened by the app with
-    /// `shadow.shadow_view()` as its depth attachment). Frustum culling
-    /// reuses the main camera frustum -- a chunk outside the view frustum is
-    /// also outside the shadow receiver region, so skipping it saves a draw
-    /// without losing visible shadows.
+    /// `shadow.shadow_view()` as its depth attachment). Culling uses the
+    /// shadow camera's orthographic frustum, not the eye frustum: off-screen
+    /// terrain can still cast a shadow into the visible scene.
     pub fn draw_chunks_shadow<'p>(
         &'p self,
         shadow: &'p ShadowPipeline,
         pass: &mut wgpu::RenderPass<'p>,
-        frustum: &Frustum,
+        shadow_frustum: &Frustum,
     ) {
-        shadow.draw_chunks(pass, &self.chunks, frustum);
+        shadow.draw_chunks(pass, &self.chunks, shadow_frustum);
     }
 
     /// Upload a debris body's mesh once at spawn. Geometry is in grid-voxel
@@ -650,7 +672,12 @@ impl VoxelPipeline {
             view_proj: view_proj.to_cols_array_2d(),
             cam_pos: Vec4::from((cam_pos, 1.0)).to_array(),
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, sun_strength],
-            fog: [fog_end_m * 0.55, fog_end_m, self.voxel_size_m, ambient_strength],
+            fog: [
+                fog_end_m * 0.55,
+                fog_end_m,
+                self.voxel_size_m,
+                ambient_strength,
+            ],
             sky_color: [sky_color.x, sky_color.y, sky_color.z, fill_strength],
             sun_color: [sun_color.x, sun_color.y, sun_color.z, game_time],
             ambient_sky: [ambient_sky.x, ambient_sky.y, ambient_sky.z, crack_intensity],
@@ -738,15 +765,11 @@ impl VoxelPipeline {
     /// Draw water-only chunk geometry (non-water fragments discarded).
     /// Alpha-blended, depth_write disabled. Call after grass/particles
     /// so they show through the translucent water.
-    pub fn draw_water<'p>(
-        &'p self,
-        pass: &mut wgpu::RenderPass<'p>,
-        frustum: &Frustum,
-    ) {
+    pub fn draw_water<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>, frustum: &Frustum) {
         pass.set_pipeline(&self.water_pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         for mesh in self.chunks.values() {
-            if !mesh.has_water {
+            if !mesh.has_fluid {
                 continue;
             }
             if !frustum.aabb_visible(mesh.aabb_min, mesh.aabb_max) {
@@ -904,8 +927,7 @@ impl ShadowPipeline {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let shadow_view = shadow_map.create_view(&wgpu::TextureViewDescriptor::default());
@@ -954,7 +976,7 @@ impl ShadowPipeline {
         });
 
         // Bind group layout for the *main* pass's shadow sampling (group 1):
-// the shadow view-proj uniform, the shadow map texture, and a sampler.
+        // the shadow view-proj uniform, the shadow map texture, and a sampler.
         let sample_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow sample bind group layout"),
             entries: &[
@@ -1070,8 +1092,14 @@ impl ShadowPipeline {
                 compilation_options: Default::default(),
                 buffers: &[vertex_layout, instance_layout],
             },
-            // No fragment: depth-only pass, no color targets.
-            fragment: None,
+            // A depth-only fragment stage discards translucent water before
+            // it can write to the shadow map.
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs",
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
@@ -1148,11 +1176,18 @@ impl ShadowPipeline {
     /// direction (from the sun toward the scene). The box spans
     /// `SHADOW_HALF_EXTENT` meters in every axis so nearby terrain is
     /// covered; far plane is placed well beyond the box depth to avoid
-    pub fn write_camera(&mut self, gpu: &Gpu, sun_dir: Vec3, focus: Vec3, voxel_size_m: f32) {
-        // `sun_dir` points TOWARD the sun. The voxel shader uses
-        // `dot(normal, sun_dir)` for lighting (surfaces facing the sun
-        // are lit). The shadow camera looks along the light-travel
-        // direction (from sun toward scene), so `light_dir = -sun_dir`.
+    /// clipping.
+    pub fn write_camera(
+        &mut self,
+        gpu: &Gpu,
+        sun_dir: Vec3,
+        focus: Vec3,
+        voxel_size_m: f32,
+    ) -> Frustum {
+        // `sun_dir` points TOWARD the sun (as day_night defines it; the
+        // voxel shader uses `-sun_dir` as the light-travel vector). The
+        // shadow camera must look along the light-travel direction, i.e.
+        // from the sun toward the scene, so `light_dir = -sun_dir`.
         let dir = sun_dir.normalize_or_zero();
         let light_dir = if dir.length_squared() < 1e-4 {
             // Degenerate fallback: a steep downward angle.
@@ -1195,6 +1230,7 @@ impl ShadowPipeline {
         gpu.queue()
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniform));
         self.last_view_proj = view_proj;
+        Frustum::from_view_proj(view_proj)
     }
 
     /// Returns the last shadow camera view-projection matrix for frustum culling.

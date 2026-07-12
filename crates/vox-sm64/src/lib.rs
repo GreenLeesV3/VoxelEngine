@@ -29,21 +29,22 @@
 //! });
 //! ```
 
+#![cfg(feature = "native")]
+
 pub mod ffi;
 mod surface;
 pub mod hud_textures;
 
-pub use surface::{voxel_surfaces_near, SurfaceProvider, SURFACE_RADIUS_M};
 pub use hud_textures::{HudTextures, HudTextureError};
 pub use ffi::{
-    ACT_FLAG_AIR, ACT_FLAG_ATTACKING, ACT_GROUND_POUND, ACT_GROUND_POUND_LAND,
-    ACT_TRIPLE_JUMP,
+    ACT_FLAG_AIR, ACT_FLAG_ATTACKING, ACT_GROUND_POUND, ACT_GROUND_POUND_LAND, ACT_TRIPLE_JUMP,
 };
+pub use surface::{SURFACE_RADIUS_M, SurfaceProvider, voxel_surfaces_near};
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use ffi::*;
-use sha1::{Sha1, Digest};
+use sha1::{Digest, Sha1};
 
 /// Error from libsm64 operations.
 #[derive(Debug)]
@@ -153,7 +154,6 @@ impl Sm64 {
             sm64_global_init(rom.as_ptr(), texture.as_mut_ptr());
         }
 
-
         tracing::info!(
             texture_w = SM64_TEXTURE_WIDTH,
             texture_h = SM64_TEXTURE_HEIGHT,
@@ -245,16 +245,8 @@ impl Mario {
 
         // SAFETY: mario_id is valid (we created it); all pointers point
         // to owned, correctly-sized buffers.
-        // Set alpha=1.0 for the full tick — this tells gfx_adapter to
-        // save the bone matrices for interpolation on subsequent frames.
         unsafe {
-            gfx_adapter_set_interp_alpha(1.0);
-            sm64_mario_tick(
-                self.id,
-                &c_inputs,
-                &mut state,
-                &mut geo_buffers,
-            );
+            sm64_mario_tick(self.id, &c_inputs, &mut state, &mut geo_buffers);
         }
 
         self.geometry.num_triangles = geo_buffers.numTrianglesUsed as usize;
@@ -274,26 +266,9 @@ impl Mario {
     }
 
     /// Read-only access to Mario's current geometry (vertices for
-    /// rendering). Updated by [`Mario::tick`] or [`Mario::render_interpolated`].
+    /// rendering). Updated by [`Mario::tick`].
     pub fn geometry(&self) -> &MarioGeometry {
         &self.geometry
-    }
-
-    /// Re-evaluate Mario's geometry at an interpolated animation state,
-    /// WITHOUT advancing the simulation. Call this on render frames
-    /// between ticks with `alpha` < 1.0 to get smooth 60/120fps
-    /// animation. The gfx_adapter blends bone matrices between the
-    /// previous tick and current tick by `alpha`.
-    ///
-    /// Must be called after at least one [`Mario::tick`] (which saves
-    /// the bone matrices). Use `alpha = 0.0` for the previous tick's
-    /// pose, `alpha = 1.0` for the current tick's pose.
-    pub fn render_interpolated(&mut self, alpha: f32) {
-        let mut geo_buffers: SM64MarioGeometryBuffers = (&mut self.geometry).into();
-        unsafe {
-            gfx_adapter_set_interp_alpha(alpha);
-            sm64_mario_render_geometry(self.id, &mut geo_buffers);
-        }
     }
 
     /// Teleport Mario to a position (in SM64 units).
@@ -383,8 +358,7 @@ pub struct MarioGeometry {
     pub uvs: Vec<[f32; 2]>,
     pub num_triangles: usize,
     /// Monotonic version stamp, incremented every time the geometry
-    /// buffers are refreshed by [`Mario::tick`] or
-    /// [`Mario::render_interpolated`]. Renderers compare it against
+    /// buffers are refreshed by [`Mario::tick`]. Renderers compare it against
     /// the last uploaded version to skip redundant `write_buffer`
     /// calls when Mario is idle and the mesh is unchanged frame-to-frame.
     pub version: u64,
@@ -476,7 +450,16 @@ impl SurfaceObject {
         // points at a valid SM64SurfaceObject whose `surfaces` pointer
         // references `owned`, alive for this entire call.
         let id = unsafe { sm64_surface_object_create(&obj) };
-        Ok(Self { id, _surfaces: owned, _marker: PhantomData })
+        tracing::debug!(
+            surface_object_id = id,
+            count = owned.len(),
+            "surface object created"
+        );
+        Ok(Self {
+            id,
+            _surfaces: owned,
+            _marker: PhantomData,
+        })
     }
 
     /// Update the surface object's transform. libsm64 rebakes the local
@@ -655,7 +638,13 @@ mod surface_object_tests {
         for i in 0..3 {
             for j in 0..3 {
                 let diff = (reconstructed.col(i)[j] - expected.col(i)[j]).abs();
-                assert!(diff < 1e-4, "mat[{j}][{i}]: recon={} expected={} diff={}", reconstructed.col(i)[j], expected.col(i)[j], diff);
+                assert!(
+                    diff < 1e-4,
+                    "mat[{j}][{i}]: recon={} expected={} diff={}",
+                    reconstructed.col(i)[j],
+                    expected.col(i)[j],
+                    diff
+                );
             }
         }
     }

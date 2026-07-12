@@ -152,3 +152,21 @@ strength = 15.0
 solid = true
 roughness = 0.25
 metalness = 1.0
+
+[[material]]
+name = "muddy_water"
+color = [0.28, 0.24, 0.18]
+jitter = 0.04
+density = 1100.0
+strength = 0.0
+solid = false
+fluid = true
+
+[[material]]
+name = "rope"
+color = [0.65, 0.50, 0.30]
+jitter = 0.06
+density = 400.0
+strength = 50.0
+solid = true
+flammable = true

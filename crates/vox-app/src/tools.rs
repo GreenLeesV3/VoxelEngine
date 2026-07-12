@@ -148,10 +148,9 @@ fn raycast_scene(
 fn hit_material(world: &World, phys: &PhysicsWorld, hit: &SceneHit) -> Voxel {
     match *hit {
         SceneHit::World(voxel) => world.get_voxel(voxel),
-        SceneHit::Body(id, local_voxel) => phys
-            .get(id)
-            .map(|b| b.grid.get(local_voxel))
-            .unwrap_or(AIR),
+        SceneHit::Body(id, local_voxel) => {
+            phys.get(id).map(|b| b.grid.get(local_voxel)).unwrap_or(AIR)
+        }
     }
 }
 
@@ -254,7 +253,8 @@ impl Tools {
     /// clamped to [`TOOL_RADIUS_MIN`]/[`TOOL_RADIUS_MAX`].
     pub fn adjust_radius(&mut self, steps: i32) {
         let radius = self.active_radius_mut();
-        *radius = (*radius + steps as f32 * TOOL_RADIUS_STEP).clamp(TOOL_RADIUS_MIN, TOOL_RADIUS_MAX);
+        *radius =
+            (*radius + steps as f32 * TOOL_RADIUS_STEP).clamp(TOOL_RADIUS_MIN, TOOL_RADIUS_MAX);
     }
 
     /// Currently selected build material.
@@ -422,7 +422,9 @@ impl Tools {
                     ..CarveOutcome::default()
                 }
             }
-            SceneHit::Body(id, _) => carve_body_sphere(phys, registry, id, hit_point_m, self.radius_m),
+            SceneHit::Body(id, _) => {
+                carve_body_sphere(phys, registry, id, hit_point_m, self.radius_m)
+            }
         };
         outcome.impact_m = Some(hit_point_m);
         outcome.impact_material = material;
@@ -450,7 +452,8 @@ impl Tools {
             Some((hit, point)) => (Some(*point), hit_material(world, phys, hit)),
             None => (None, AIR),
         };
-        let laser_result = vox_physics::laser(world, phys, registry, eye_m, end_m, DEATH_LASER_RADIUS_M);
+        let laser_result =
+            vox_physics::laser(world, phys, registry, eye_m, end_m, DEATH_LASER_RADIUS_M);
         let mut outcome = CarveOutcome {
             spawned: laser_result.spawned,
             voxel_diff: laser_result.removed,
@@ -464,8 +467,14 @@ impl Tools {
         // though most will report "nothing removed".
         let ids: Vec<BodyId> = phys.iter().map(|(id, _)| id).collect();
         for id in ids {
-            let sub =
-                vox_physics::carve_body_capsule_at(phys, registry, id, eye_m, end_m, DEATH_LASER_RADIUS_M);
+            let sub = vox_physics::carve_body_capsule_at(
+                phys,
+                registry,
+                id,
+                eye_m,
+                end_m,
+                DEATH_LASER_RADIUS_M,
+            );
             let sub_outcome = body_outcome(phys, id, sub);
             outcome.removed.extend(sub_outcome.removed);
             outcome.spawned.extend(sub_outcome.spawned);
@@ -475,7 +484,13 @@ impl Tools {
 
     /// Place the selected material against the hit face, unless it would
     /// intersect the player.
-    pub fn place_voxel(&self, world: &mut World, eye_m: Vec3, look: Vec3, player: Aabb) -> Option<(IVec3, Voxel)> {
+    pub fn place_voxel(
+        &self,
+        world: &mut World,
+        eye_m: Vec3,
+        look: Vec3,
+        player: Aabb,
+    ) -> Option<(IVec3, Voxel)> {
         let Some(hit) = raycast(world, eye_m, look, REACH) else {
             return None;
         };
@@ -875,10 +890,22 @@ mod tests {
         let eye = pos + Vec3::new(-3.0, 0.0, 0.0);
         let outcome = tools.dig(&mut world, &mut phys, &reg, eye, Vec3::X);
 
-        assert_eq!(outcome.removed, vec![id], "the original body must be reported removed");
-        assert_eq!(outcome.spawned.len(), 1, "chipping one voxel must not split a 6^3 cube");
+        assert_eq!(
+            outcome.removed,
+            vec![id],
+            "the original body must be reported removed"
+        );
+        assert_eq!(
+            outcome.spawned.len(),
+            1,
+            "chipping one voxel must not split a 6^3 cube"
+        );
         let remaining = phys.get(outcome.spawned[0]).unwrap().grid.solid_count();
-        assert_eq!(remaining, original_count - 1, "must have removed exactly one voxel");
+        assert_eq!(
+            remaining,
+            original_count - 1,
+            "must have removed exactly one voxel"
+        );
     }
 
     /// Bomb hitting debris must despawn the original and give the resulting
@@ -902,10 +929,16 @@ mod tests {
         let outcome = tools.blast(&mut world, &mut phys, &reg, eye, Vec3::X, 40.0, 1);
 
         assert_eq!(outcome.removed, vec![id]);
-        assert!(!outcome.spawned.is_empty(), "must produce at least one fragment");
+        assert!(
+            !outcome.spawned.is_empty(),
+            "must produce at least one fragment"
+        );
         for &fid in &outcome.spawned {
             let f = phys.get(fid).unwrap();
-            assert!(f.vel.length() > 0.1, "bomb must impart velocity to debris fragments too");
+            assert!(
+                f.vel.length() > 0.1,
+                "bomb must impart velocity to debris fragments too"
+            );
         }
     }
 
@@ -928,7 +961,10 @@ mod tests {
         let eye = pos + Vec3::new(-20.0, 0.0, 0.0);
         let outcome = tools.death_laser(&mut world, &mut phys, &reg, eye, Vec3::X);
 
-        assert!(outcome.removed.contains(&id), "the beam must reach the debris body");
+        assert!(
+            outcome.removed.contains(&id),
+            "the beam must reach the debris body"
+        );
     }
 
     fn registry_with_tree_materials() -> MaterialRegistry {
@@ -1063,7 +1099,10 @@ mod tests {
 
     fn solid_table_for(reg: &MaterialRegistry) -> Vec<bool> {
         (0..reg.len())
-            .map(|i| reg.get(vox_core::MaterialId(i as u16)).is_some_and(|d| d.solid))
+            .map(|i| {
+                reg.get(vox_core::MaterialId(i as u16))
+                    .is_some_and(|d| d.solid)
+            })
             .collect()
     }
 
@@ -1103,8 +1142,16 @@ mod tests {
             Vec3::X,
         );
 
-        assert_eq!(world.get_voxel(hit_voxel), stone, "water must not overwrite the struck terrain voxel");
-        assert_eq!(world.get_voxel(target), water, "water must begin on the hit face's adjacent air voxel");
+        assert_eq!(
+            world.get_voxel(hit_voxel),
+            stone,
+            "water must not overwrite the struck terrain voxel"
+        );
+        assert_eq!(
+            world.get_voxel(target),
+            water,
+            "water must begin on the hit face's adjacent air voxel"
+        );
     }
 
     #[test]
@@ -1121,9 +1168,18 @@ mod tests {
 
         let mut sim = vox_sim::FluidSim::new(water_voxel(&reg));
         let tools = Tools::new(&reg);
-        tools.place_water(&mut world, &mut sim, &reg, Vec3::new(16.0, 15.0, 16.0), Vec3::new(0.0, -1.0, 0.0));
+        tools.place_water(
+            &mut world,
+            &mut sim,
+            &reg,
+            Vec3::new(16.0, 15.0, 16.0),
+            Vec3::new(0.0, -1.0, 0.0),
+        );
 
-        assert!(sim.active_count() > 0, "placing water must activate at least one cell");
+        assert!(
+            sim.active_count() > 0,
+            "placing water must activate at least one cell"
+        );
     }
 
     /// True if any voxel in the half-open box `[min, max)` holds `water`.
@@ -1184,7 +1240,10 @@ mod tests {
         // every wall, so it starts out fully confined by construction, not
         // by luck.
         sim.place_blob(&mut world, IVec3::new(15, 10, 15), 3, water);
-        assert!(sim.active_count() > 0, "placing the blob must activate cells");
+        assert!(
+            sim.active_count() > 0,
+            "placing the blob must activate cells"
+        );
 
         let basin_interior = (IVec3::new(10, 5, 10), IVec3::new(20, 15, 20));
         assert!(
@@ -1225,7 +1284,11 @@ mod tests {
         // way out. Just confirm the settled lake actually reaches the wall
         // that's about to be breached.
         let spillway = IVec3::new(10, 5, 15);
-        assert_eq!(world.get_voxel(spillway), water, "the settled lake must cover the spillway floor cell");
+        assert_eq!(
+            world.get_voxel(spillway),
+            water,
+            "the settled lake must cover the spillway floor cell"
+        );
 
         // Model the real frame-loop handoff precisely: discard all old
         // regions, make the two terrain edits, then wake from exactly the
@@ -1234,10 +1297,18 @@ mod tests {
         // of the basin rather than relying on an unphysical flat random walk.
         world.drain_dirty_regions();
         let breach = IVec3::new(9, 5, 15);
-        assert_eq!(world.get_voxel(breach), stone_id(&reg), "sanity: the breach point must start as a real wall");
+        assert_eq!(
+            world.get_voxel(breach),
+            stone_id(&reg),
+            "sanity: the breach point must start as a real wall"
+        );
         world.set_voxel(breach, AIR);
         let downhill = IVec3::new(8, 4, 15);
-        assert_eq!(world.get_voxel(downhill), stone_id(&reg), "sanity: the spillway must begin with solid terrain below it");
+        assert_eq!(
+            world.get_voxel(downhill),
+            stone_id(&reg),
+            "sanity: the spillway must begin with solid terrain below it"
+        );
         world.set_voxel(downhill, AIR);
         for (min, max) in world.drain_dirty_regions() {
             sim.wake_region(&world, min, max);
@@ -1320,6 +1391,14 @@ mod tests {
             strength = 0.0
             solid = false
             fluid = true
+ 
+            [[material]]
+            name = "muddy_water"
+            color = [0.30, 0.22, 0.16]
+            density = 1100.0
+            strength = 0.0
+            solid = false
+            fluid = true
             "#,
             "test_weathering.toml",
         )
@@ -1352,7 +1431,11 @@ mod tests {
         let (_, max) = world.bounds_voxels();
 
         // Solid stone floor, grass top layer.
-        world.fill_box(IVec3::ZERO, IVec3::new(max.x, 5, max.z), voxel_by_name(&reg, "stone"));
+        world.fill_box(
+            IVec3::ZERO,
+            IVec3::new(max.x, 5, max.z),
+            voxel_by_name(&reg, "stone"),
+        );
         world.fill_box(IVec3::new(0, 4, 0), IVec3::new(max.x, 5, max.z), grass);
 
         // Build the weathering table from the registry exactly like main.rs.
@@ -1363,8 +1446,12 @@ mod tests {
             dirt: voxel_by_name(&reg, "dirt"),
             mud,
             sand: voxel_by_name(&reg, "sand"),
+            muddy_water: voxel_by_name(&reg, "muddy_water"),
         };
-        let mut sim = FluidSim::with_powders(water, vec![voxel_by_name(&reg, "mud"), voxel_by_name(&reg, "sand")]);
+        let mut sim = FluidSim::with_powders(
+            water,
+            vec![voxel_by_name(&reg, "mud"), voxel_by_name(&reg, "sand")],
+        );
         let mut weathering = vox_sim::Weathering::new(table);
 
         // Place a small pool and run the loop the way the frame loop does:
@@ -1393,7 +1480,10 @@ mod tests {
                 break;
             }
         }
-        assert!(found_mud, "the pool's grass bed must turn to mud within the soak budget");
+        assert!(
+            found_mud,
+            "the pool's grass bed must turn to mud within the soak budget"
+        );
     }
 
     /// Sand placed in midair must fall, pile on the floor, and settle --
@@ -1444,7 +1534,10 @@ mod tests {
                 }
             }
         }
-        assert!(near_floor, "sand must pile on the floor, not stay suspended");
+        assert!(
+            near_floor,
+            "sand must pile on the floor, not stay suspended"
+        );
     }
 
     fn count_material(world: &World, v: Voxel) -> usize {

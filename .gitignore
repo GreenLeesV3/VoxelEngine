@@ -14,3 +14,14 @@ roms/*.v64
 CazToon_extracted/
 CazToon_1.2.5.zip
 pointblank_decompiled/
+
+# Weapon assets — local prototyping only, never committed
+assets/weapons/*.glb
+assets/weapons/*.gltf
+assets/weapons/*.fbx
+assets/weapons/*.blend
+assets/weapons/*.obj
+assets/weapons/*.mdl
+assets/weapons/*.png
+assets/weapons/*.jpg
+assets/models/

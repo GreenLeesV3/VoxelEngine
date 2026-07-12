@@ -138,7 +138,11 @@ mod tests {
         let second = bp.candidate_pairs(&slots).to_vec();
 
         assert_eq!(first, second);
-        assert_eq!(first, vec![(0, 1)], "only the two overlapping cubes must pair up");
+        assert_eq!(
+            first,
+            vec![(0, 1)],
+            "only the two overlapping cubes must pair up"
+        );
     }
 
     #[test]

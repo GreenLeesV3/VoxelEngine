@@ -20,6 +20,11 @@ pub struct VoxelSlab {
     pub inner_dims: IVec3,
     /// Padded contents, `(inner_dims + 2)` per axis, x-major rows.
     data: Vec<Voxel>,
+    /// Per-voxel damage, 0.0 (pristine) to 1.0 (crumbled). Parallel to the
+    /// original grid's voxels (same `x + z*dx + y*dx*dz` indexing), NOT the
+    /// padded slab data. Empty for chunk slabs and undamaged bodies -- when
+    /// empty, `mesh_slab` skips damage darkening entirely.
+    damage: Vec<f32>,
 }
 
 impl VoxelSlab {
@@ -96,6 +101,19 @@ impl VoxelSlab {
         slab
     }
 
+    /// Like [`from_grid`](Self::from_grid) but attaches a per-voxel damage
+    /// vector. `damage` is parallel to `data` (same `x + z*dx + y*dx*dz`
+    /// indexing, same length). When present and non-empty, `mesh_slab`
+    /// darkens each damaged voxel's AO to visually convey progressive
+    /// damage. Pass an empty vec (or use `from_grid`) when there is no
+    /// damage -- `mesh_slab` then skips the darkening pass entirely.
+    pub fn from_grid_with_damage(dims: IVec3, data: &[Voxel], damage: &[f32]) -> Self {
+        debug_assert_eq!(damage.len(), data.len());
+        let mut slab = Self::from_grid(dims, data);
+        slab.damage = damage.to_vec();
+        slab
+    }
+
     /// An all-`fill` slab (shell included).
     fn filled(inner_min: IVec3, inner_dims: IVec3, fill: Voxel) -> Self {
         assert!(
@@ -109,6 +127,7 @@ impl VoxelSlab {
             inner_min,
             inner_dims,
             data: vec![fill; len],
+            damage: Vec::new(),
         }
     }
 
@@ -141,15 +160,30 @@ impl VoxelSlab {
         self.get(rel) != AIR
     }
 
-    /// Like [`solid`](Self::solid) but treats water (material 9) as
-    /// non-solid. Used for face culling so that faces between solid
-    /// terrain and water ARE generated (visible through translucent water),
-    /// while faces between water and water, or between two solid voxels,
-    /// are still culled.
+    /// Like [`solid`](Self::solid) but treats fluid materials as non-solid.
+    /// Used for face culling so that faces between solid terrain and fluid
+    /// ARE generated (visible through translucent fluid), while faces between
+    /// fluid and fluid, or between two solid voxels, are still culled.
     #[inline]
-    pub fn opaque(&self, rel: IVec3) -> bool {
+    pub fn opaque(&self, rel: IVec3, fluids: &[Voxel]) -> bool {
         let v = self.get(rel);
-        v != AIR && v != vox_world::Voxel(9)
+        v != AIR && !fluids.contains(&v)
+    }
+
+    /// Per-voxel damage at inner-grid position `rel` (each axis
+    /// `0..inner_dims`). Returns 0.0 when no damage vector is attached
+    /// (chunk slabs, undamaged bodies) or when `rel` is out of bounds.
+    #[inline]
+    pub fn damage_at(&self, rel: IVec3) -> f32 {
+        if self.damage.is_empty() {
+            return 0.0;
+        }
+        if rel.cmpge(IVec3::ZERO).all() && rel.cmplt(self.inner_dims).all() {
+            let idx = (rel.x + rel.z * self.inner_dims.x + rel.y * self.inner_dims.x * self.inner_dims.z) as usize;
+            self.damage[idx]
+        } else {
+            0.0
+        }
     }
 }
 

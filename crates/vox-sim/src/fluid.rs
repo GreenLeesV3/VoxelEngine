@@ -3,7 +3,7 @@
 
 use glam::IVec3;
 use vox_core::{FxHashMap, FxHashSet};
-use vox_world::{AIR, SolidLookup, Voxel, World};
+use vox_world::{AIR, Voxel, World};
 
 const NEIGHBORS_6: [IVec3; 6] = [
     IVec3::new(1, 0, 0),
@@ -13,7 +13,6 @@ const NEIGHBORS_6: [IVec3; 6] = [
     IVec3::new(0, 0, 1),
     IVec3::new(0, 0, -1),
 ];
-
 
 /// How far sideways a blocked cell searches for a reachable drop (an open
 /// cell with air beneath it) before giving up and settling. Larger values
@@ -51,10 +50,11 @@ pub struct FluidSim {
     /// tick. Rebuilt every tick alongside the active set -- empty whenever
     /// the water sleeps, so settled cost is still zero.
     momentum: FxHashMap<IVec3, IVec3>,
-    /// The single voxel material this sim treats as water. Set once at
-    /// construction -- never inferred from the active set (see `tick` and
-    /// `wake_region` doc comments for why inference was fragile).
-    water: Voxel,
+    /// All voxel materials this sim treats as fluids (water, muddy_water, ...).
+    /// Each flows with the full CA rule. Set once at construction -- never
+    /// inferred from the active set. A single entry reproduces the original
+    /// single-water behavior exactly.
+    fluids: Vec<Voxel>,
     /// Materials this sim treats as powders (fall + diagonal slide, no
     /// spreading). Empty if the asset set defines no powders -- the sim
     /// behaves as water-only. Set once at construction.
@@ -70,7 +70,7 @@ pub struct FluidSim {
 
 impl FluidSim {
     pub fn new(water: Voxel) -> Self {
-        Self::with_powders(water, Vec::new())
+        Self::with_fluids_and_powders(vec![water], Vec::new())
     }
 
     /// Create a sim that also handles the given powder materials. Water
@@ -78,10 +78,16 @@ impl FluidSim {
     /// `step_powder` (fall + diagonal slide only). One active set, one tick
     /// loop -- the material at each cell determines which rule applies.
     pub fn with_powders(water: Voxel, powders: Vec<Voxel>) -> Self {
+        Self::with_fluids_and_powders(vec![water], powders)
+    }
+
+    /// Create a sim handling multiple fluid materials and powder materials.
+    /// Each fluid flows with the full CA rule; each powder falls and piles.
+    pub fn with_fluids_and_powders(fluids: Vec<Voxel>, powders: Vec<Voxel>) -> Self {
         Self {
             active: FxHashSet::default(),
             momentum: FxHashMap::default(),
-            water,
+            fluids,
             powders,
             rng: 0x9E37_79B9_7F4A_7C15,
             events: Vec::new(),
@@ -93,9 +99,14 @@ impl FluidSim {
         std::mem::take(&mut self.events)
     }
 
-    /// Whether `v` is a material this sim handles (water or a powder).
+    /// Whether `v` is a fluid material this sim handles.
+    fn is_fluid(&self, v: Voxel) -> bool {
+        self.fluids.contains(&v)
+    }
+
+    /// Whether `v` is a material this sim handles (fluid or a powder).
     fn is_simmed(&self, v: Voxel) -> bool {
-        v == self.water || self.powders.contains(&v)
+        self.is_fluid(v) || self.powders.contains(&v)
     }
 
     /// Whether `v` is a powder material this sim handles.
@@ -144,7 +155,8 @@ impl FluidSim {
                 return None;
             }
             let d = v - center;
-            let dist2 = (d.x as i64 * d.x as i64) + (d.y as i64 * d.y as i64) + (d.z as i64 * d.z as i64);
+            let dist2 =
+                (d.x as i64 * d.x as i64) + (d.y as i64 * d.y as i64) + (d.z as i64 * d.z as i64);
             if dist2 > r2 {
                 return None;
             }
@@ -162,7 +174,8 @@ impl FluidSim {
     /// propagation pass needed.
     pub fn tick(&mut self, world: &mut World) -> usize {
         self.events.clear();
-        let water = self.water;
+        let fluids = self.fluids.clone();
+        let is_fluid = |v: Voxel| fluids.contains(&v);
 
         // Snapshot exactly the positions that hold a simmed material *before*
         // any mutation this tick, and process only those. A live re-check
@@ -195,37 +208,28 @@ impl FluidSim {
         let processed = cells.len();
 
         for pos in cells {
+            let v = world.get_voxel(pos);
+            let is_powder = self.is_powder(v);
             let coin = self.next_u64() & 1 == 0;
             let coin2 = self.next_u64() & 1 == 0;
-            let (v, is_powder, dest) = {
-                // SolidLookup caches the last-queried chunk for O(1) repeat
-                // access, turning per-voxel hash-map lookups into array
-                // reads.  Two instances because `is_open` and `is_supported`
-                // are passed to step_cell_with_momentum simultaneously and
-                // each closure needs exclusive &mut access to its cache.
-                let mut lk_open = SolidLookup::new(world);
-                let mut lk_solid = SolidLookup::new(world);
-                let v = lk_open.get_voxel(pos);
-                let is_powder = self.is_powder(v);
-                let mut is_open =
-                    |p: IVec3| world.in_bounds(p) && lk_open.get_voxel(p) == AIR;
+            let dest = {
+                let mut is_open = |p: IVec3| world.in_bounds(p) && world.get_voxel(p) == AIR;
                 if is_powder {
-                    (v, is_powder, step_powder(pos, &mut is_open, coin, coin2))
+                    step_powder(pos, &mut is_open, coin, coin2)
                 } else {
-                    let has_water_above = lk_solid.get_voxel(pos + IVec3::Y) == water;
                     let mut is_supported = |p: IVec3| {
-                        world.in_bounds(p)
-                            && (lk_solid.solid(p) || lk_solid.get_voxel(p) == water)
+                        world.in_bounds(p) && (world.solid(p) || is_fluid(world.get_voxel(p)))
                     };
-                    (v, is_powder, step_cell_with_momentum(
+                    let has_fluid_above = is_fluid(world.get_voxel(pos + IVec3::Y));
+                    step_cell_with_momentum(
                         pos,
                         &mut is_open,
                         &mut is_supported,
-                        has_water_above,
+                        has_fluid_above,
                         coin,
                         coin2,
                         self.momentum.get(&pos).copied(),
-                    ))
+                    )
                 }
             };
             if let Some(dest) = dest {
@@ -256,15 +260,14 @@ impl FluidSim {
                 // snapshot, moving its support out from under it must give
                 // it another turn next tick. Water wakes water; powder
                 // wakes powder -- they don't recruit each other.
-                let mut lk_wake = SolidLookup::new(world);
                 for changed in [pos, dest] {
                     for n in NEIGHBORS_6 {
                         let neighbor = changed + n;
-                        let nv = lk_wake.get_voxel(neighbor);
+                        let nv = world.get_voxel(neighbor);
                         if self.is_simmed(nv) {
                             next_active.insert(neighbor);
                             // Only water inherits momentum.
-                            if !is_powder && nv == water {
+                            if !is_powder && is_fluid(nv) {
                                 let hdir = IVec3::new(dest.x - pos.x, 0, dest.z - pos.z);
                                 let carried = if hdir != IVec3::ZERO {
                                     Some(hdir)
@@ -318,19 +321,27 @@ fn step_cell(
     pos: IVec3,
     is_open: &mut impl FnMut(IVec3) -> bool,
     is_supported: &mut impl FnMut(IVec3) -> bool,
-    has_water_above: bool,
+    has_fluid_above: bool,
     coin: bool,
     coin2: bool,
 ) -> Option<IVec3> {
-    step_cell_with_momentum(pos, is_open, is_supported, has_water_above, coin, coin2, None)
+    step_cell_with_momentum(
+        pos,
+        is_open,
+        is_supported,
+        has_fluid_above,
+        coin,
+        coin2,
+        None,
+    )
 }
 
-/// Where a water cell at `pos` wants to move this tick, or `None` if it has
+/// Where a fluid cell at `pos` wants to move this tick, or `None` if it has
 /// nowhere to go (should settle). `is_open` reports whether a cell can be
 /// flowed into: empty (air) and in-bounds. Order of preference: straight
 /// down, then diagonal-down (randomized left/right), then one step toward
 /// the first drop reachable within `FLOW_HORIZON` cells sideways, then
-/// pressure-gated sideways leveling onto supported terrain or water
+/// pressure-gated sideways leveling onto supported terrain or fluid
 /// (randomized left/right, then front/back) -- see the design doc §4 for
 /// why this shape and not fractional pressure levels.
 ///
@@ -343,7 +354,7 @@ fn step_cell_with_momentum(
     pos: IVec3,
     is_open: &mut impl FnMut(IVec3) -> bool,
     is_supported: &mut impl FnMut(IVec3) -> bool,
-    has_water_above: bool,
+    has_fluid_above: bool,
     coin: bool,
     coin2: bool,
     momentum: Option<IVec3>,
@@ -355,14 +366,26 @@ fn step_cell_with_momentum(
 
     // Diagonal fall: momentum's axis components first, then the coin order.
     let m = momentum.unwrap_or(IVec3::ZERO);
-    let (dx1, dx2) = if m.x != 0 { (m.x, -m.x) } else if coin { (1, -1) } else { (-1, 1) };
+    let (dx1, dx2) = if m.x != 0 {
+        (m.x, -m.x)
+    } else if coin {
+        (1, -1)
+    } else {
+        (-1, 1)
+    };
     for dx in [dx1, dx2] {
         let diag = pos + IVec3::new(dx, -1, 0);
         if is_open(diag) {
             return Some(diag);
         }
     }
-    let (dz1, dz2) = if m.z != 0 { (m.z, -m.z) } else if coin2 { (1, -1) } else { (-1, 1) };
+    let (dz1, dz2) = if m.z != 0 {
+        (m.z, -m.z)
+    } else if coin2 {
+        (1, -1)
+    } else {
+        (-1, 1)
+    };
     for dz in [dz1, dz2] {
         let diag = pos + IVec3::new(0, -1, dz);
         if is_open(diag) {
@@ -386,7 +409,9 @@ fn step_cell_with_momentum(
     // lower destination is reachable, so a flat sheet or a full basin still
     // has nowhere to go and sleeps.
     let dirs = flow_dirs(coin, coin2);
-    let ordered = momentum.into_iter().chain(dirs.into_iter().filter(|&d| Some(d) != momentum));
+    let ordered = momentum
+        .into_iter()
+        .chain(dirs.into_iter().filter(|&d| Some(d) != momentum));
     for dir in ordered {
         for k in 1..=FLOW_HORIZON {
             let q = pos + dir * k;
@@ -402,21 +427,33 @@ fn step_cell_with_momentum(
     // A full/empty grid cannot represent a fractional, one-cell-deep water
     // surface. Letting an unpressurized surface cell trade places with any
     // equally-high air cell makes a partially filled puddle random-walk
-    // forever. Require water directly above the source, and support below
+    // forever. Require fluid directly above the source, and support below
     // the destination, so a stack can level across a shorter neighboring
-    // water column while a shallow resting surface can sleep instead of
+    // fluid column while a shallow resting surface can sleep instead of
     // shuffling indefinitely.
-    if !has_water_above {
+    if !has_fluid_above {
         return None;
     }
-    let (sx1, sx2) = if m.x != 0 { (m.x, -m.x) } else if coin { (1, -1) } else { (-1, 1) };
+    let (sx1, sx2) = if m.x != 0 {
+        (m.x, -m.x)
+    } else if coin {
+        (1, -1)
+    } else {
+        (-1, 1)
+    };
     for dx in [sx1, sx2] {
         let side = pos + IVec3::new(dx, 0, 0);
         if is_open(side) && is_supported(side + IVec3::NEG_Y) {
             return Some(side);
         }
     }
-    let (sz1, sz2) = if m.z != 0 { (m.z, -m.z) } else if coin2 { (1, -1) } else { (-1, 1) };
+    let (sz1, sz2) = if m.z != 0 {
+        (m.z, -m.z)
+    } else if coin2 {
+        (1, -1)
+    } else {
+        (-1, 1)
+    };
     for dz in [sz1, sz2] {
         let side = pos + IVec3::new(0, 0, dz);
         if is_open(side) && is_supported(side + IVec3::NEG_Y) {
@@ -463,8 +500,16 @@ fn step_powder(
 /// within each group, `coin2` picks which axis/diagonal pair leads -- same
 /// de-biasing role the coins already play in the fall/spread rules.
 fn flow_dirs(coin: bool, coin2: bool) -> [IVec3; 8] {
-    let (x1, x2) = if coin { (IVec3::X, IVec3::NEG_X) } else { (IVec3::NEG_X, IVec3::X) };
-    let (z1, z2) = if coin { (IVec3::Z, IVec3::NEG_Z) } else { (IVec3::NEG_Z, IVec3::Z) };
+    let (x1, x2) = if coin {
+        (IVec3::X, IVec3::NEG_X)
+    } else {
+        (IVec3::NEG_X, IVec3::X)
+    };
+    let (z1, z2) = if coin {
+        (IVec3::Z, IVec3::NEG_Z)
+    } else {
+        (IVec3::NEG_Z, IVec3::Z)
+    };
     let (d1, d2) = if coin {
         (IVec3::new(1, 0, 1), IVec3::new(-1, 0, -1))
     } else {
@@ -475,7 +520,11 @@ fn flow_dirs(coin: bool, coin2: bool) -> [IVec3; 8] {
     } else {
         (IVec3::new(-1, 0, 1), IVec3::new(1, 0, -1))
     };
-    if coin2 { [x1, x2, z1, z2, d1, d2, d3, d4] } else { [z1, z2, x1, x2, d3, d4, d1, d2] }
+    if coin2 {
+        [x1, x2, z1, z2, d1, d2, d3, d4]
+    } else {
+        [z1, z2, x1, x2, d3, d4, d1, d2]
+    }
 }
 
 #[cfg(test)]
@@ -542,8 +591,16 @@ mod tests {
         for _ in 0..5 {
             sim.tick(&mut world);
         }
-        assert_eq!(world.get_voxel(IVec3::new(8, 10, 8)), AIR, "must have left the start cell");
-        assert_eq!(world.get_voxel(IVec3::new(8, 5, 8)), WATER, "must have fallen to the floor at y=5");
+        assert_eq!(
+            world.get_voxel(IVec3::new(8, 10, 8)),
+            AIR,
+            "must have left the start cell"
+        );
+        assert_eq!(
+            world.get_voxel(IVec3::new(8, 5, 8)),
+            WATER,
+            "must have fallen to the floor at y=5"
+        );
     }
 
     #[test]
@@ -555,7 +612,11 @@ mod tests {
         sim.tick(&mut world);
 
         assert_eq!(world.get_voxel(IVec3::new(8, 5, 8)), WATER);
-        assert_eq!(sim.active_count(), 1, "only the moved water cell should remain active");
+        assert_eq!(
+            sim.active_count(),
+            1,
+            "only the moved water cell should remain active"
+        );
     }
 
     #[test]
@@ -565,7 +626,11 @@ mod tests {
         let mut sim = FluidSim::new(WATER);
         sim.place_blob(&mut world, center, 0, WATER);
         sim.tick(&mut world);
-        assert_eq!(sim.active_count(), 0, "a shallow cell on solid ground must sleep");
+        assert_eq!(
+            sim.active_count(),
+            0,
+            "a shallow cell on solid ground must sleep"
+        );
     }
 
     #[test]
@@ -578,7 +643,10 @@ mod tests {
         assert_eq!(sim.active_count(), 0, "must have settled first");
 
         sim.wake_region(&world, IVec3::new(7, 4, 7), IVec3::new(10, 6, 10));
-        assert!(sim.active_count() > 0, "water inside the woken region must reactivate");
+        assert!(
+            sim.active_count() > 0,
+            "water inside the woken region must reactivate"
+        );
     }
 
     #[test]
@@ -602,7 +670,10 @@ mod tests {
             sim.wake_region(&world, min, max);
         }
 
-        assert!(sim.active_count() > 0, "an adjacent water cell must wake for an exact dirty region");
+        assert!(
+            sim.active_count() > 0,
+            "an adjacent water cell must wake for an exact dirty region"
+        );
     }
 
     #[test]
@@ -615,7 +686,11 @@ mod tests {
         assert_eq!(sim.active_count(), 0, "must have settled first");
 
         sim.wake_region(&world, IVec3::new(0, 0, 0), IVec3::new(2, 2, 2)); // nowhere near the water
-        assert_eq!(sim.active_count(), 0, "an unrelated edit must not wake distant settled water");
+        assert_eq!(
+            sim.active_count(),
+            0,
+            "an unrelated edit must not wake distant settled water"
+        );
     }
 
     #[test]
@@ -628,10 +703,18 @@ mod tests {
         for _ in 0..40 {
             sim.tick(&mut world);
         }
-        let neighbor_has_water = [IVec3::new(7, 5, 8), IVec3::new(9, 5, 8), IVec3::new(8, 5, 7), IVec3::new(8, 5, 9)]
-            .iter()
-            .any(|&p| world.get_voxel(p) == WATER);
-        assert!(neighbor_has_water, "water must spread onto at least one flat neighbor over 40 ticks");
+        let neighbor_has_water = [
+            IVec3::new(7, 5, 8),
+            IVec3::new(9, 5, 8),
+            IVec3::new(8, 5, 7),
+            IVec3::new(8, 5, 9),
+        ]
+        .iter()
+        .any(|&p| world.get_voxel(p) == WATER);
+        assert!(
+            neighbor_has_water,
+            "water must spread onto at least one flat neighbor over 40 ticks"
+        );
     }
 
     #[test]
@@ -674,7 +757,11 @@ mod tests {
             IVec3::new(8, 5, 8),
             IVec3::new(8, 6, 8),
         ] {
-            assert_eq!(world.get_voxel(p), WATER, "the two columns must level to height two");
+            assert_eq!(
+                world.get_voxel(p),
+                WATER,
+                "the two columns must level to height two"
+            );
         }
         assert_eq!(sim.active_count(), 0, "the leveled surface must sleep");
     }
@@ -707,7 +794,11 @@ mod tests {
         }
 
         assert_eq!(sim.active_count(), 0, "the spread sheet must sleep");
-        assert_eq!(count_water(&world), before, "flattening must conserve water");
+        assert_eq!(
+            count_water(&world),
+            before,
+            "flattening must conserve water"
+        );
         let (min, max) = world.bounds_voxels();
         for x in min.x..max.x {
             for y in min.y..max.y {
@@ -745,7 +836,10 @@ mod tests {
         let mut sim = FluidSim::new(WATER);
         sim.place_blob(&mut world, IVec3::new(8, 9, 8), 3, WATER);
         let before = count_water(&world);
-        assert!(before > 64, "the test needs more water than one basin layer holds");
+        assert!(
+            before > 64,
+            "the test needs more water than one basin layer holds"
+        );
 
         for _ in 0..300 {
             sim.tick(&mut world);
@@ -754,8 +848,16 @@ mod tests {
             }
         }
 
-        assert_eq!(sim.active_count(), 0, "a partially filled basin must eventually sleep");
-        assert_eq!(count_water(&world), before, "settling must conserve water cells");
+        assert_eq!(
+            sim.active_count(),
+            0,
+            "a partially filled basin must eventually sleep"
+        );
+        assert_eq!(
+            count_water(&world),
+            before,
+            "settling must conserve water cells"
+        );
     }
 
     #[test]
@@ -768,7 +870,10 @@ mod tests {
             sim.tick(&mut world);
         }
         let after = count_water(&world);
-        assert_eq!(before, after, "moving water must never create or destroy cells");
+        assert_eq!(
+            before, after,
+            "moving water must never create or destroy cells"
+        );
     }
 
     #[test]
@@ -858,8 +963,14 @@ mod tests {
         // regardless of voxel_size_m, since nothing in step_cell reads it.
         let a = run(0.1);
         let b = run(1.0);
-        assert!(!a.is_empty(), "the single cell must still exist somewhere after 40 ticks");
-        assert_eq!(a, b, "grid-space behavior must not depend on voxel_size_m: {a:?} vs {b:?}");
+        assert!(
+            !a.is_empty(),
+            "the single cell must still exist somewhere after 40 ticks"
+        );
+        assert_eq!(
+            a, b,
+            "grid-space behavior must not depend on voxel_size_m: {a:?} vs {b:?}"
+        );
     }
 
     #[test]
@@ -886,17 +997,30 @@ mod tests {
         // what the coins say.
         let pos = IVec3::new(8, 6, 8);
         let open = [
-            IVec3::new(9, 6, 8), IVec3::new(10, 6, 8), IVec3::new(10, 5, 8), // +X run
-            IVec3::new(7, 6, 8), IVec3::new(6, 6, 8), IVec3::new(6, 5, 8),   // -X run
+            IVec3::new(9, 6, 8),
+            IVec3::new(10, 6, 8),
+            IVec3::new(10, 5, 8), // +X run
+            IVec3::new(7, 6, 8),
+            IVec3::new(6, 6, 8),
+            IVec3::new(6, 5, 8), // -X run
         ];
         for coins in [(false, false), (true, false), (false, true), (true, true)] {
             let mut is_open = |p: IVec3| open.contains(&p);
             let mut is_supported = |_: IVec3| true;
             let dest = step_cell_with_momentum(
-                pos, &mut is_open, &mut is_supported, false, coins.0, coins.1,
+                pos,
+                &mut is_open,
+                &mut is_supported,
+                false,
+                coins.0,
+                coins.1,
                 Some(IVec3::NEG_X),
             );
-            assert_eq!(dest, Some(IVec3::new(7, 6, 8)), "momentum -X must win for coins {coins:?}");
+            assert_eq!(
+                dest,
+                Some(IVec3::new(7, 6, 8)),
+                "momentum -X must win for coins {coins:?}"
+            );
         }
     }
 
@@ -912,7 +1036,11 @@ mod tests {
             }
         }
         assert_eq!(sim.active_count(), 0, "blob must settle");
-        assert_eq!(sim.momentum_count(), 0, "settled water must carry no momentum state");
+        assert_eq!(
+            sim.momentum_count(),
+            0,
+            "settled water must carry no momentum state"
+        );
     }
 
     #[test]
@@ -922,14 +1050,23 @@ mod tests {
         sim.place_blob(&mut world, IVec3::new(8, 7, 8), 0, WATER); // 2 above floor
         sim.tick(&mut world);
         let ev = sim.drain_events();
-        assert!(ev.contains(&ContactEvent::Vacated(IVec3::new(8, 7, 8))), "leaving a cell must emit Vacated: {ev:?}");
-        assert!(ev.contains(&ContactEvent::Fell(IVec3::new(8, 6, 8))), "a downward arrival must emit Fell: {ev:?}");
+        assert!(
+            ev.contains(&ContactEvent::Vacated(IVec3::new(8, 7, 8))),
+            "leaving a cell must emit Vacated: {ev:?}"
+        );
+        assert!(
+            ev.contains(&ContactEvent::Fell(IVec3::new(8, 6, 8))),
+            "a downward arrival must emit Fell: {ev:?}"
+        );
 
         sim.tick(&mut world); // lands on floor -> second Fell
         sim.drain_events();
         sim.tick(&mut world); // nowhere to go -> settles
         let ev = sim.drain_events();
-        assert!(ev.contains(&ContactEvent::Settled(IVec3::new(8, 5, 8))), "settling must emit Settled: {ev:?}");
+        assert!(
+            ev.contains(&ContactEvent::Settled(IVec3::new(8, 5, 8))),
+            "settling must emit Settled: {ev:?}"
+        );
     }
 
     #[test]
@@ -982,8 +1119,16 @@ mod tests {
             sim.tick(&mut world);
         }
         assert_eq!(sim.active_count(), 0, "powder must settle on the floor");
-        assert_eq!(world.get_voxel(IVec3::new(8, 5, 8)), POWDER, "powder must rest on the floor");
-        assert_eq!(world.get_voxel(IVec3::new(8, 6, 8)), AIR, "nothing above the resting powder");
+        assert_eq!(
+            world.get_voxel(IVec3::new(8, 5, 8)),
+            POWDER,
+            "powder must rest on the floor"
+        );
+        assert_eq!(
+            world.get_voxel(IVec3::new(8, 6, 8)),
+            AIR,
+            "nothing above the resting powder"
+        );
     }
 
     #[test]
@@ -1008,7 +1153,10 @@ mod tests {
         }
         assert_eq!(sim.active_count(), 0, "powder pile must settle");
         let after = count_voxel(&world, POWDER);
-        assert_eq!(before, after, "all powder cells must survive (conservation)");
+        assert_eq!(
+            before, after,
+            "all powder cells must survive (conservation)"
+        );
         // At least one cell must be resting on the floor (y=5, on top of
         // the solid floor at y=4).
         assert!(after > 0, "powder must not vanish");
@@ -1029,7 +1177,11 @@ mod tests {
         world.set_voxel(powder_pos, POWDER);
         sim.active.insert(powder_pos);
         sim.tick(&mut world);
-        assert_eq!(world.get_voxel(powder_pos), AIR, "powder must leave the pillar top");
+        assert_eq!(
+            world.get_voxel(powder_pos),
+            AIR,
+            "powder must leave the pillar top"
+        );
         // It must have landed at one of the four diagonal-down cells.
         let diagonals = [
             powder_pos + IVec3::new(-1, -1, -1),
@@ -1038,7 +1190,10 @@ mod tests {
             powder_pos + IVec3::new(1, -1, 1),
         ];
         let landed = diagonals.iter().find(|&&d| world.get_voxel(d) == POWDER);
-        assert!(landed.is_some(), "powder must slide to a diagonal-down cell");
+        assert!(
+            landed.is_some(),
+            "powder must slide to a diagonal-down cell"
+        );
     }
 
     #[test]
@@ -1053,10 +1208,18 @@ mod tests {
             sim.active.insert(IVec3::new(x, 5, 8));
         }
         sim.tick(&mut world);
-        assert_eq!(sim.active_count(), 0, "flat powder on flat ground must sleep");
+        assert_eq!(
+            sim.active_count(),
+            0,
+            "flat powder on flat ground must sleep"
+        );
         // All cells still in place.
         for x in 6..=10 {
-            assert_eq!(world.get_voxel(IVec3::new(x, 5, 8)), POWDER, "powder must not shuffle");
+            assert_eq!(
+                world.get_voxel(IVec3::new(x, 5, 8)),
+                POWDER,
+                "powder must not shuffle"
+            );
         }
     }
 
@@ -1101,5 +1264,114 @@ mod tests {
             }
         }
         n
+    }
+
+    #[test]
+    fn sim_with_multiple_fluids_treats_both_as_fluid() {
+        const MUDDY: Voxel = Voxel(3);
+        let mut world = test_world();
+        world.set_solid_table(vec![false, false, true, false]);
+        let mut sim = FluidSim::with_fluids_and_powders(vec![WATER, MUDDY], Vec::new());
+        sim.place_blob(&mut world, IVec3::new(8, 10, 8), 0, MUDDY);
+        for _ in 0..5 {
+            sim.tick(&mut world);
+        }
+        assert_eq!(
+            world.get_voxel(IVec3::new(8, 10, 8)),
+            AIR,
+            "muddy_water must fall under gravity like water"
+        );
+        assert_eq!(
+            world.get_voxel(IVec3::new(8, 5, 8)),
+            MUDDY,
+            "muddy_water must land on the floor"
+        );
+    }
+
+    #[test]
+    fn muddy_water_levels_sideways_when_diagonal_fall_is_blocked() {
+        // Isolates the sideways leveling path (the `has_water_above` +
+        // `is_supported` gate at the tail of `step_cell_with_momentum`)
+        // which, before the fix, compared against a single `water` voxel
+        // and so never recognized muddy_water as fluid.
+        //
+        // A 1-wide container walls off every fall/diagonal/flow route from
+        // the leveling cell so the ONLY move available is sideways onto a
+        // supported fluid neighbor. `has_water_above` reads world state
+        // (not the active set), so the muddy cell at (8,8,8) satisfies the
+        // gate even though a narrow `wake_region` deliberately leaves it
+        // un-processed this tick -- preventing it from diagonal-falling
+        // into the target and masking the leveling path.
+        //
+        // A full stone floor at y=5 (not just under the puddle) keeps the
+        // y=6 muddy support columns from falling or sliding away.
+        //
+        // Before the fix: `is_simmed(MUDDY)` is false, so `wake_region`
+        // wakes nothing, the cell never moves, and both assertions fail.
+        // After the fix: the cell levels to (9,7,8) in a single tick.
+        const MUDDY: Voxel = Voxel(3);
+        const WALL: Voxel = Voxel(2); // stone is solid (id 2 in test_world)
+        let mut world = test_world();
+        // solid table: [air=false, water=false, stone=true, muddy=false]
+        world.set_solid_table(vec![false, false, true, false]);
+        let mut sim = FluidSim::with_fluids_and_powders(vec![WATER, MUDDY], Vec::new());
+
+        // Full stone floor across the container footprint at y=5 so the
+        // y=6 muddy supports rest on solid ground (test_world leaves y=5
+        // as air -- half-open [0,5) fill).
+        for x in 5..=12 {
+            for z in 7..=10 {
+                world.set_voxel(IVec3::new(x, 5, z), WALL);
+            }
+        }
+        // y=6: muddy supports at (8,6,8) and (9,6,8); walls everywhere
+        // else in the footprint to block diagonal fall and the
+        // flow-horizon scan from the leveling cell.
+        world.set_voxel(IVec3::new(8, 6, 8), MUDDY);
+        world.set_voxel(IVec3::new(9, 6, 8), MUDDY);
+        for x in 5..=12 {
+            for z in 7..=10 {
+                if (x, z) != (8, 8) && (x, z) != (9, 8) {
+                    world.set_voxel(IVec3::new(x, 6, z), WALL);
+                }
+            }
+        }
+        // y=7: the cell to level at (8,7,8); (9,7,8) stays AIR as the
+        // leveling target; walls elsewhere block all other moves.
+        world.set_voxel(IVec3::new(8, 7, 8), MUDDY);
+        for x in 5..=12 {
+            for z in 7..=10 {
+                if (x, z) != (8, 8) && (x, z) != (9, 8) {
+                    world.set_voxel(IVec3::new(x, 7, z), WALL);
+                }
+            }
+        }
+        // y=8: muddy directly above the leveling cell -- satisfies
+        // `has_water_above`. NOT woken (see narrow wake below) so it can't
+        // diagonal-fall into the target during this single tick.
+        world.set_voxel(IVec3::new(8, 8, 8), MUDDY);
+
+        // Narrow wake: scans y in [6,8) (wake_region expands by one on each
+        // side, so [7,7,7..10,7,8) -> effective y=6..8). Wakes the two
+        // supports and the leveling cell, but NOT (8,8,8).
+        sim.wake_region(&world, IVec3::new(7, 7, 7), IVec3::new(10, 7, 8));
+
+        // A single tick. Only the three woken cells are in the snapshot;
+        // (8,8,8) is not processed, so it cannot fall into the target. The
+        // supports settle (all diagonal-downs walled), and (8,7,8) levels
+        // to (9,7,8): straight-down/diagonal/flow all blocked,
+        // has_water_above=true (reads world), is_supported(9,6)=is_fluid(MUDDY)=true.
+        sim.tick(&mut world);
+
+        assert_eq!(
+            world.get_voxel(IVec3::new(9, 7, 8)),
+            MUDDY,
+            "muddy_water must level sideways -- has_water_above and is_supported must recognize muddy as fluid"
+        );
+        assert_eq!(
+            world.get_voxel(IVec3::new(8, 7, 8)),
+            AIR,
+            "the source cell must have moved (and not been refilled this tick)"
+        );
     }
 }

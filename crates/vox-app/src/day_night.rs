@@ -227,7 +227,7 @@ pub fn compute(game_time: f32) -> DayNightParams {
     let fill_strength = 0.12 * light_brightness.max(0.08);
 
     // Ambient: dimmer and cooler at night.
-    let ambient_strength = 0.55 * light_brightness.max(0.08);
+    let ambient_strength = 0.55 * light_brightness.max(0.15);
     let ambient_sky = Vec3::new(0.50, 0.58, 0.70).lerp(Vec3::new(0.15, 0.18, 0.25), 1.0 - light_brightness);
     let ambient_ground = Vec3::new(0.30, 0.27, 0.24).lerp(Vec3::new(0.08, 0.07, 0.06), 1.0 - light_brightness);
 

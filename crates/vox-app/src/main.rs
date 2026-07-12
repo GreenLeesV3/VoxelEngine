@@ -1,15 +1,21 @@
 //! Voxel engine application: world, player, tools, threaded remeshing, render.
 
 mod args;
+#[cfg(feature = "mario")]
+mod audio;
 mod body_mesh;
+mod chunk_loader;
+mod day_night;
+#[cfg(feature = "mario")]
+mod mario;
+#[cfg(not(feature = "mario"))]
+#[path = "mario_disabled.rs"]
+mod mario;
 mod particles;
 mod player;
-mod mario;
-mod audio;
-mod day_night;
 mod remesh;
-mod tools;
 mod replay;
+mod tools;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -18,21 +24,22 @@ use std::time::Instant;
 
 use glam::{IVec3, Mat4, Vec3};
 use rayon::prelude::*;
-
-use player::Player;
+use args::Quality;
 use body_mesh::BodyMeshQueue;
+use chunk_loader::ChunkLoader;
 use particles::{Burst, ParticleSystem};
+use player::Player;
 use remesh::RemeshQueue;
 use tools::{CarveOutcome, HOTBAR, Tool, Tools};
 
 use vox_core::consts::CHUNK_SIZE;
 use vox_core::{
-    FrameProfile, MaterialId, MaterialRegistry, ScopedTimer, Tunables, WorldConfig, chunk_origin,
-    voxel_at,
+    FrameProfile, FxHashMap, FxHashSet, MaterialId, MaterialRegistry, ScopedTimer, Tunables,
+    WorldConfig, chunk_origin, voxel_at,
 };
 use vox_debug::hud::HudState;
 use vox_debug::{DebugOverlay, OverlayState};
-use vox_gen::{TerrainGen, TerrainMaterials, TreeMaterials, generate_trees};
+use vox_gen::{TerrainGen, TerrainMaterials, TreeMaterials};
 use vox_mesh::{VoxelSlab, mesh_slab};
 use vox_physics::{Body, BodyId, ImpactEvent, PhysicsWorld, VoxelGrid};
 use vox_platform::{App, FrameControl, FrameTiming, InputState, run_app};
@@ -41,7 +48,6 @@ use vox_world::{AIR, Voxel, World};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
-
 
 /// Fog end distance in meters.
 const FOG_END_M: f32 = 220.0;
@@ -56,21 +62,18 @@ fn assets_dir() -> PathBuf {
     PathBuf::from("assets")
 }
 
-/// Build the world: noise terrain + forest from the world config.
-fn build_terrain_world(
+/// Build an empty streaming world: validates the config, creates the
+/// `World`, attaches the solidity table — but performs NO upfront terrain
+/// or tree generation. The `ChunkLoader` generates chunks lazily around
+/// the player instead.
+fn build_streaming_world(
     cfg: WorldConfig,
     registry: &MaterialRegistry,
 ) -> Result<World, Box<dyn std::error::Error + Send + Sync>> {
     cfg.validate()?;
     let mut world = World::new(cfg);
     world.set_solid_table(solid_table(registry));
-    let mats = TerrainMaterials::from_registry(registry)?;
-    let biomes = vox_gen::BiomeMap::new(world.cfg.seed);
-    let terrain = TerrainGen::new(&world.cfg);
-    terrain.generate(&mut world, mats, &biomes);
-    let tree_mats = TreeMaterials::from_registry(registry)?;
-    let planted = generate_trees(&mut world, &terrain, tree_mats, &biomes);
-    tracing::info!(trees = planted, "forest planted");
+    // No upfront generation — ChunkLoader generates lazily.
     Ok(world)
 }
 
@@ -99,21 +102,8 @@ fn emissive_materials(registry: &MaterialRegistry) -> Vec<Voxel> {
         })
         .collect()
 }
-
-/// The registry's `water` material, or a harmless fallback if the asset
-/// set doesn't define one (keeps the engine bootable with a stripped-down
-/// material set, e.g. in a test fixture) -- mirrors the existing
-/// `id_by_name("wood").unwrap_or(...)` pattern in `spawn_debris`.
-fn water_material(registry: &MaterialRegistry) -> Voxel {
-    registry
-        .id_by_name("water")
-        .map(|m| Voxel(m.0))
-        .unwrap_or(Voxel(1))
-}
-
 /// Weathering material table, or `None` (weathering disabled) if any
-/// required material is missing from the asset set -- mirrors
-/// `water_material`'s graceful-fallback pattern. A missing material name
+/// required material is missing from the asset set. A missing material name
 /// disables weathering with a log line, not a crash.
 fn weather_table(registry: &MaterialRegistry) -> Option<vox_sim::WeatherTable> {
     let id = |name: &str| registry.id_by_name(name).map(|m| Voxel(m.0));
@@ -124,6 +114,7 @@ fn weather_table(registry: &MaterialRegistry) -> Option<vox_sim::WeatherTable> {
         dirt: id("dirt")?,
         mud: id("mud")?,
         sand: id("sand")?,
+        muddy_water: id("muddy_water")?,
     })
 }
 
@@ -131,23 +122,34 @@ fn weather_table(registry: &MaterialRegistry) -> Option<vox_sim::WeatherTable> {
 /// is missing from the asset set.
 fn fire_table(registry: &MaterialRegistry) -> Option<vox_sim::FireTable> {
     let id = |name: &str| registry.id_by_name(name).map(|m| Voxel(m.0));
+    let water = id("water")?;
     let wood = id("wood")?;
     let leaves = id("leaves")?;
     let planks = id("planks")?;
     let grass = id("grass")?;
     let ember = id("ember")?;
-    let flammable = vec![wood, leaves, planks, grass, ember];
+    let char = id("char")?;
+    let ash = id("ash")?;
+    let muddy_water = id("muddy_water").unwrap_or(id("water")?);
+    let dark_ash = id("dark_ash")?;
+    let flammable = (1..registry.len())
+        .filter_map(|i| {
+            let def = registry.get(MaterialId(i as u16))?;
+            def.flammable.then(|| Voxel(i as u16))
+        })
+        .collect();
     Some(vox_sim::FireTable {
-        water: id("water")?,
+        water,
         ember,
-        char: id("char")?,
-        ash: id("ash")?,
-        dark_ash: id("dark_ash")?,
+        char,
+        ash,
+        dark_ash,
         wood,
         leaves,
         planks,
         grass,
         flammable,
+        muddy_water,
     })
 }
 
@@ -164,6 +166,179 @@ fn powder_materials(registry: &MaterialRegistry) -> Vec<Voxel> {
         .collect()
 }
 
+/// All materials the registry marks as fluids, as `Voxel` ids. Empty if
+/// the asset set defines no fluids -- the sim runs powder-only. The sim
+/// handles each fluid with the full CA rule (fall, spread, level).
+fn fluid_materials(registry: &MaterialRegistry) -> Vec<Voxel> {
+    (1..registry.len())
+        .filter_map(|i| {
+            let def = registry.get(vox_core::MaterialId(i as u16))?;
+            def.fluid.then(|| Voxel(i as u16))
+        })
+        .collect()
+}
+
+/// All fluid materials with their densities, as (Voxel, density) pairs.
+/// Used for per-fluid buoyancy — muddy water (1100) provides more buoyancy
+/// than clean water (1000).
+fn fluid_densities(registry: &MaterialRegistry) -> Vec<(Voxel, f32)> {
+    (1..registry.len())
+        .filter_map(|i| {
+            let def = registry.get(vox_core::MaterialId(i as u16))?;
+            def.fluid.then(|| (Voxel(i as u16), def.density))
+        })
+        .collect()
+}
+
+/// Place smoke just inside the face-adjacent air voxel selected by FireSim,
+/// with tangent-only jitter so the origin can never be pushed back through
+/// the burning surface. `salt` varies repeat emissions from the same cell.
+fn fire_smoke_origin(pos: IVec3, face: IVec3, voxel_size_m: f32, salt: u32) -> Vec3 {
+    debug_assert!(
+        [
+            IVec3::X,
+            IVec3::NEG_X,
+            IVec3::Y,
+            IVec3::NEG_Y,
+            IVec3::Z,
+            IVec3::NEG_Z,
+        ]
+        .contains(&face)
+    );
+
+    fn mix(mut x: u32) -> u32 {
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x7feb_352d);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x846c_a68b);
+        x ^ (x >> 16)
+    }
+
+    let seed = mix((pos.x as u32).wrapping_mul(0x9e37_79b9)
+        ^ (pos.y as u32).wrapping_mul(0x85eb_ca6b)
+        ^ (pos.z as u32).wrapping_mul(0xc2b2_ae35)
+        ^ salt.wrapping_mul(0x27d4_eb2d));
+    let jitter_a = (seed & 0xffff) as f32 / 65_535.0 - 0.5;
+    let jitter_b = (mix(seed ^ 0xa511_e9b3) & 0xffff) as f32 / 65_535.0 - 0.5;
+    let normal = face.as_vec3();
+    let tangent_a = if face.y != 0 { Vec3::X } else { Vec3::Y };
+    let tangent_b = normal.cross(tangent_a);
+
+    vox_core::voxel_center_m(pos, voxel_size_m)
+        + normal * (voxel_size_m * 0.55)
+        + tangent_a * (jitter_a * voxel_size_m * 0.4)
+        + tangent_b * (jitter_b * voxel_size_m * 0.4)
+}
+
+/// One exposed ember outlet on a detached body. The local center is a voxel
+/// center in body coordinates; only faces whose adjacent body voxel is air
+/// are retained, so interior embers never become smoke sources.
+#[derive(Clone, Debug)]
+struct BodySmokeOutlet {
+    local_center: Vec3,
+    open_faces: Vec<IVec3>,
+}
+
+#[derive(Clone, Debug)]
+struct BodyFireVisual {
+    outlets: Vec<BodySmokeOutlet>,
+    cursor: usize,
+    cooldown: u8,
+}
+
+fn body_smoke_outlets(body: &Body, ember: Voxel, voxel_size_m: f32) -> Vec<BodySmokeOutlet> {
+    let faces = [
+        IVec3::X,
+        IVec3::NEG_X,
+        IVec3::Y,
+        IVec3::NEG_Y,
+        IVec3::Z,
+        IVec3::NEG_Z,
+    ];
+    body.surface
+        .iter()
+        .filter_map(|sample| {
+            let local_voxel = ((*sample - body.grid_offset) / voxel_size_m)
+                .floor()
+                .as_ivec3();
+            (body.grid.get(local_voxel) == ember).then(|| BodySmokeOutlet {
+                local_center: *sample,
+                open_faces: faces
+                    .iter()
+                    .copied()
+                    .filter(|face| body.grid.get(local_voxel + *face) == AIR)
+                    .collect(),
+            })
+        })
+        .filter(|outlet| !outlet.open_faces.is_empty())
+        .collect()
+}
+
+fn body_smoke_origin(
+    body: &Body,
+    outlet: &BodySmokeOutlet,
+    face: IVec3,
+    voxel_size_m: f32,
+    salt: u32,
+) -> Vec3 {
+    fn mix(mut x: u32) -> u32 {
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x7feb_352d);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x846c_a68b);
+        x ^ (x >> 16)
+    }
+    let seed = mix(salt.wrapping_mul(0x27d4_eb2d));
+    let jitter_a = (seed & 0xffff) as f32 / 65_535.0 - 0.5;
+    let jitter_b = (mix(seed ^ 0xa511_e9b3) & 0xffff) as f32 / 65_535.0 - 0.5;
+    let normal = face.as_vec3();
+    let tangent_a = if face.y != 0 { Vec3::X } else { Vec3::Y };
+    let tangent_b = normal.cross(tangent_a);
+    let local = outlet.local_center
+        + normal * (voxel_size_m * 0.55)
+        + tangent_a * (jitter_a * voxel_size_m * 0.4)
+        + tangent_b * (jitter_b * voxel_size_m * 0.4);
+    body.pos + body.rot * local
+}
+
+fn next_body_smoke_origin(
+    body: &Body,
+    visual: &mut BodyFireVisual,
+    world: &World,
+    voxel_size_m: f32,
+) -> Option<Vec3> {
+    if visual.outlets.is_empty() {
+        return None;
+    }
+    let start = visual.cursor % visual.outlets.len();
+    for outlet_offset in 0..visual.outlets.len() {
+        let outlet_index = (start + outlet_offset) % visual.outlets.len();
+        let outlet = &visual.outlets[outlet_index];
+        let mut faces = outlet.open_faces.clone();
+        faces.sort_by(|a, b| {
+            (body.rot * b.as_vec3())
+                .y
+                .total_cmp(&(body.rot * a.as_vec3()).y)
+        });
+        for (face_index, face) in faces.into_iter().enumerate() {
+            let origin = body_smoke_origin(
+                body,
+                outlet,
+                face,
+                voxel_size_m,
+                (start + outlet_offset * 7 + face_index) as u32,
+            );
+            let voxel = voxel_at(origin, voxel_size_m);
+            if world.in_bounds(voxel) && world.get_voxel(voxel) == AIR {
+                visual.cursor = (outlet_index + 1) % visual.outlets.len();
+                return Some(origin);
+            }
+        }
+    }
+    visual.cursor = (start + 1) % visual.outlets.len();
+    None
+}
+
 /// The engine application.
 struct VoxApp {
     window: Arc<Window>,
@@ -175,6 +350,9 @@ struct VoxApp {
     /// and re-orients with the sun each frame.
     shadow_pipeline: ShadowPipeline,
     world: World,
+    /// Player-centered chunk streaming: generates chunks on demand within
+    /// render distance, evicts pristine chunks beyond it.
+    chunk_loader: ChunkLoader,
     registry: MaterialRegistry,
     /// Emissive material ids (fire, ember, lava), passed to the mesher so
     /// it can BFS-propagate blocklight from these sources into vertices.
@@ -188,6 +366,12 @@ struct VoxApp {
     body_mesh: BodyMeshQueue,
     phys: PhysicsWorld,
     fluid: vox_sim::FluidSim,
+    /// Full set of fluid material voxels (water, muddy_water, ...) -- the
+    /// materials `mesh_slab` treats as translucent fluids when meshing
+    /// chunks and debris. Stored once at construction (see
+    /// `fluid_materials`) and reused at every mesh call site so a newly
+    /// added fluid renders without each caller being touched.
+    fluids: Vec<Voxel>,
     /// Fluid ticks run at their own fixed rate (`FLUID_DT`), independent of
     /// the 60 Hz physics loop -- see the design doc §5.
     fluid_clock: vox_platform::FrameClock,
@@ -198,6 +382,9 @@ struct VoxApp {
     /// Fire simulation: ember ignition, fire spread, consumption to char.
     /// `None` when the asset set is missing a material fire needs.
     fire: Option<vox_sim::FireSim>,
+    /// Debris bodies known to carry an ember. Keeping this sparse avoids a
+    /// dense scan of every body on each fire tick.
+    burning_bodies: FxHashMap<BodyId, BodyFireVisual>,
     /// Incrementing seed so repeated blasts get varied debris spin.
     blast_seed: u32,
     /// Incrementing seed so repeated impact-fracture chips get varied
@@ -246,9 +433,13 @@ struct VoxApp {
     mario_mode: Option<mario::MarioMode>,
     /// SM64 units per meter for Mario mode. Higher = smaller Mario.
     /// Set once from CLI, read when initializing MarioMode.
+    #[cfg(feature = "mario")]
     mario_units_per_meter: f32,
     /// Game time accumulator for day/night cycle (seconds).
     game_time: f32,
+    /// When true, the day/night cycle is frozen at noon (full daylight).
+    /// Toggled via the F3 debug overlay.
+    always_day: bool,
     /// Old debris meshes kept alive past their body's despawn, each waiting
     /// on the set of its replacement fragments' async mesh jobs still in
     /// flight -- see `replace_body`'s doc comment for why this exists (a
@@ -264,6 +455,10 @@ struct VoxApp {
     postprocess: vox_render::PostProcessPipeline,
     /// Procedural sky dome pipeline (#66).
     sky_pipeline: SkyPipeline,
+    /// SSAO + bloom post-processing pipeline: generates ambient occlusion
+    /// and bloom from the scene's HDR color + depth, feeding the results
+    /// into the cel-shading composite pass.
+    bloom_ssao: vox_render::BloomSsaoPipeline,
     /// In-engine editor mode: when active, LMB paints a sphere of the
     /// selected material at the crosshair target and RMB erases a sphere of
     /// AIR, instead of the normal hotbar tools. Toggled with E. The player
@@ -317,6 +512,7 @@ impl VoxApp {
         window: Arc<Window>,
         cfg: WorldConfig,
         mario_units_per_meter: f32,
+        quality: Quality,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let assets = assets_dir();
         let registry = MaterialRegistry::load_dir(&assets.join("materials"))?;
@@ -326,13 +522,17 @@ impl VoxApp {
         let post_shader = std::fs::read_to_string(assets.join("shaders/postprocess.wgsl"))?;
         let grass_shader = std::fs::read_to_string(assets.join("shaders/grass.wgsl"))?;
         let sky_shader = std::fs::read_to_string(assets.join("shaders/sky.wgsl"))?;
-
         let build_start = Instant::now();
-        let world = build_terrain_world(cfg, &registry)?;
+        let world = build_streaming_world(cfg, &registry)?;
+        // Terrain generator + materials for lazy chunk generation.
+        let terrain = TerrainGen::new(&world.cfg);
+        let terrain_mats = TerrainMaterials::from_registry(&registry)?;
+        let tree_mats = TreeMaterials::from_registry(&registry)?;
+        let chunk_loader = ChunkLoader::new(&world.cfg, quality, terrain, terrain_mats, tree_mats);
         tracing::info!(
             chunks = world.chunk_count(),
             elapsed_ms = build_start.elapsed().as_millis() as u64,
-            "world built"
+            "streaming world initialized"
         );
 
         let size = window.inner_size();
@@ -351,7 +551,16 @@ impl VoxApp {
         let mut particle_pipeline = ParticlePipeline::new(&gpu, &particle_shader);
         let tools = Tools::new(&registry);
         let (surf_w, surf_h) = gpu.surface_size();
-        let postprocess = vox_render::PostProcessPipeline::new(&gpu, &post_shader, surf_w, surf_h);
+        let ssao_shader = std::fs::read_to_string(assets.join("shaders/ssao.wgsl"))?;
+        let bloom_shader = std::fs::read_to_string(assets.join("shaders/bloom.wgsl"))?;
+        let bloom_ssao = vox_render::BloomSsaoPipeline::new(
+            &gpu, &ssao_shader, &bloom_shader, surf_w, surf_h,
+        );
+        let postprocess = vox_render::PostProcessPipeline::new(
+            &gpu, &post_shader, surf_w, surf_h,
+            bloom_ssao.ao_view(),
+            bloom_ssao.bloom_view(),
+        );
         // Bind the scene depth texture for soft-particle surface fade (#70).
         particle_pipeline.set_depth_view(gpu.device(), postprocess.depth_view());
         let sky_pipeline = SkyPipeline::new(&gpu, &sky_shader);
@@ -372,31 +581,48 @@ impl VoxApp {
         let selected_material = tools.material_index() - 1;
         let weathering = weather_table(&registry).map(vox_sim::Weathering::new);
         if weathering.is_none() {
-            tracing::info!("weathering disabled -- a required material is missing from the asset set");
+            tracing::info!(
+                "weathering disabled -- a required material is missing from the asset set"
+            );
         }
         let fire = fire_table(&registry).map(vox_sim::FireSim::new);
         if fire.is_none() {
             tracing::info!("fire disabled -- a required material is missing from the asset set");
         }
-
+        #[cfg(not(feature = "mario"))]
+        let _ = mario_units_per_meter;
+        let fluids = fluid_materials(&registry);
         let mut app = Self {
             window,
             gpu,
             pipeline,
             shadow_pipeline,
             world,
-            fluid: vox_sim::FluidSim::with_powders(water_material(&registry), powder_materials(&registry)),
+            chunk_loader,
+            fluid: vox_sim::FluidSim::with_fluids_and_powders(
+                fluids.clone(),
+                powder_materials(&registry),
+            ),
+            phys: {
+                let mut phys = PhysicsWorld::new();
+                let fluid_buoyancy = fluid_densities(&registry);
+                if !fluid_buoyancy.is_empty() {
+                    phys.set_fluid_voxels(fluid_buoyancy);
+                }
+                phys
+            },
             fluid_clock: vox_platform::FrameClock::new(vox_core::consts::FLUID_DT),
             weathering,
             fire,
             emissive_voxels: emissive_materials(&registry),
+            burning_bodies: FxHashMap::default(),
             registry,
             player: Player::new(Vec3::ZERO),
             camera: Camera::new(Vec3::ZERO),
             tools,
             remesh: RemeshQueue::new(),
             body_mesh: BodyMeshQueue::new(),
-            phys: PhysicsWorld::new(),
+            fluids,
             blast_seed: 0,
             impact_seed: 0,
             grabbed: false,
@@ -412,8 +638,10 @@ impl VoxApp {
             last_draw_stats: vox_render::DrawStats::default(),
             debris_order: VecDeque::new(),
             mario_mode: None,
+            #[cfg(feature = "mario")]
             mario_units_per_meter,
             game_time: 330.0, // Start at midday (quarter through 22-min cycle)
+            always_day: false,
             pending_body_removal: HashMap::new(),
             editor_active: false,
             editor_radius: 2.0,
@@ -425,10 +653,15 @@ impl VoxApp {
             particle_pipeline,
             postprocess,
             sky_pipeline,
+            bloom_ssao,
         };
+        // Pre-generate spawn chunks before meshing and surface height
+        // scan — both need solid voxels to exist. Disjoint field borrows.
+        let center = Vec3::from(app.world.cfg.extent_m) * 0.5;
+        app.chunk_loader.pregenerate_spawn(center, &mut app.world, &mut app.pipeline, &app.gpu);
+
         app.initial_mesh();
 
-        let center = Vec3::from(app.world.cfg.extent_m) * 0.5;
         let surface = TerrainGen::surface_height_m(&app.world, center.x, center.z)
             .unwrap_or(app.world.cfg.extent_m[1] * 0.5);
         app.player = Player::new(Vec3::new(center.x, surface + 0.2, center.z));
@@ -442,6 +675,7 @@ impl VoxApp {
         let start = Instant::now();
         let world = &self.world;
         let emissive = self.emissive_voxels.clone();
+        let fluids = &self.fluids;
         let meshes: Vec<(IVec3, vox_mesh::MeshData)> = keys
             .par_iter()
             .filter(|key| world.chunk_at(**key).is_some())
@@ -450,7 +684,7 @@ impl VoxApp {
                 let chunk = world.chunk_at(*key).expect("filtered above");
                 let masks = chunk.solid_slice_masks();
                 let slab = VoxelSlab::extract(world, origin, IVec3::splat(CHUNK_SIZE as i32));
-                (*key, mesh_slab(&slab, origin, Voxel(9), &emissive, Some(&masks)))
+                (*key, mesh_slab(&slab, origin, fluids, &emissive, Some(&masks)))
             })
             .collect();
         let meshed = meshes.len();
@@ -489,6 +723,50 @@ impl VoxApp {
         tracing::info!(?id, ?origin_m, "spawned debris body");
     }
 
+    /// Spawn a rope: 5 segments of 2×2×5 rope voxels (20 voxels each),
+    /// connected by joints, hanging from a point above the player.
+    fn spawn_rope(&mut self) {
+        let rope_voxel = self.registry.id_by_name("rope").map(|m| Voxel(m.0));
+        let Some(rope_voxel) = rope_voxel else {
+            tracing::warn!("rope material not found, cannot spawn rope");
+            return;
+        };
+
+        let voxel_size = self.world.cfg.voxel_size_m;
+        let seg_dims = IVec3::new(2, 5, 2);
+        let seg_voxels = vec![rope_voxel; (2 * 5 * 2) as usize]; // 20 voxels
+        let seg_height_m = 5.0 * voxel_size; // 0.5m at 0.1m scale
+        let half_height = seg_height_m * 0.5; // 0.25m
+
+        // Spawn point: 3m above eye level, 2m forward along look direction.
+        let base_pos = self.player.eye(1.0) + Vec3::new(0.0, 3.0, 0.0) + self.player.look_dir() * 2.0;
+
+        let mut prev_id: Option<BodyId> = None;
+
+        for i in 0..5 {
+            // Stack segments vertically, top segment first.
+        let seg_center = base_pos + Vec3::new(0.0, -i as f32 * seg_height_m, 0.0);
+            let grid = VoxelGrid::new(seg_dims, seg_voxels.clone());
+            let Some(body) = Body::from_grid(grid, &self.registry, voxel_size, seg_center)
+            else {
+                continue;
+            };
+            let id = self.phys.spawn(body);
+            self.upload_debris_mesh(id);
+
+            if let Some(prev) = prev_id {
+                // Connect bottom of previous segment to top of this segment.
+                let anchor_prev = Vec3::new(0.0, -half_height, 0.0);
+                let anchor_this = Vec3::new(0.0, half_height, 0.0);
+                self.phys.add_joint(prev, id, anchor_prev, anchor_this, 0.0, 0.001);
+            }
+
+            prev_id = Some(id);
+        }
+
+        tracing::info!(?prev_id, "spawned 5-segment rope");
+    }
+
     /// Mesh and upload an already-spawned body's GPU representation. Every
     /// path that calls `phys.spawn` must follow up with this — a body with
     /// no uploaded mesh is simulated (falls, collides, sleeps) but never
@@ -512,10 +790,19 @@ impl VoxApp {
         let Some(body) = self.phys.get(id) else {
             return MeshDispatch::Sync;
         };
+        let body_outlets = self
+            .registry
+            .id_by_name("ember")
+            .map(|m| body_smoke_outlets(body, Voxel(m.0), self.world.cfg.voxel_size_m));
         let voxel_count = (body.grid.dims.x * body.grid.dims.y * body.grid.dims.z) as usize;
         let dispatch = if voxel_count <= INLINE_MESH_VOXEL_BUDGET {
-            let slab = VoxelSlab::from_grid(body.grid.dims, &body.grid.voxels);
-            let mesh = mesh_slab(&slab, IVec3::ZERO, Voxel(9), &self.emissive_voxels, None);
+            let slab = VoxelSlab::from_grid_with_damage(
+                body.grid.dims,
+                &body.grid.voxels,
+                &body.grid.damage,
+            );
+            let mesh = mesh_slab(&slab, IVec3::ZERO, &self.fluids, &self.emissive_voxels, None);
+            tracing::info!(slot = id.slot, verts = mesh.vertices.len(), "upload_debris_mesh sync");
             self.pipeline
                 .upload_body(&self.gpu, (id.slot, id.generation), &mesh);
             MeshDispatch::Sync
@@ -524,12 +811,27 @@ impl VoxApp {
                 (id.slot, id.generation),
                 body.grid.dims,
                 body.grid.voxels.clone(),
-                Voxel(9),
+                body.grid.damage.clone(),
+                self.fluids.clone(),
                 self.emissive_voxels.clone(),
             );
             MeshDispatch::Async
         };
-        self.debris_order.push_back(id);
+        if let Some(outlets) = body_outlets.filter(|outlets| !outlets.is_empty()) {
+            self.burning_bodies.insert(
+                id,
+                BodyFireVisual {
+                    outlets,
+                    cursor: 0,
+                    cooldown: 0,
+                },
+            );
+        } else {
+            self.burning_bodies.remove(&id);
+        }
+        if !self.debris_order.contains(&id) {
+            self.debris_order.push_back(id);
+        }
         dispatch
     }
 
@@ -549,6 +851,7 @@ impl VoxApp {
     /// this "invisible for a solid frame every time damage is applied"
     /// rather than a one-off pop on the initial break.
     fn replace_body(&mut self, old_id: BodyId, spawned: Vec<BodyId>) {
+        self.burning_bodies.remove(&old_id);
         let old_key = (old_id.slot, old_id.generation);
         if spawned.is_empty() {
             self.pipeline.remove_body(old_key);
@@ -593,7 +896,11 @@ impl VoxApp {
     /// oldest already-settled debris (see `evict_oldest_asleep_debris`) and
     /// drop each evicted body's GPU mesh too.
     fn enforce_debris_budget(&mut self) {
-        for id in evict_oldest_asleep_debris(&mut self.phys, &mut self.debris_order, MAX_DEBRIS_BODIES) {
+        for id in
+            evict_oldest_asleep_debris(&mut self.phys, &mut self.debris_order, MAX_DEBRIS_BODIES)
+        {
+            tracing::info!(slot = id.slot, "budget evicted");
+            self.burning_bodies.remove(&id);
             self.pipeline.remove_body((id.slot, id.generation));
         }
     }
@@ -607,6 +914,8 @@ impl VoxApp {
     /// once the global cap is hit.
     fn expire_clutter(&mut self, dt: f32) {
         for id in self.phys.tick_lifetimes(dt) {
+            tracing::info!(slot = id.slot, "clutter expired");
+            self.burning_bodies.remove(&id);
             self.pipeline.remove_body((id.slot, id.generation));
         }
     }
@@ -626,12 +935,26 @@ impl VoxApp {
     /// `Tunables::fracture_sensitivity` for the overall threshold dial.
     fn apply_impact_fracture(&mut self, impacts: Vec<ImpactEvent>) {
         for event in impacts {
+            tracing::info!(slot = event.body.slot, impulse = event.impulse, "impact event");
             let Some(body) = self.phys.get(event.body) else {
                 continue;
             };
             // Terminal rubble never re-fractures -- see
             // `MIN_FRACTURE_BODY_VOXELS` for the cascade this gate breaks.
             if body.grid.solid_count() < MIN_FRACTURE_BODY_VOXELS {
+                continue;
+            }
+            // Jointed bodies (rope segments) skip impact fracture: the
+            // interleaved contact+joint solver produces large phantom
+            // impulses when a segment touches terrain while constrained
+            // by joints. These are solver artifacts, not real impacts —
+            // the rope's strength (50.0) should survive any real fall,
+            // but the feedback impulses blow past it. Rope is still
+            // cuttable by tools (dig/bomb/laser carve directly, bypassing
+            // fracture entirely).
+            if self.phys.joints().iter().any(|j| {
+                j.body_a == event.body.slot as usize || j.body_b == event.body.slot as usize
+            }) {
                 continue;
             }
             let impact_speed = event.impulse / body.mass();
@@ -645,9 +968,57 @@ impl VoxApp {
             let Some(def) = self.registry.get(MaterialId(material.0)) else {
                 continue;
             };
-            let Some(radius_vox) =
-                fracture_radius_vox(def.strength, impact_speed, self.tunables.fracture_sensitivity)
-            else {
+            let Some(radius_vox) = fracture_radius_vox(
+                def.strength,
+                impact_speed,
+                self.tunables.fracture_sensitivity,
+            ) else {
+                // Below fracture threshold -- try the damage path. Impacts
+                // between 30% and 100% of the threshold accumulate damage
+                // instead of fracturing outright.
+                let fracture_threshold = self.tunables.fracture_sensitivity * def.strength;
+                if impact_speed >= fracture_threshold * DAMAGE_THRESHOLD_FACTOR {
+                    let ratio = impact_speed / fracture_threshold;
+                    let damage_amount = ratio * ratio * DAMAGE_RATE;
+
+                    const DIRS6: [IVec3; 6] = [
+                        IVec3::X,
+                        IVec3::NEG_X,
+                        IVec3::Y,
+                        IVec3::NEG_Y,
+                        IVec3::Z,
+                        IVec3::NEG_Z,
+                    ];
+                    let mut damage_voxels = vec![(local_voxel, damage_amount)];
+                    for &d in &DIRS6 {
+                        damage_voxels.push((local_voxel + d, damage_amount * 0.5));
+                    }
+
+                    let result = vox_physics::apply_body_damage(
+                        &mut self.phys,
+                        &self.registry,
+                        event.body,
+                        &damage_voxels,
+                        voxel_size_m,
+                    );
+                    if let Some(spawned) = result {
+                        // Body was despawned (voxels crumbled). Dust + replace.
+                        self.particles.burst(Burst {
+                            center: event.point_m,
+                            count: 4,
+                            color: def.color,
+                            speed: 1.0,
+                            upward: 0.5,
+                            life: 0.5,
+                            size: 0.03,
+                            buoyant: false,
+                        });
+                        self.replace_body(event.body, spawned);
+                    }
+                    // If result is None, the body was mutated in-place with
+                    // damage_dirty set. Re-meshing will be handled by the
+                    // damage_dirty check in the render loop.
+                }
                 continue;
             };
             let radius_m = voxel_size_m * radius_vox;
@@ -789,8 +1160,7 @@ impl VoxApp {
         }
         if input.wheel_delta.abs() >= 1.0 {
             let steps = input.wheel_delta as i32;
-            self.editor_radius =
-                (self.editor_radius + steps as f32 * 0.25).clamp(0.5, 8.0);
+            self.editor_radius = (self.editor_radius + steps as f32 * 0.25).clamp(0.5, 8.0);
         }
     }
 
@@ -804,13 +1174,17 @@ impl VoxApp {
         }
         if input.mouse_clicked(MouseButton::Left) {
             let outcome = match self.tools.tool {
-                Tool::Dig => self
-                    .tools
-                    .dig(&mut self.world, &mut self.phys, &self.registry, eye, look),
-                Tool::ScalableDig => {
+                Tool::Dig => {
                     self.tools
-                        .scalable_dig(&mut self.world, &mut self.phys, &self.registry, eye, look)
+                        .dig(&mut self.world, &mut self.phys, &self.registry, eye, look)
                 }
+                Tool::ScalableDig => self.tools.scalable_dig(
+                    &mut self.world,
+                    &mut self.phys,
+                    &self.registry,
+                    eye,
+                    look,
+                ),
                 Tool::Bomb => {
                     let seed = self.blast_seed;
                     self.blast_seed = self.blast_seed.wrapping_add(1);
@@ -824,13 +1198,21 @@ impl VoxApp {
                         seed,
                     )
                 }
-                Tool::DeathLaser => {
-                    self.tools
-                        .death_laser(&mut self.world, &mut self.phys, &self.registry, eye, look)
-                }
+                Tool::DeathLaser => self.tools.death_laser(
+                    &mut self.world,
+                    &mut self.phys,
+                    &self.registry,
+                    eye,
+                    look,
+                ),
                 Tool::PlaceWater => {
-                    self.tools
-                        .place_water(&mut self.world, &mut self.fluid, &self.registry, eye, look);
+                    self.tools.place_water(
+                        &mut self.world,
+                        &mut self.fluid,
+                        &self.registry,
+                        eye,
+                        look,
+                    );
                     CarveOutcome::default()
                 }
                 Tool::Ember => {
@@ -884,8 +1266,9 @@ impl VoxApp {
             }
         }
         if input.mouse_clicked(MouseButton::Right) {
-            if let Some(diff) = self.tools
-                .place_voxel(&mut self.world, eye, look, self.player.ctrl.aabb())
+            if let Some(diff) =
+                self.tools
+                    .place_voxel(&mut self.world, eye, look, self.player.ctrl.aabb())
             {
                 self.undo_stack.push(vec![diff]);
                 self.redo_stack.clear();
@@ -978,7 +1361,11 @@ impl VoxApp {
         for id in result.spawned {
             self.upload_debris_mesh(id);
         }
-        tracing::info!(?impact_m, radius = CRATER_RADIUS_M, "ground pound crater carved");
+        tracing::info!(
+            ?impact_m,
+            radius = CRATER_RADIUS_M,
+            "ground pound crater carved"
+        );
     }
 
     /// The palette color of `v`, for destruction-feedback particles; a
@@ -1114,6 +1501,7 @@ impl VoxApp {
     /// Toggle Mario mode on/off. On first activation, lazily loads the
     /// SM64 ROM and builds the Mario render pipeline. Subsequent
     /// toggles spawn/despawn Mario at the player's position.
+    #[cfg(feature = "mario")]
     fn toggle_mario_mode(&mut self) {
         // Initialize Mario mode if not yet done
         if self.mario_mode.is_none() {
@@ -1121,19 +1509,25 @@ impl VoxApp {
             let rom_path = match mario::MarioMode::find_rom(&assets) {
                 Some(p) => p,
                 None => {
-                    tracing::warn!("SM64 ROM not found — run enable_mario.bat with your SM64 US ROM, or place baserom.us.z64 in the roms/ directory");
+                    tracing::warn!(
+                        "SM64 ROM not found — run enable_mario.bat with your SM64 US ROM, or place baserom.us.z64 in the roms/ directory"
+                    );
                     return;
                 }
             };
-            let mario_shader =
-                match std::fs::read_to_string(assets.join("shaders/mario.wgsl")) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!("mario.wgsl not found: {e}");
-                        return;
-                    }
-                };
-            match mario::MarioMode::init(&self.gpu, &rom_path, &mario_shader, self.mario_units_per_meter) {
+            let mario_shader = match std::fs::read_to_string(assets.join("shaders/mario.wgsl")) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("mario.wgsl not found: {e}");
+                    return;
+                }
+            };
+            match mario::MarioMode::init(
+                &self.gpu,
+                &rom_path,
+                &mario_shader,
+                self.mario_units_per_meter,
+            ) {
                 Ok(mode) => self.mario_mode = Some(mode),
                 Err(e) => {
                     tracing::error!("Mario mode init failed: {e}");
@@ -1160,6 +1554,13 @@ impl VoxApp {
                 }
             }
         }
+    }
+
+    #[cfg(not(feature = "mario"))]
+    fn toggle_mario_mode(&mut self) {
+        tracing::warn!(
+            "Mario support is disabled; run with `cargo run -p vox-app --features mario`"
+        );
     }
 }
 
@@ -1188,9 +1589,15 @@ impl App for VoxApp {
             let origin = self.player.eye(1.0) + self.player.look_dir() * 4.0;
             self.spawn_debris(origin, 4, self.player.look_dir() * 8.0);
         }
+        if input.key_pressed(KeyCode::KeyT) {
+            let t0 = std::time::Instant::now();
+            self.spawn_rope();
+            tracing::info!(elapsed_ms = t0.elapsed().as_millis(), "spawn_rope took");
+        }
         if input.key_pressed(KeyCode::KeyX) {
             let removed = self.phys.clear_sleeping();
             for id in &removed {
+                self.burning_bodies.remove(id);
                 self.pipeline.remove_body((id.slot, id.generation));
             }
             if !removed.is_empty() {
@@ -1241,6 +1648,16 @@ impl App for VoxApp {
         if input.key_pressed(KeyCode::KeyP) {
             self.replay.start_playback();
         }
+        if input.key_pressed(KeyCode::KeyQ) {
+            let next = match self.chunk_loader.quality() {
+                Quality::Low => Quality::Medium,
+                Quality::Medium => Quality::High,
+                Quality::High => Quality::Ultra,
+                Quality::Ultra => Quality::Low,
+            };
+            self.chunk_loader.set_quality(next);
+            tracing::info!(?next, "quality switched");
+        }
         if input.key_down(KeyCode::ControlLeft) && input.key_pressed(KeyCode::KeyZ) {
             self.undo();
         }
@@ -1257,10 +1674,7 @@ impl App for VoxApp {
         self.player.fly_speed = self.tunables.fly_speed;
         self.phys.tunables = self.tunables;
 
-        let mario_active = self
-            .mario_mode
-            .as_ref()
-            .is_some_and(|m| m.is_active());
+        let mario_active = self.mario_mode.as_ref().is_some_and(|m| m.is_active());
 
         let mut mario_pos = Vec3::ZERO;
 
@@ -1315,13 +1729,43 @@ impl App for VoxApp {
         }
         let impacts = {
             let _t = ScopedTimer::new(&mut self.profile.physics);
+            let step_start = std::time::Instant::now();
             let mut impacts = Vec::new();
             for _ in 0..timing.physics_steps {
                 impacts.extend(self.phys.step(&self.world, vox_core::consts::PHYSICS_DT));
             }
+            let elapsed = step_start.elapsed().as_millis();
+            if elapsed > 50 {
+                tracing::warn!(elapsed_ms = elapsed, bodies = self.phys.body_count(), "slow physics step");
+            }
             impacts
         };
         self.apply_impact_fracture(impacts);
+        // Debug: check rope segment health for NaN/divergence.
+        if !self.phys.joints().is_empty() {
+            if let Some(j) = self.phys.joints().first() {
+                if let Some(body) = self.phys.iter().find(|(id, _)| id.slot as usize == j.body_a) {
+                    let (_, b) = body;
+                    if !b.pos.is_finite() || !b.vel.is_finite() || b.vel.length() > 50.0 {
+                        tracing::warn!(pos=?b.pos, vel=?b.vel, vel_len=b.vel.length(), "rope segment 0 DIVERGED");
+                    }
+                }
+            }
+        }
+        // Re-mesh debris bodies whose damage changed this frame (sub-threshold
+        // impacts set damage_dirty via apply_body_damage's in-place path).
+        let damage_dirty_ids: Vec<BodyId> = self
+            .phys
+            .iter()
+            .filter(|(_, b)| b.damage_dirty)
+            .map(|(id, _)| id)
+            .collect();
+        for id in damage_dirty_ids {
+            self.upload_debris_mesh(id);
+            if let Some(body) = self.phys.get_mut(id) {
+                body.damage_dirty = false;
+            }
+        }
         self.enforce_debris_budget();
         self.expire_clutter(timing.physics_steps as f32 * vox_core::consts::PHYSICS_DT);
         // Replay: record (throttled internally to 1/sec) or apply the next
@@ -1331,7 +1775,10 @@ impl App for VoxApp {
         if self.replay.recording {
             self.replay.record(&self.player, self.game_time, &self.phys);
         } else if self.replay.is_playing() {
-            if self.replay.playback_step(&mut self.player, &mut self.phys, &mut self.game_time) {
+            if self
+                .replay
+                .playback_step(&mut self.player, &mut self.phys, &mut self.game_time)
+            {
                 // Keep the render-interpolated eye exactly on the snapshot
                 // (fixed_steps is skipped during playback, so prev_pos would
                 // otherwise lag the directly-written ctrl.pos).
@@ -1344,7 +1791,7 @@ impl App for VoxApp {
         // for bodies that are already gone this frame).
         if mario_active {
             let mario_pos = self.mario_mode.as_ref().unwrap().mario_pos_m();
-            let radius = vox_sm64::SURFACE_RADIUS_M + 2.0;
+            let radius = mario::SURFACE_RADIUS_M + 2.0;
             let mut nearby: Vec<(u64, Vec3, glam::Quat, Vec3, Vec3)> = Vec::new();
             for (_id, body) in self.phys.iter() {
                 let voxel_size = body.half_voxel * 2.0;
@@ -1382,75 +1829,246 @@ impl App for VoxApp {
                 let events = self.fluid.drain_events();
                 w.tick(&mut self.world, &events);
             }
-        }
+            let mut spawned_ids = Vec::new();
+            let mut remesh_ids: FxHashSet<BodyId> = FxHashSet::default();
+            if let Some(f) = &mut self.fire {
+                f.tick(&mut self.world);
+                let s = self.world.cfg.voxel_size_m;
+                let mut consumed_positions = Vec::new();
+                for event in f.drain_events() {
+                    match event {
+                        vox_sim::FireEvent::Smoke { pos, face, kind } => {
+                            let (count, color, speed, upward, life, size, salt) = match kind {
+                                vox_sim::SmokeKind::Burning => {
+                                    (1, [0.35, 0.34, 0.33], 0.04, 0.08, 4.5, s * 0.35, 0)
+                                }
+                                vox_sim::SmokeKind::Extinguished => {
+                                    (3, [0.7, 0.7, 0.75], 0.12, 0.15, 2.5, s * 0.3, 1)
+                                }
+                                vox_sim::SmokeKind::Consumed => {
+                                    (2, [0.25, 0.22, 0.20], 0.08, 0.1, 3.5, s * 0.35, 2)
+                                }
+                            };
+                            let center = fire_smoke_origin(
+                                pos,
+                                face,
+                                s,
+                                (self.particles.len() as u32).wrapping_add(salt),
+                            );
+                            self.particles.burst(Burst {
+                                center,
+                                count,
+                                color,
+                                speed,
+                                upward,
+                                life,
+                                size,
+                                buoyant: true,
+                            });
+                        }
+                        vox_sim::FireEvent::Consumed(pos) => consumed_positions.push(pos),
+                        vox_sim::FireEvent::Extinguished(_) => {}
+                    }
+                }
 
-        // Fire tick: spread, consume, emit smoke + detach burning structures.
-        if let Some(f) = &mut self.fire {
-            f.tick(&mut self.world);
-            let s = self.world.cfg.voxel_size_m;
-            let mut consumed_positions: Vec<IVec3> = Vec::new();
-            for ev in f.drain_events() {
-                match ev {
-                    vox_sim::FireEvent::Burning(pos, _) => {
-                        let mut center = vox_core::voxel_center_m(pos, s);
-                        center.y += s * 0.5;
-                        center.x += (pos.x as f32 * 0.37).fract() * s * 0.6 - s * 0.3;
-                        center.z += (pos.z as f32 * 0.61).fract() * s * 0.6 - s * 0.3;
-                        self.particles.burst(Burst {
-                            center,
-                            count: 1,
-                            color: [0.5, 0.5, 0.5],
-                            speed: 0.3,
-                            upward: 1.5,
-                            life: 2.0,
-                            size: 0.18,
-                            buoyant: true,
+                if !consumed_positions.is_empty() {
+                    spawned_ids = vox_physics::detach_unsupported(
+                        &mut self.world,
+                        &mut self.phys,
+                        &self.registry,
+                        &consumed_positions,
+                    );
+                }
+
+                let ember = self.registry.id_by_name("ember").map(|m| Voxel(m.0));
+                let mut ignite_world: FxHashSet<IVec3> = FxHashSet::default();
+                let mut ignite_body: FxHashSet<(BodyId, IVec3)> = FxHashSet::default();
+                if let Some(ember) = ember {
+                    let phys = &self.phys;
+                    self.burning_bodies.retain(|id, _| phys.get(*id).is_some());
+
+                    let world_fire_bounds_m = f.burning_bounds().map(|(min, max)| {
+                        (
+                            (min - IVec3::ONE).as_vec3() * s,
+                            (max + IVec3::ONE).as_vec3() * s,
+                        )
+                    });
+                    for (body_id, body) in self.phys.iter() {
+                        if body.sleep.asleep {
+                            continue;
+                        }
+                        let carries_fire = self.burning_bodies.contains_key(&body_id);
+                        let near_world_fire = world_fire_bounds_m.is_some_and(|(min, max)| {
+                            body.aabb_max.cmpge(min).all() && body.aabb_min.cmple(max).all()
                         });
+                        if !carries_fire && !near_world_fire {
+                            continue;
+                        }
+
+                        for sample in &body.surface {
+                            let local_voxel = ((*sample - body.grid_offset) / s).floor().as_ivec3();
+                            let body_voxel = body.grid.get(local_voxel);
+                            let world_voxel = voxel_at(body.pos + body.rot * *sample, s);
+                            if body_voxel == ember && carries_fire {
+                                for face in [
+                                    IVec3::X,
+                                    IVec3::NEG_X,
+                                    IVec3::Y,
+                                    IVec3::NEG_Y,
+                                    IVec3::Z,
+                                    IVec3::NEG_Z,
+                                ] {
+                                    let neighbor = world_voxel + face;
+                                    let neighbor_voxel = self.world.get_voxel(neighbor);
+                                    if neighbor_voxel != ember
+                                        && self
+                                            .registry
+                                            .get(MaterialId(neighbor_voxel.0))
+                                            .is_some_and(|def| def.flammable)
+                                    {
+                                        ignite_world.insert(neighbor);
+                                    }
+                                }
+                            } else if near_world_fire
+                                && body_voxel != AIR
+                                && body_voxel != ember
+                                && self
+                                    .registry
+                                    .get(MaterialId(body_voxel.0))
+                                    .is_some_and(|def| def.flammable)
+                                && [
+                                    IVec3::X,
+                                    IVec3::NEG_X,
+                                    IVec3::Y,
+                                    IVec3::NEG_Y,
+                                    IVec3::Z,
+                                    IVec3::NEG_Z,
+                                ]
+                                .iter()
+                                .any(|&face| f.is_burning(world_voxel + face))
+                            {
+                                ignite_body.insert((body_id, local_voxel));
+                            }
+                        }
                     }
-                    vox_sim::FireEvent::Consumed(pos) => {
-                        consumed_positions.push(pos);
+
+                    for (body_id, local_voxel) in ignite_body {
+                        if let Some(body) = self.phys.get_mut(body_id) {
+                            body.grid.set(local_voxel, ember);
+                            remesh_ids.insert(body_id);
+                        }
                     }
-                    vox_sim::FireEvent::Extinguished(_) => {}
+                }
+                for pos in ignite_world {
+                    f.ignite(&mut self.world, pos);
                 }
             }
-            if !consumed_positions.is_empty() {
-                let spawned = vox_physics::detach_unsupported(
-                    &mut self.world,
-                    &mut self.phys,
-                    &self.registry,
-                    &consumed_positions,
-                );
-                for id in &spawned {
-                    self.upload_debris_mesh(*id);
-                    self.debris_order.push_back(*id);
+
+            for id in spawned_ids {
+                self.upload_debris_mesh(id);
+            }
+            for id in remesh_ids {
+                self.upload_debris_mesh(id);
+            }
+
+            // Detached burning objects emit at most one restrained puff per
+            // body every ten fire ticks. Outlet topology is cached from the
+            // exposed surface, and the world-air check suppresses smoke when
+            // the chosen face is pressed into terrain.
+            let body_smoke_ids: Vec<BodyId> = self.burning_bodies.keys().copied().collect();
+            for body_id in body_smoke_ids {
+                let Some(body) = self.phys.get(body_id) else {
+                    self.burning_bodies.remove(&body_id);
+                    continue;
+                };
+                let Some(visual) = self.burning_bodies.get_mut(&body_id) else {
+                    continue;
+                };
+                if visual.cooldown > 0 {
+                    visual.cooldown -= 1;
+                    continue;
+                }
+                if let Some(origin) =
+                    next_body_smoke_origin(body, visual, &self.world, self.world.cfg.voxel_size_m)
+                {
+                    visual.cooldown = 10;
+                    self.particles.burst(Burst {
+                        center: origin,
+                        count: 1,
+                        color: [0.35, 0.34, 0.33],
+                        speed: 0.03,
+                        upward: 0.07,
+                        life: 4.5,
+                        size: self.world.cfg.voxel_size_m * 0.35,
+                        buoyant: true,
+                    });
+                } else {
+                    visual.cooldown = 2;
                 }
             }
         }
 
+        // Stream chunks around the player: generate missing, evict beyond range.
+        let player_pos = self.player.ctrl.pos;
+        let _streamed = self.chunk_loader.update(
+            player_pos,
+            &mut self.world,
+            &mut self.pipeline,
+            &self.gpu,
+        );
         // Wake any resting debris whose ground was just carved/edited from
         // under it, then remesh: absorb edits, dispatch to workers, upload.
         let eye = self.player.eye(timing.alpha);
         let uploaded = {
             let _t = ScopedTimer::new(&mut self.profile.remesh);
             let s = self.world.cfg.voxel_size_m;
-            for (min, max) in self.world.drain_dirty_regions() {
+            let dirty = self.world.drain_dirty_regions();
+            for (min, max) in &dirty {
                 self.phys.wake_region(min.as_vec3() * s, max.as_vec3() * s);
-                self.fluid.wake_region(&self.world, min, max);
+                self.fluid.wake_region(&self.world, *min, *max);
                 if let Some(w) = &mut self.weathering {
-                    w.wake_region(&self.world, min, max);
+                    w.wake_region(&self.world, *min, *max);
+                }
+            }
+            for (min, max) in dirty {
+                if let Some(fire) = &mut self.fire {
+                    fire.wake_region(&mut self.world, min, max);
                 }
             }
             self.remesh.absorb_dirty(&mut self.world);
-            self.remesh.dispatch(&self.world, eye, Voxel(9), &self.emissive_voxels);
+            self.remesh
+                .dispatch(&self.world, eye, &self.fluids, &self.emissive_voxels);
             self.remesh.collect(&self.gpu, &mut self.pipeline);
             self.body_mesh.collect(&self.gpu, &mut self.pipeline)
         };
         self.resolve_pending_removals(&uploaded);
         self.sync_debris_render(timing.alpha);
-        self.particles.update(timing.dt_frame, &self.world, self.world.cfg.voxel_size_m);
+        let body_colliders: Vec<particles::BodyCollisionRef> = self
+            .phys
+            .iter()
+            .map(|(_, b)| particles::BodyCollisionRef {
+                aabb_min: b.aabb_min,
+                aabb_max: b.aabb_max,
+                pos: b.pos,
+                inv_rot: b.rot.inverse(),
+                grid_offset: b.grid_offset,
+                dims: b.grid.dims,
+                voxels: &b.grid.voxels,
+            })
+            .collect();
+        self.particles.update(
+            timing.dt_frame,
+            &self.world,
+            self.world.cfg.voxel_size_m,
+            &body_colliders,
+        );
 
-        // Advance day/night cycle.
-        self.game_time += timing.dt_frame;
+        // Advance day/night cycle (unless frozen at noon).
+        if !self.always_day {
+            self.game_time += timing.dt_frame;
+        } else {
+            self.game_time = 60.0; // Noon (halfway through 120s cycle)
+        }
         let dn = day_night::compute(self.game_time);
 
         // Camera: third-person around Mario in Mario mode, else player eye.
@@ -1512,8 +2130,12 @@ impl App for VoxApp {
         // day/night cycle. The camera focus is the player/mario position
         // (whichever is active) so the 100 m shadow box always covers the
         // nearby terrain the eye actually sees.
-        let shadow_focus = if mario_active { mario_pos } else { self.camera.pos };
-        self.shadow_pipeline.write_camera(
+        let shadow_focus = if mario_active {
+            mario_pos
+        } else {
+            self.camera.pos
+        };
+        let shadow_frustum = self.shadow_pipeline.write_camera(
             &self.gpu,
             dn.sun_dir,
             shadow_focus,
@@ -1574,7 +2196,7 @@ impl App for VoxApp {
                 vox_debug::hud::MarioHudState {
                     health: mode.health(),
                     action: mode.action(),
-                    textures: mode.hud_texture_cache().cloned(),
+                    textures: mode.get_hud_texture_cache().cloned(),
                     // Placeholders — wired when collectibles (#29) and
                     // death/respawn are implemented.
                     coins: 0,
@@ -1597,6 +2219,13 @@ impl App for VoxApp {
             tool_radius: self.tools.active_radius_mut(),
             material_names: &self.material_names,
             selected_material: &mut self.selected_material,
+            always_day: &mut self.always_day,
+            quality_label: match self.chunk_loader.quality() {
+                Quality::Low => "low",
+                Quality::Medium => "medium",
+                Quality::High => "high",
+                Quality::Ultra => "ultra",
+            },
         });
         let prepared_overlay = self.debug_overlay.prepare(
             &self.window,
@@ -1612,11 +2241,10 @@ impl App for VoxApp {
         // Shadow pass (#14): render visible chunks into the shadow map
         // (depth-only, no color attachment) before the main pass samples it.
         // The pass must close (drop the shadow pass encoder guard) before
-        // the main pass opens on the same encoder. Frustum culling uses
-        // the shadow camera's own frustum — chunks outside the main view
-        // but inside the shadow volume must still be rendered.
-        let shadow_frustum = Frustum::from_view_proj(self.shadow_pipeline.view_proj());
-        {
+        // the main pass opens on the same encoder. Frustum culling reuses
+        // the main camera frustum -- chunks outside the view are also
+        // outside the shadow receiver region.
+        if dn.sun_strength > 0.001 {
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow-pass"),
                 color_attachments: &[],
@@ -1631,7 +2259,11 @@ impl App for VoxApp {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.pipeline.draw_chunks_shadow(&self.shadow_pipeline, &mut shadow_pass, &shadow_frustum);
+            self.pipeline.draw_chunks_shadow(
+                &self.shadow_pipeline,
+                &mut shadow_pass,
+                &shadow_frustum,
+            );
         }
 
         let stats;
@@ -1701,7 +2333,9 @@ impl App for VoxApp {
             self.sky_pipeline.draw(&mut pass);
             pass.set_bind_group(1, self.shadow_pipeline.sample_bind_group(), &[]);
             let chunk_stats = self.pipeline.draw_chunks_opaque(&mut pass, &frustum);
-            let body_stats = self.pipeline.draw_bodies(&mut pass, &frustum, self.camera.pos, FOG_END_M);
+            let body_stats =
+                self.pipeline
+                    .draw_bodies(&mut pass, &frustum, self.camera.pos, FOG_END_M);
             stats = vox_render::DrawStats {
                 drawn: chunk_stats.drawn + body_stats.drawn,
                 culled: chunk_stats.culled + body_stats.culled,
@@ -1803,6 +2437,25 @@ impl App for VoxApp {
             self.pipeline.draw_water(&mut pass, &frustum);
         }
 
+        // SSAO + bloom passes: generate AO and bloom from the scene's HDR color + depth.
+        let proj = self.camera.view_proj(aspect);
+        let inv_proj = proj.inverse();
+        self.bloom_ssao.write_params(
+            self.gpu.queue(),
+            proj.to_cols_array_2d(),
+            inv_proj.to_cols_array_2d(),
+            self.tunables.ssao_intensity,
+            self.tunables.ssao_radius,
+            self.tunables.bloom_intensity,
+            self.tunables.bloom_threshold,
+        );
+        self.bloom_ssao.process(
+            self.gpu.device(),
+            &mut encoder,
+            self.postprocess.color_view(),
+            self.postprocess.depth_view(),
+        );
+
         // Post-process pass: composite the offscreen HDR color + depth
         // through the fullscreen edge-detection/saturation/grading shader
         // onto the swapchain frame.
@@ -1841,7 +2494,14 @@ impl App for VoxApp {
 
     fn resize(&mut self, width: u32, height: u32) {
         self.gpu.resize(width, height);
-        self.postprocess.resize(&self.gpu, width, height);
+        self.bloom_ssao.resize(&self.gpu, width, height);
+        self.postprocess.resize(
+            &self.gpu,
+            width,
+            height,
+            self.bloom_ssao.ao_view(),
+            self.bloom_ssao.bloom_view(),
+        );
         // The depth texture was recreated by postprocess.resize — rebind it
         // so the soft-particle fade keeps sampling the current depth buffer.
         self.particle_pipeline.set_depth_view(self.gpu.device(), self.postprocess.depth_view());
@@ -1867,6 +2527,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let cfg = cli.world;
     let mario_units_per_meter = cli.mario_units_per_meter;
+    let quality = cli.quality;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1883,7 +2544,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     run_app(vox_core::consts::PHYSICS_DT, |window| {
-        Ok(Box::new(VoxApp::new(window, cfg, mario_units_per_meter)?))
+        Ok(Box::new(VoxApp::new(window, cfg, mario_units_per_meter, quality)?))
     })?;
     Ok(())
 }
@@ -1947,6 +2608,16 @@ const MAX_FRACTURE_RADIUS_VOX: f32 = 3.0;
 /// the "lots of debris causes lag" one.
 const MIN_FRACTURE_BODY_VOXELS: usize = 16;
 
+/// Impacts below this fraction of the fracture threshold do nothing.
+const DAMAGE_THRESHOLD_FACTOR: f32 = 0.3;
+/// Damage gained per hit at exactly the fracture threshold.
+const DAMAGE_RATE: f32 = 0.3;
+/// Damage at which a voxel crumbles (becomes air). The actual crumble check
+/// lives in `vox_physics::apply_body_damage` (`>= 1.0`); this constant
+/// documents the threshold and is reserved for future app-side gating.
+#[expect(dead_code, reason = "documents the crumble threshold; enforced in vox-physics")]
+const DAMAGE_CRUMBLE: f32 = 1.0;
+
 /// Pure impact-fracture decision, kept free of live GPU/registry state so
 /// it's unit-testable without a whole `VoxApp`: given a material's
 /// `strength`, the impact speed it just took, and the live
@@ -1979,7 +2650,8 @@ fn fracture_radius_vox(strength: f32, impact_speed: f32, fracture_sensitivity: f
     if impact_speed < threshold {
         return None;
     }
-    let fragility = (FRACTURE_REFERENCE_STRENGTH / strength).clamp(CRUMBLE_SCALE_RANGE.0, CRUMBLE_SCALE_RANGE.1);
+    let fragility = (FRACTURE_REFERENCE_STRENGTH / strength)
+        .clamp(CRUMBLE_SCALE_RANGE.0, CRUMBLE_SCALE_RANGE.1);
     let excess = (impact_speed / threshold - 1.0).max(0.0);
     let growth = excess.sqrt().min(ENERGY_GROWTH_CAP);
     let radius = FRACTURE_RADIUS_VOX * (1.0 + growth * (fragility - 1.0));
@@ -2021,6 +2693,63 @@ fn evict_oldest_asleep_debris(
 }
 
 #[cfg(test)]
+mod fire_smoke_tests {
+    use super::*;
+
+    #[test]
+    fn smoke_origin_is_inside_the_selected_air_neighbor() {
+        let pos = IVec3::new(8, 7, 6);
+        let voxel_size = 0.1;
+        for face in [
+            IVec3::X,
+            IVec3::NEG_X,
+            IVec3::Y,
+            IVec3::NEG_Y,
+            IVec3::Z,
+            IVec3::NEG_Z,
+        ] {
+            let origin = fire_smoke_origin(pos, face, voxel_size, 42);
+            assert_eq!(
+                voxel_at(origin, voxel_size),
+                pos + face,
+                "smoke must start in the exposed neighbor for face {face}"
+            );
+        }
+    }
+
+    fn body_with_ember(voxel: IVec3) -> Body {
+        let dims = IVec3::splat(3);
+        let mut voxels = vec![Voxel(1); 27];
+        let index = (voxel.x + voxel.z * dims.x + voxel.y * dims.x * dims.z) as usize;
+        voxels[index] = Voxel(2);
+        let grid = VoxelGrid::new(dims, voxels);
+        let registry = MaterialRegistry::from_toml_str(
+            "[[material]]\nname=\"stone\"\ncolor=[0.5,0.5,0.5]\ndensity=2600.0\nstrength=8.0\n\n[[material]]\nname=\"ember\"\ncolor=[0.8,0.3,0.1]\ndensity=600.0\nstrength=2.0\nflammable=true\n",
+            "fire-smoke-test.toml",
+        )
+        .expect("test registry");
+        Body::from_grid(grid, &registry, 0.1, Vec3::ZERO).expect("body mass")
+    }
+
+    #[test]
+    fn interior_ember_has_no_body_smoke_outlet() {
+        let body = body_with_ember(IVec3::ONE);
+        assert!(body_smoke_outlets(&body, Voxel(2), 0.1).is_empty());
+    }
+
+    #[test]
+    fn exposed_ember_only_emits_through_air_faces() {
+        let body = body_with_ember(IVec3::new(0, 1, 1));
+        let outlets = body_smoke_outlets(&body, Voxel(2), 0.1);
+        assert_eq!(outlets.len(), 1);
+        assert_eq!(outlets[0].open_faces, vec![IVec3::NEG_X]);
+        let origin = body_smoke_origin(&body, &outlets[0], IVec3::NEG_X, 0.1, 7);
+        let body_local = (body.rot.conjugate() * (origin - body.pos) - body.grid_offset) / 0.1;
+        assert_eq!(body_local.floor().as_ivec3(), IVec3::new(-1, 1, 1));
+    }
+}
+
+#[cfg(test)]
 mod debris_budget_tests {
     use super::*;
 
@@ -2049,7 +2778,11 @@ mod debris_budget_tests {
 
         let evicted = evict_oldest_asleep_debris(&mut phys, &mut order, 3);
 
-        assert_eq!(evicted, vec![ids[0], ids[1]], "must evict the two oldest, in order");
+        assert_eq!(
+            evicted,
+            vec![ids[0], ids[1]],
+            "must evict the two oldest, in order"
+        );
         assert_eq!(phys.body_count(), 3);
         assert!(phys.get(ids[2]).is_some(), "the three newest must survive");
     }
@@ -2109,8 +2842,15 @@ mod debris_budget_tests {
             !evicted.contains(&stale_id),
             "a stale id must not be reported as evicted -- it was already gone"
         );
-        assert_eq!(evicted, vec![real_id], "the real, still-alive body must still be evicted");
-        assert!(order.is_empty(), "the stale entry must still be dropped from the queue");
+        assert_eq!(
+            evicted,
+            vec![real_id],
+            "the real, still-alive body must still be evicted"
+        );
+        assert!(
+            order.is_empty(),
+            "the stale entry must still be dropped from the queue"
+        );
     }
 }
 
@@ -2171,7 +2911,10 @@ mod fracture_tests {
             wood_r > stone_r,
             "wood ({wood_r}) must crumble more than stone ({stone_r})"
         );
-        assert_eq!(stone_r, FRACTURE_RADIUS_VOX, "stone is the reference material");
+        assert_eq!(
+            stone_r, FRACTURE_RADIUS_VOX,
+            "stone is the reference material"
+        );
     }
 
     #[test]

@@ -26,6 +26,10 @@ cargo run -p vox-app --release -- --scale 1.0 --seed 42
 cargo run -p vox-app --release -- --help
 ```
 
+Mario support is kept out of the default build so a clean clone does not
+require the optional native library. Enable it explicitly after completing
+the setup below with `cargo run -p vox-app --release --features mario`.
+
 Requires a DX12 or Vulkan-capable GPU (via wgpu). First launch generates
 terrain and meshes it, which can take a second or two on the default 0.1 m
 world.
@@ -46,6 +50,7 @@ world.
 | Right click | Place selected material |
 | `[` / `]` | Shrink / grow the Scalable Dig / Bomb / Place Water radius (0.5-4 m) |
 | `B` | Spawn a wood debris cube in front of the player |
+| `T` | Spawn a 5-segment rope near the player |
 | `X` | Clear all sleeping (settled) debris |
 | `E` | Toggle editor mode (LMB paint sphere, RMB erase sphere, wheel adjusts radius) |
 | `Ctrl+Z` | Undo last world edit (safe edits only — no debris-spawning operations) |
@@ -92,6 +97,20 @@ You must provide your own legally-obtained SM64 US ROM.
 
 ### Setup
 
+Initialize the pinned public libsm64 submodule and generate its Mario
+geometry before enabling the feature:
+
+The native library uses GNU C extensions. On Windows, build the Mario
+feature from an MSYS2 MinGW shell (or another environment that provides
+`gcc`); the default Rust build does not require that toolchain.
+
+```powershell
+git submodule update --init
+Push-Location libsm64
+python import-mario-geo.py
+Pop-Location
+```
+
 1. Obtain an SM64 US ROM (`.z64` format). The expected file has SHA1:
    `9bef1128717f958171a4afac3ed78ee2bb4e86ce`
 2. Run `enable_mario.bat` (Windows), either:
@@ -99,7 +118,7 @@ You must provide your own legally-obtained SM64 US ROM.
    - Drag-and-drop your ROM onto the script, or
    - `enable_mario.bat "C:\path\to\your_rom.z64"`
 3. The script validates the ROM by SHA1 and copies it to `roms/baserom.us.z64`
-4. Launch the game and press `M`
+4. Launch with `cargo run -p vox-app --features mario` and press `M`
 
 Without a ROM, pressing `M` logs a warning and does nothing — the game
 works fully without Mario mode.
@@ -136,12 +155,21 @@ works fully without Mario mode.
   strength (dims at night), depth-write disabled, rendered last so
   terrain/grass shows through translucency.
 - **3D grass blades**: Real geometry (blocky quads) standing up from
-  grass voxels, wind sway in vertex shader, day/night lighting,
-  throttled regeneration (every 30 frames or 5m camera move, 30m radius).
+  grass voxels, scale-aware wind sway in the vertex shader, day/night
+  lighting, and regeneration only after terrain edits or a 5m camera move.
 - **Crack decals**: Procedural shader-based dark branching lines on
   solid voxels, driven by a `crack_intensity` uniform (default 0 = off).
 - **Smoke particles**: World-colliding billboard particles with
   inter-particle repulsion, enclosure-aware drag, emitted by fire.
+- **SSAO**: Screen-space ambient occlusion reconstructs view-space normals
+  from the depth buffer and samples a 32-direction hemisphere kernel to
+  darken crevices, under-overhangs, and contact areas. Half-resolution AO
+  buffer with 3×3 box blur, applied before tone mapping. Intensity and
+  radius tunable via the F3 debug overlay.
+- **Bloom**: Bright pixels (fire, ember, sun-lit surfaces) bleed light into
+  surrounding areas via a luminance-threshold bright pass followed by a
+  13-tap separable Gaussian blur at half resolution. Added after color
+  grading. Intensity and threshold tunable via the F3 debug overlay.
 
 ## Simulation
 
@@ -154,8 +182,22 @@ works fully without Mario mode.
   momentum memory for cohesive flow. Weathering: grass→dirt→mud,
   stone→sand erosion with waterfall boost, mud drying. Powders (mud,
   sand) fall and pile at an angle of repose.
+- **Water pollution**: Mud adjacent to water dissolves into muddy_water
+  (a murky fluid that flows like water). Pollution diffuses by contact
+  to adjacent clean water. Still muddy_water settles after ~10s,
+  clarifying to clean water and depositing sand on the floor below.
+  Muddy water also extinguishes fire and provides buoyancy for floating
+  debris.
 - **Buoyancy**: Debris bodies float or sink based on material density
-  vs water density. Wood floats, stone sinks.
+  vs fluid density. Wood floats, stone sinks.
+- **Joints + rope**: Distance-constraint joints connect debris bodies,
+  maintaining a rest length between anchor points. Solved interleaved with
+  contacts in the sequential-impulse solver, with warm starting and split-
+  impulse position correction. Joint-connected bodies sleep/wake together
+  via island consensus. Rope segments (2×2×5 voxel bodies of rope material,
+  20 voxels each) connect end-to-end via joints. Press `T` to spawn a
+  5-segment rope near the player. Rope can be cut, burned, and destroyed —
+  severing a segment breaks the joint chain.
 
 ## Editor & Tools
 
@@ -309,6 +351,19 @@ Fixed by tracking each contact's pre-solve closing speed
 impact-fracture eligibility on it (`MIN_IMPACT_APPROACH_SPEED_M_S`):
 a resting/settling contact's closing speed stays near zero every step, a
 genuine collision's does not.
+
+### Progressive damage
+
+Debris bodies accumulate per-voxel damage from sub-threshold impacts.
+An impact below the fracture threshold but above 30% of it weakens the
+contacted voxel and its neighbors — damage accumulates proportional to
+how close the impact was to the threshold. At full damage (1.0), a voxel
+crumbles to air and may trigger a connectivity-based split. Damage is
+visible as darkening on the body's mesh (via reduced ambient occlusion
+baking) and decays at 0.05/s while the body is awake, so a body left
+alone gradually returns to pristine. This means a beam doesn't snap
+cleanly on the first hard hit — it cracks, darkens, and weakens
+progressively before finally breaking, matching how real materials fail.
 
 ### Bomb debris chips
 
