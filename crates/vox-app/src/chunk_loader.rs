@@ -99,9 +99,9 @@ impl ChunkLoader {
         }
         self.last_center_chunk = center;
 
-        let render_dist = self.quality.render_distance();
+        let render_dist = self.quality.render_distance(world.cfg.voxel_size_m);
         let detail_ring = self.quality.detail_ring();
-        let budget = self.quality.gen_budget();
+        let budget = self.quality.gen_budget(world.cfg.voxel_size_m);
 
         // Generate missing chunks (up to budget, nearest first).
         let generated = self.generate_missing(world, pipeline, gpu, center, render_dist, detail_ring, budget);
@@ -232,10 +232,14 @@ impl ChunkLoader {
             let clip_max = origin + IVec3::splat(CHUNK_SIZE as i32);
             world.set_clip(clip_min, clip_max);
 
-            const CANOPY_REACH_CHUNKS: i32 = 2;
-            for dy in -CANOPY_REACH_CHUNKS..=CANOPY_REACH_CHUNKS {
-                for dz in -CANOPY_REACH_CHUNKS..=CANOPY_REACH_CHUNKS {
-                    for dx in -CANOPY_REACH_CHUNKS..=CANOPY_REACH_CHUNKS {
+            // Canopy reach: trees are ~10m tall. At 0.5m voxels, chunk_m=16m
+            // so 1 chunk suffices. At 0.1m voxels, chunk_m=3.2m so we need
+            // ceil(10/3.2)+1 = 4 chunks. Compute from voxel size.
+            let chunk_m = CHUNK_SIZE as f32 * s;
+            let canopy_reach_chunks = ((10.0 / chunk_m).ceil() as i32 + 1).max(2);
+            for dy in -canopy_reach_chunks..=canopy_reach_chunks {
+                for dz in -canopy_reach_chunks..=canopy_reach_chunks {
+                    for dx in -canopy_reach_chunks..=canopy_reach_chunks {
                         let neighbor = IVec3::new(key.x + dx, key.y + dy, key.z + dz);
                         // Trees are structural terrain, not LOD detail —
                         // always root regardless of distance tier.
@@ -265,7 +269,7 @@ impl ChunkLoader {
     ) -> bool {
         let render_dist_sq = (render_dist + 1) as i64; // +1 for hysteresis
         let render_dist_sq = render_dist_sq * render_dist_sq;
-        let cap = self.quality.chunk_cap();
+        let cap = self.quality.chunk_cap(world.cfg.voxel_size_m);
 
         let to_evict: Vec<IVec3> = world
             .chunks()

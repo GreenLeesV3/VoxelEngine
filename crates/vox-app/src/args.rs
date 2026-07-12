@@ -2,6 +2,7 @@
 //! No external arg-parsing crate: the surface is tiny (three flags) and a
 //! dependency isn't worth it for this.
 
+use vox_core::consts::CHUNK_SIZE;
 use vox_core::WorldConfig;
 
 /// Streaming quality preset: controls render distance, tree detail ring,
@@ -15,14 +16,22 @@ pub enum Quality {
 }
 
 impl Quality {
-    /// Render distance in chunks (radius around player).
-    pub fn render_distance(self) -> i32 {
+    /// Render distance in meters (radius around player). Converted to
+    /// chunks based on voxel size so visibility is consistent regardless
+    /// of voxel granularity.
+    pub fn render_distance_m(self) -> f32 {
         match self {
-            Quality::Low => 4,
-            Quality::Medium => 8,
-            Quality::High => 16,
-            Quality::Ultra => 24,
+            Quality::Low => 64.0,
+            Quality::Medium => 128.0,
+            Quality::High => 256.0,
+            Quality::Ultra => 384.0,
         }
+    }
+    /// Render distance in chunks (computed from meters + voxel size,
+    /// capped at 24 to avoid explosion at small voxel sizes).
+    pub fn render_distance(self, voxel_size_m: f32) -> i32 {
+        let chunk_m = CHUNK_SIZE as f32 * voxel_size_m;
+        ((self.render_distance_m() / chunk_m).ceil() as i32).min(24)
     }
 
     /// Detail ring radius in chunks. Trees root only within this ring;
@@ -36,19 +45,23 @@ impl Quality {
         }
     }
 
-    /// Maximum chunks to generate per frame.
-    pub fn gen_budget(self) -> usize {
-        match self {
+    /// Maximum chunks to generate per frame. Scales up at small voxel
+    /// sizes so streaming keeps pace with the higher chunk count.
+    pub fn gen_budget(self, voxel_size_m: f32) -> usize {
+        let base = match self {
             Quality::Low => 2,
             Quality::Medium => 4,
             Quality::High => 8,
             Quality::Ultra => 12,
-        }
+        };
+        // At 0.5m: scale=1. At 0.1m: scale=5 (capped at 8).
+        let scale = ((0.5 / voxel_size_m) as usize).clamp(1, 8);
+        base * scale
     }
 
     /// Maximum loaded chunk count (soft cap for eviction).
-    pub fn chunk_cap(self) -> usize {
-        let r = self.render_distance() as usize;
+    pub fn chunk_cap(self, voxel_size_m: f32) -> usize {
+        let r = self.render_distance(voxel_size_m) as usize;
         // (2r+1)^2 * height_chunks estimate, plus headroom.
         let side = 2 * r + 1;
         side * side * 4 + 64
