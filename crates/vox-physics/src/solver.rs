@@ -587,7 +587,19 @@ impl PhysicsWorld {
                 body.omega = body.omega.normalize() * MAX_ANGULAR_SPEED_RAD_S;
             }
             debug_assert!(body.vel.is_finite() && body.pos.is_finite());
-            world_contacts(body, slot, &mut contacts, &mut lookup);
+            // Jointed bodies skip world contacts: the per-voxel surface
+            // contact system generates dozens of contacts per segment,
+            // and interleaving those with joint constraints across 8
+            // solver iterations creates a feedback loop that produces
+            // wild velocity oscillation (the rope "freaks out"). The
+            // joints handle the rope's physical behavior; terrain
+            // collision is skipped to keep the solver stable. Rope is
+            // still cuttable by tools (dig/bomb/laser carve directly).
+            if !self.joints.iter().any(|j| {
+                j.body_a == slot || j.body_b == slot
+            }) {
+                world_contacts(body, slot, &mut contacts, &mut lookup);
+            }
         }
 
         // Body-body narrowphase over broadphase candidates. One staging
