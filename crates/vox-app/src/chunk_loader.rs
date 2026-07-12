@@ -284,6 +284,25 @@ impl ChunkLoader {
         world.set_suppress_edit_tracking(false);
     }
 
+    /// Stamp ALL trees from the cache directly into the world. Much faster
+    /// than per-chunk stamping: iterates ~1375 trees once instead of 8192
+    /// chunks × 125 neighbor lookups with clip guards per chunk.
+    pub fn stamp_all_trees(&self, world: &mut World) {
+        world.set_suppress_edit_tracking(true);
+        world.clear_clip();
+
+        let mut count = 0usize;
+        for trees in self.tree_cache.values() {
+            for tree in trees {
+                stamp_tree(world, tree, self.tree_mats);
+                count += 1;
+            }
+        }
+
+        world.set_suppress_edit_tracking(false);
+        tracing::info!(trees = count, "trees stamped");
+    }
+
     /// Generate terrain for all keys in parallel (no World borrow needed).
     /// Returns (key, chunk, band) tuples for sequential insertion + tree stamping.
     pub fn par_fill_terrain(&self, keys: &[IVec3], s: f32) -> Vec<(IVec3, Chunk, ChunkBand)> {

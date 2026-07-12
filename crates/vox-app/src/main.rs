@@ -107,13 +107,13 @@ fn build_world_upfront(
     world.set_suppress_edit_tracking(false);
     tracing::info!(chunks = world.chunk_count(), "terrain inserted");
 
-    // Phase 2: Precompute tree plans in parallel, then stamp sequentially.
+    // Phase 2: Precompute tree plans in parallel, then stamp all at once.
+    // Each tree is stamped once directly into the world — no per-chunk
+    // clip guards or 125-neighbor lookups. ~1375 trees vs 1M lookups.
     tracing::info!("precomputing tree plans (parallel)...");
     chunk_loader.precompute_trees(&world.cfg, &keys);
-    tracing::info!("stamping trees...");
-    for (key, band) in &tree_targets {
-        chunk_loader.stamp_trees(&mut world, *key, *band);
-    }
+    tracing::info!("stamping all trees...");
+    chunk_loader.stamp_all_trees(&mut world);
     tracing::info!(chunks = world.chunk_count(), "world generation complete");
     Ok(world)
 }
