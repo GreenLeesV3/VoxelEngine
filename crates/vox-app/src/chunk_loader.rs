@@ -169,7 +169,7 @@ impl ChunkLoader {
 
         let mut generated = false;
         for (_, key) in missing.into_iter() {
-            self.generate_chunk(world, pipeline, gpu, key, center, detail_ring);
+            self.generate_chunk(world, key, center, detail_ring);
             generated = true;
         }
         generated
@@ -197,7 +197,7 @@ impl ChunkLoader {
                     if key.y < chunk_min.y || key.y > chunk_max.y { continue; }
                     if key.z < chunk_min.z || key.z > chunk_max.z { continue; }
                     if world.chunk_at(key).is_some() { continue; }
-                    self.generate_chunk(world, pipeline, gpu, key, center, detail_ring);
+                    self.generate_chunk(world, key, center, detail_ring);
                 }
             }
         }
@@ -216,14 +216,12 @@ impl ChunkLoader {
     /// out by the detail-ring check → only near-neighbor canopy stamps.
     /// This keeps trees whole across ALL chunk boundaries, not just the
     /// detail-ring boundary.
-    fn generate_chunk(
+    pub fn generate_chunk(
         &self,
         world: &mut World,
-        _pipeline: &mut VoxelPipeline,
-        _gpu: &Gpu,
         key: IVec3,
-        center_chunk: IVec3,
-        detail_ring: i32,
+        _center_chunk: IVec3,
+        _detail_ring: i32,
     ) {
         let s = world.cfg.voxel_size_m;
 

@@ -35,7 +35,7 @@ use tools::{CarveOutcome, HOTBAR, Tool, Tools};
 use vox_core::consts::CHUNK_SIZE;
 use vox_core::{
     FrameProfile, FxHashMap, FxHashSet, MaterialId, MaterialRegistry, ScopedTimer, Tunables,
-    WorldConfig, chunk_origin, voxel_at,
+    WorldConfig, chunk_of, chunk_origin, voxel_at,
 };
 use vox_debug::hud::HudState;
 use vox_debug::{DebugOverlay, OverlayState};
@@ -62,18 +62,46 @@ fn assets_dir() -> PathBuf {
     PathBuf::from("assets")
 }
 
-/// Build an empty streaming world: validates the config, creates the
-/// `World`, attaches the solidity table — but performs NO upfront terrain
-/// or tree generation. The `ChunkLoader` generates chunks lazily around
-/// the player instead.
-fn build_streaming_world(
+/// Build the world upfront: generate ALL chunks at startup. This is the
+/// original approach — slower startup but correct tree generation and
+/// no streaming hitches. The ChunkLoader is kept for quality presets
+/// but not used for lazy generation.
+fn build_world_upfront(
     cfg: WorldConfig,
     registry: &MaterialRegistry,
+    chunk_loader: &ChunkLoader,
 ) -> Result<World, Box<dyn std::error::Error + Send + Sync>> {
     cfg.validate()?;
     let mut world = World::new(cfg);
     world.set_solid_table(solid_table(registry));
-    // No upfront generation — ChunkLoader generates lazily.
+
+    // Generate every chunk in the world extent.
+    let s = world.cfg.voxel_size_m;
+    let (bmin, bmax) = world.bounds_voxels();
+    let chunk_min = chunk_of(bmin);
+    let chunk_max = chunk_of(bmax - IVec3::ONE);
+    let total = (chunk_max.x - chunk_min.x + 1) as u64
+        * (chunk_max.y - chunk_min.y + 1) as u64
+        * (chunk_max.z - chunk_min.z + 1) as u64;
+    tracing::info!(total_chunks = total, chunk_m = CHUNK_SIZE as f32 * s, "generating world upfront");
+
+    let center = IVec3::ZERO;
+    let detail_ring = 999; // No gate — all trees root.
+    let mut count = 0u64;
+    for cy in chunk_min.y..=chunk_max.y {
+        for cz in chunk_min.z..=chunk_max.z {
+            for cx in chunk_min.x..=chunk_max.x {
+                let key = IVec3::new(cx, cy, cz);
+                chunk_loader.generate_chunk(&mut world, key, center, detail_ring);
+                count += 1;
+                if count % 1000 == 0 {
+                    tracing::info!(generated = count, total, "world gen progress");
+                }
+            }
+        }
+    }
+    tracing::info!(chunks = world.chunk_count(), "world generation complete");
+
     Ok(world)
 }
 
@@ -523,16 +551,16 @@ impl VoxApp {
         let grass_shader = std::fs::read_to_string(assets.join("shaders/grass.wgsl"))?;
         let sky_shader = std::fs::read_to_string(assets.join("shaders/sky.wgsl"))?;
         let build_start = Instant::now();
-        let world = build_streaming_world(cfg, &registry)?;
-        // Terrain generator + materials for lazy chunk generation.
-        let terrain = TerrainGen::new(&world.cfg);
+        // Create terrain gen + chunk_loader first (needed for upfront gen).
+        let terrain = TerrainGen::new(&cfg);
         let terrain_mats = TerrainMaterials::from_registry(&registry)?;
         let tree_mats = TreeMaterials::from_registry(&registry)?;
-        let chunk_loader = ChunkLoader::new(&world.cfg, quality, terrain, terrain_mats, tree_mats);
+        let chunk_loader = ChunkLoader::new(&cfg, quality, terrain, terrain_mats, tree_mats);
+        let world = build_world_upfront(cfg, &registry, &chunk_loader)?;
         tracing::info!(
             chunks = world.chunk_count(),
             elapsed_ms = build_start.elapsed().as_millis() as u64,
-            "streaming world initialized"
+            "world generated upfront"
         );
 
         let size = window.inner_size();
@@ -655,11 +683,8 @@ impl VoxApp {
             sky_pipeline,
             bloom_ssao,
         };
-        // Pre-generate spawn chunks before meshing and surface height
-        // scan — both need solid voxels to exist. Disjoint field borrows.
+        // World is already fully generated upfront — no spawn pre-gen needed.
         let center = Vec3::from(app.world.cfg.extent_m) * 0.5;
-        app.chunk_loader.pregenerate_spawn(center, &mut app.world, &mut app.pipeline, &app.gpu);
-
         app.initial_mesh();
 
         let surface = TerrainGen::surface_height_m(&app.world, center.x, center.z)
@@ -2008,14 +2033,13 @@ impl App for VoxApp {
             }
         }
 
-        // Stream chunks around the player: generate missing, evict beyond range.
-        let player_pos = self.player.ctrl.pos;
-        let _streamed = self.chunk_loader.update(
-            player_pos,
-            &mut self.world,
-            &mut self.pipeline,
-            &self.gpu,
-        );
+        // World is generated upfront — no streaming needed.
+        // let _streamed = self.chunk_loader.update(
+        //     self.player.ctrl.pos,
+        //     &mut self.world,
+        //     &mut self.pipeline,
+        //     &self.gpu,
+        // );
         // Wake any resting debris whose ground was just carved/edited from
         // under it, then remesh: absorb edits, dispatch to workers, upload.
         let eye = self.player.eye(timing.alpha);
