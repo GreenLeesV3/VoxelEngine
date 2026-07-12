@@ -69,7 +69,7 @@ fn assets_dir() -> PathBuf {
 fn build_world_upfront(
     cfg: WorldConfig,
     registry: &MaterialRegistry,
-    chunk_loader: &ChunkLoader,
+    chunk_loader: &mut ChunkLoader,
 ) -> Result<World, Box<dyn std::error::Error + Send + Sync>> {
     cfg.validate()?;
     let mut world = World::new(cfg);
@@ -107,7 +107,9 @@ fn build_world_upfront(
     world.set_suppress_edit_tracking(false);
     tracing::info!(chunks = world.chunk_count(), "terrain inserted");
 
-    // Phase 2: Stamp trees sequentially (cross-chunk writes need ordering).
+    // Phase 2: Precompute tree plans in parallel, then stamp sequentially.
+    tracing::info!("precomputing tree plans (parallel)...");
+    chunk_loader.precompute_trees(&world.cfg, &keys);
     tracing::info!("stamping trees...");
     for (key, band) in &tree_targets {
         chunk_loader.stamp_trees(&mut world, *key, *band);
@@ -566,8 +568,8 @@ impl VoxApp {
         let terrain = TerrainGen::new(&cfg);
         let terrain_mats = TerrainMaterials::from_registry(&registry)?;
         let tree_mats = TreeMaterials::from_registry(&registry)?;
-        let chunk_loader = ChunkLoader::new(&cfg, quality, terrain, terrain_mats, tree_mats);
-        let world = build_world_upfront(cfg, &registry, &chunk_loader)?;
+        let mut chunk_loader = ChunkLoader::new(&cfg, quality, terrain, terrain_mats, tree_mats);
+        let world = build_world_upfront(cfg, &registry, &mut chunk_loader)?;
         tracing::info!(
             chunks = world.chunk_count(),
             elapsed_ms = build_start.elapsed().as_millis() as u64,

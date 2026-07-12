@@ -8,8 +8,8 @@
 use rayon::prelude::*;
 use glam::{IVec3, Vec3};
 use vox_core::consts::CHUNK_SIZE;
-use vox_core::{WorldConfig, chunk_of, chunk_origin};
-use vox_gen::{BiomeMap, ChunkBand, TerrainGen, TerrainMaterials, TreeMaterials, stamp_tree, trees_for_chunk};
+use vox_core::{FxHashMap, WorldConfig, chunk_of, chunk_origin};
+use vox_gen::{BiomeMap, ChunkBand, TerrainGen, TerrainMaterials, TreeInstance, TreeMaterials, stamp_tree, trees_for_chunk};
 use vox_render::{Gpu, VoxelPipeline};
 use vox_world::{AIR, Chunk, World};
 
@@ -25,6 +25,8 @@ pub struct ChunkLoader {
     terrain_mats: TerrainMaterials,
     tree_mats: TreeMaterials,
     biomes: BiomeMap,
+    /// Cached tree plans: chunk key → trees rooted in that chunk.
+    tree_cache: FxHashMap<IVec3, Vec<TreeInstance>>,
 }
 
 impl ChunkLoader {
@@ -42,7 +44,22 @@ impl ChunkLoader {
             terrain_mats,
             tree_mats,
             biomes: BiomeMap::new(cfg.seed),
+            tree_cache: FxHashMap::default(),
         }
+    }
+
+    /// Precompute tree plans for all chunks in parallel. Call once after
+    /// construction, before stamp_trees. This avoids calling trees_for_chunk
+    /// ~1M times during sequential stamping.
+    pub fn precompute_trees(&mut self, cfg: &WorldConfig, keys: &[IVec3]) {
+        let terrain = &self.terrain;
+        let tree_map: FxHashMap<IVec3, Vec<TreeInstance>> = keys.par_iter()
+            .map(|&key| {
+                let trees = trees_for_chunk(cfg, terrain, key);
+                (key, trees)
+            })
+            .collect();
+        self.tree_cache = tree_map;
     }
 
     pub fn quality(&self) -> Quality {
@@ -254,9 +271,10 @@ impl ChunkLoader {
             for dz in -canopy_reach..=canopy_reach {
                 for dx in -canopy_reach..=canopy_reach {
                     let neighbor = IVec3::new(key.x + dx, key.y + dy, key.z + dz);
-                    let trees = trees_for_chunk(&world.cfg, &self.terrain, neighbor);
-                    for tree in &trees {
-                        stamp_tree(world, tree, self.tree_mats);
+                    if let Some(trees) = self.tree_cache.get(&neighbor) {
+                        for tree in trees {
+                            stamp_tree(world, tree, self.tree_mats);
+                        }
                     }
                 }
             }
