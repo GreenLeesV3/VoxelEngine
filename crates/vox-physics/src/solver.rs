@@ -741,7 +741,14 @@ impl PhysicsWorld {
                     continue;
                 }
                 let lambda = -vn / (keff + j.compliance);
-                // Don't accumulate — each iteration applies its own correction.
+                // Clamp the impulse to prevent solver divergence in joint
+                // chains: when contacts and joints compete (rope segment
+                // touching terrain), successive iterations can amplify the
+                // impulse. Cap at the impulse that would bring the relative
+                // velocity to MAX_SPEED — enough to constrain, not enough
+                // to diverge.
+                let max_lambda = MAX_SPEED / keff;
+                let lambda = lambda.clamp(-max_lambda, max_lambda);
                 let p = n * lambda;
                 let (ba, bb) = two_mut(&mut self.slots, j.body_a, j.body_b);
                 if !asleep_a {
@@ -809,6 +816,22 @@ impl PhysicsWorld {
             let Some(body) = entry else { continue };
             if body.sleep.asleep {
                 continue;
+            }
+            // NaN guard: the interleaved contact+joint velocity solve can
+            // produce non-finite velocities when jointed bodies (rope
+            // chains) generate competing world contacts — the impulses
+            // oscillate across solver iterations. Without this guard the
+            // NaN propagates into position (`pos += vel * h`), making the
+            // body invisible (NaN transforms produce no rasterized
+            // geometry). Reset to zero instead of integrating garbage.
+            if !body.vel.is_finite() {
+                body.vel = Vec3::ZERO;
+            }
+            if !body.omega.is_finite() {
+                body.omega = Vec3::ZERO;
+            }
+            if body.vel.length() > MAX_SPEED {
+                body.vel = body.vel.normalize() * MAX_SPEED;
             }
             body.pos += body.vel * h;
             let mut damping = ANGULAR_DAMPING_AIR;
