@@ -15,8 +15,8 @@ use vox_world::{AIR, Chunk, World};
 
 use crate::args::Quality;
 
-/// Don't re-scan unless the player moved at least this many chunks.
-const RELOAD_THRESHOLD_CHUNKS: i32 = 1;
+/// Don't re-scan unless the player moved at least this many meters.
+const RELOAD_THRESHOLD_M: f32 = 8.0;
 
 pub struct ChunkLoader {
     quality: Quality,
@@ -75,8 +75,9 @@ impl ChunkLoader {
         gpu: &Gpu,
     ) {
         let center = Self::player_chunk(player_pos, world.cfg.voxel_size_m);
+        let s = world.cfg.voxel_size_m;
+        let radius = self.quality.render_distance(s).max(2);
         let ring = self.quality.detail_ring();
-        let radius = ring.max(2); // At least 2 chunks for spawn.
         self.generate_ring(world, pipeline, gpu, center, radius, ring);
         self.last_center_chunk = center;
     }
@@ -93,8 +94,12 @@ impl ChunkLoader {
         let s = world.cfg.voxel_size_m;
         let center = Self::player_chunk(player_pos, s);
 
-        // Only act when the player crossed a chunk boundary.
-        if (center - self.last_center_chunk).abs().max_element() < RELOAD_THRESHOLD_CHUNKS {
+        // Only act when the player moved enough meters (not every chunk
+        // crossing — at 0.1m voxels chunks are only 3.2m, too frequent).
+        let chunk_m = CHUNK_SIZE as f32 * s;
+        let moved_chunks = (center - self.last_center_chunk).abs().max_element();
+        let moved_m = moved_chunks as f32 * chunk_m;
+        if moved_m < RELOAD_THRESHOLD_M {
             return false;
         }
         self.last_center_chunk = center;
