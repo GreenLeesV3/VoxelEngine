@@ -19,10 +19,11 @@ setlocal EnableDelayedExpansion
 :: ============================================================
 
 set "EXPECTED_SHA1=9bef1128717f958171a4afac3ed78ee2bb4e86ce"
-set "DEST_DIR=%~dp0roms"
+set "ROOT=%~dp0.."
+set "DEST_DIR=%ROOT%\roms"
 set "DEST=%DEST_DIR%\baserom.us.z64"
 
-:: --- Find the ROM file ---
+::: --- Find the ROM file ---
 set "ROM="
 
 set "ARG=%~1"
@@ -31,9 +32,33 @@ set "ROM=!ARG!"
 goto :found_rom
 
 :search_rom
-for /r "%~dp0" %%f in (*.z64) do (
-    if not defined ROM set "ROM=%%f"
+:: Prefer existing baserom.us.z64 if present
+if exist "%DEST%" (
+    set "ROM=%DEST%"
+    goto :found_rom
 )
+:: Iterate all .z64 candidates, pick the one whose SHA1 matches SM64
+for /r "%ROOT%" %%f in (*.z64) do (
+    if not defined ROM (
+        call :check_sha1 "%%f"
+        if !SHA1_OK! equ 1 set "ROM=%%f"
+    )
+)
+goto :found_rom
+
+:check_sha1
+set "SHA1_OK=0"
+set "CAND_HASH="
+set "CL=0"
+for /f "skip=1 tokens=*" %%a in ('certutil -hashfile "%~1" SHA1 2^>nul') do (
+    set /a CL+=1
+    if !CL! equ 1 (
+        set "CAND_HASH=%%a"
+        set "CAND_HASH=!CAND_HASH: =!"
+    )
+)
+if /i "!CAND_HASH!"=="%EXPECTED_SHA1%" set "SHA1_OK=1"
+goto :eof
 
 :found_rom
 
@@ -92,21 +117,25 @@ if /i "!HASH!" neq "%EXPECTED_SHA1%" (
     echo.
     exit /b 1
 )
-
-echo.
-echo  [OK] ROM validated successfully!
-
-:: --- Copy to roms/baserom.us.z64 ---
+::: --- Copy to roms/baserom.us.z64 (skip if already there) ---
 if not exist "%DEST_DIR%" mkdir "%DEST_DIR%"
 
-copy /y "%ROM%" "%DEST%" >nul 2>&1
-if errorlevel 1 (
-    echo.
-    echo  [ERROR] Failed to copy ROM to "%DEST%"
-    exit /b 1
+:: Canonicalize both paths so same-file is detected regardless of ..\ or relative paths
+for %%I in ("%ROM%") do set "ROM_ABS=%%~fI"
+for %%I in ("%DEST%") do set "DEST_ABS=%%~fI"
+
+if /i "!ROM_ABS!"=="!DEST_ABS!" (
+    echo  ROM already in place: %DEST%
+) else (
+    copy /y "%ROM%" "%DEST%" >nul 2>&1
+    if errorlevel 1 (
+        echo.
+        echo  [ERROR] Failed to copy ROM to "%DEST%"
+        exit /b 1
+    )
+    echo  Copied to: %DEST%
 )
 
-echo  Copied to: %DEST%
 echo.
 echo  ========================================
 echo   Mario mode is now ready!

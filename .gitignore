@@ -11,9 +11,10 @@ roms/*.z64
 roms/*.n64
 roms/*.v64
 "Super Mario 64 (USA)/"
+
+# CazToon shader pack — reference only, not our code
 CazToon_extracted/
 CazToon_1.2.5.zip
-pointblank_decompiled/
 
 # Weapon assets — local prototyping only, never committed
 assets/weapons/*.glb
